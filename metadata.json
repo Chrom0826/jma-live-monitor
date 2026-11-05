@@ -1,0 +1,1 @@
+{"name":"JMA LIVE MONITOR — 気象庁防災XML 常時ループ型ライブモニター","description":"気象庁防災情報XMLフィード・高解像度雨雲レーダー・アメダス実況・地震情報を24時間自動巡回表示する防災ライブモニター＆スクリーンセーバー","requestFramePermissions":[],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}
