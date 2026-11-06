@@ -311,6 +311,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   const geoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const muniGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const muniBorderLayerRef = useRef<L.GeoJSON | null>(null);
+  const tsunamiCasingLayerRef = useRef<L.GeoJSON | null>(null);
   const tsunamiGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
   const hrpnsLayerRef = useRef<L.GridLayer | null>(null);
@@ -653,7 +654,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     }
 
     const hasMuniPolygons =
-      effectiveScene === 'warnings' && Boolean(class20GeoJsonData);
+      (effectiveScene === 'warnings' || effectiveScene === 'tsunami') &&
+      Boolean(class20GeoJsonData);
 
     const layer = L.geoJSON(geoJsonData, {
       pane: 'japanPane',
@@ -701,13 +703,28 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       muniBorderLayerRef.current = null;
     }
 
-    if (effectiveScene !== 'warnings' || !class20GeoJsonData) return;
+    if (
+      (effectiveScene !== 'warnings' && effectiveScene !== 'tsunami') ||
+      !class20GeoJsonData
+    )
+      return;
 
     const muniMap = data.muniSeverityMap || {};
 
     const muniLayer = L.geoJSON(class20GeoJsonData, {
       pane: 'muniPane',
       style: (feature) => {
+        if (effectiveScene === 'tsunami') {
+          return {
+            pane: 'muniPane',
+            renderer: muniCanvasRendererRef.current ?? undefined,
+            fillColor: '#28303D',
+            fillOpacity: 0.98,
+            color: '#151922',
+            weight: 0.65,
+            opacity: 0.9,
+          };
+        }
         const code = String(feature?.properties?.code || '');
         const sev: WarningSeverity = muniMap[code] || 'normal';
         const fillColor =
@@ -758,10 +775,15 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   ]);
 
   // Render JMA Tsunami Coastline Vector Layer (`tsunami.json`) in `tsunami` scene
+  // Rendered with dual-pass (underlay dark casing + bold colored warning stroke)
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
 
+    if (tsunamiCasingLayerRef.current) {
+      map.removeLayer(tsunamiCasingLayerRef.current);
+      tsunamiCasingLayerRef.current = null;
+    }
     if (tsunamiGeoJsonLayerRef.current) {
       map.removeLayer(tsunamiGeoJsonLayerRef.current);
       tsunamiGeoJsonLayerRef.current = null;
@@ -777,6 +799,48 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       if (a.name) areaMapByName[a.name] = a;
     }
 
+    // 1. Underlay dark casing stroke layer (eliminates gaps / outlines coastline cleanly)
+    const casingLayer = L.geoJSON(tsunamiGeoJsonData, {
+      pane: 'vectorOverlayPane',
+      style: (feature) => {
+        const code = String(
+          feature?.properties?.code || feature?.properties?.areaCode || ''
+        );
+        const name = String(feature?.properties?.name || '');
+        const matched = areaMapByCode[code] || areaMapByName[name];
+        const grade = matched?.grade;
+        if (grade && grade !== 'Unknown') {
+          const casingWeight =
+            grade === 'MajorWarning'
+              ? 16
+              : grade === 'Warning'
+                ? 14.5
+                : grade === 'Watch'
+                  ? 12.5
+                  : 11;
+          return {
+            pane: 'vectorOverlayPane',
+            renderer: overlayRendererRef.current ?? undefined,
+            color: '#050810',
+            weight: casingWeight,
+            opacity: 0.95,
+            lineCap: 'round',
+            lineJoin: 'round',
+          };
+        }
+        return {
+          pane: 'vectorOverlayPane',
+          renderer: overlayRendererRef.current ?? undefined,
+          color: '#000000',
+          weight: 0,
+          opacity: 0,
+        };
+      },
+      interactive: false,
+    }).addTo(map);
+    tsunamiCasingLayerRef.current = casingLayer;
+
+    // 2. Top warning color stroke layer (Bold JMA disaster broadcast aesthetic)
     const tsunamiLayer = L.geoJSON(tsunamiGeoJsonData, {
       pane: 'vectorOverlayPane',
       style: (feature) => {
@@ -790,12 +854,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
           const gradeStyle = getTsunamiGradeStyle(grade);
           const weight =
             grade === 'MajorWarning'
-              ? 6.5
+              ? 11.5
               : grade === 'Warning'
-                ? 5.0
+                ? 10.0
                 : grade === 'Watch'
-                  ? 4.0
-                  : 3.0;
+                  ? 8.5
+                  : 7.5;
           return {
             pane: 'vectorOverlayPane',
             renderer: overlayRendererRef.current ?? undefined,
@@ -909,6 +973,113 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       };
     }
     if (effectiveScene === 'tsunami') {
+      const hypoLat =
+        typeof activeTsunamiForecast?.lat === 'number' &&
+        !Number.isNaN(activeTsunamiForecast.lat)
+          ? activeTsunamiForecast.lat
+          : typeof selectedEarthquake?.lat === 'number' &&
+              !Number.isNaN(selectedEarthquake.lat)
+            ? selectedEarthquake.lat
+            : null;
+      const hypoLon =
+        typeof activeTsunamiForecast?.lon === 'number' &&
+        !Number.isNaN(activeTsunamiForecast.lon)
+          ? activeTsunamiForecast.lon
+          : typeof selectedEarthquake?.lon === 'number' &&
+              !Number.isNaN(selectedEarthquake.lon)
+            ? selectedEarthquake.lon
+            : null;
+
+      const areaForecasts = activeTsunamiForecast?.areas || [];
+      const activeAreaCodes = new Set<string>();
+      const activeAreaNames = new Set<string>();
+      for (const a of areaForecasts) {
+        if (a.grade && a.grade !== 'Unknown') {
+          if (a.code) activeAreaCodes.add(a.code);
+          if (a.name) activeAreaNames.add(a.name);
+        }
+      }
+
+      const allLats: number[] = [];
+      const allLons: number[] = [];
+
+      if (hypoLat !== null && hypoLon !== null) {
+        allLats.push(hypoLat);
+        allLons.push(hypoLon);
+      }
+
+      if (tsunamiGeoJsonData && Array.isArray(tsunamiGeoJsonData.features)) {
+        for (const f of tsunamiGeoJsonData.features) {
+          const code = String(
+            f?.properties?.code || f?.properties?.areaCode || ''
+          );
+          const name = String(f?.properties?.name || '');
+          if (activeAreaCodes.has(code) || activeAreaNames.has(name)) {
+            const geom = f.geometry;
+            if (!geom) continue;
+            if (geom.type === 'LineString' && Array.isArray(geom.coordinates)) {
+              for (const pt of geom.coordinates) {
+                if (Array.isArray(pt) && pt.length >= 2) {
+                  allLons.push(Number(pt[0]));
+                  allLats.push(Number(pt[1]));
+                }
+              }
+            } else if (
+              geom.type === 'MultiLineString' &&
+              Array.isArray(geom.coordinates)
+            ) {
+              for (const line of geom.coordinates) {
+                if (Array.isArray(line)) {
+                  for (const pt of line) {
+                    if (Array.isArray(pt) && pt.length >= 2) {
+                      allLons.push(Number(pt[0]));
+                      allLats.push(Number(pt[1]));
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (allLats.length > 0 && allLons.length > 0) {
+        const minLat = Math.min(...allLats);
+        const maxLat = Math.max(...allLats);
+        const minLon = Math.min(...allLons);
+        const maxLon = Math.max(...allLons);
+
+        const latSpan = maxLat - minLat;
+        const lonSpan = maxLon - minLon;
+        const maxSpan = Math.max(latSpan, lonSpan * 0.7);
+
+        let targetZoom = 5.2;
+        if (maxSpan <= 1.2) {
+          targetZoom = 7.5;
+        } else if (maxSpan <= 2.2) {
+          targetZoom = 6.8;
+        } else if (maxSpan <= 3.8) {
+          targetZoom = 6.2;
+        } else if (maxSpan <= 6.0) {
+          targetZoom = 5.7;
+        } else if (maxSpan <= 9.0) {
+          targetZoom = 5.2;
+        } else {
+          targetZoom = 4.8;
+        }
+
+        // Slightly offset lon to the east so the feature center isn't covered by the right panel
+        const lonOffset = targetZoom >= 6.5 ? 0.35 : 0.8;
+
+        return {
+          center: [
+            (minLat + maxLat) / 2,
+            (minLon + maxLon) / 2 + lonOffset,
+          ],
+          zoom: targetZoom,
+        };
+      }
+
       return {
         center: [37.2, 137.5],
         zoom: 5.2,
@@ -1022,7 +1193,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     activeVolcano.lon,
     activeEew?.id,
     activeEew?.serial,
+    activeTsunamiForecast?.id,
+    activeTsunamiForecast?.lat,
+    activeTsunamiForecast?.lon,
     activeTsunamiForecast?.areas.length,
+    tsunamiGeoJsonData,
   ]);
 
   // Update JMA High-Resolution Precipitation Nowcast (`hrpns`) + Lightning Nowcast (`thns`)
@@ -1899,6 +2074,49 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         }).addTo(group);
       }
     }
+
+    if (effectiveScene === 'tsunami') {
+      const hypoLat =
+        typeof activeTsunamiForecast?.lat === 'number' &&
+        !Number.isNaN(activeTsunamiForecast.lat)
+          ? activeTsunamiForecast.lat
+          : typeof selectedEarthquake?.lat === 'number' &&
+              !Number.isNaN(selectedEarthquake.lat)
+            ? selectedEarthquake.lat
+            : null;
+      const hypoLon =
+        typeof activeTsunamiForecast?.lon === 'number' &&
+        !Number.isNaN(activeTsunamiForecast.lon)
+          ? activeTsunamiForecast.lon
+          : typeof selectedEarthquake?.lon === 'number' &&
+              !Number.isNaN(selectedEarthquake.lon)
+            ? selectedEarthquake.lon
+            : null;
+
+      if (hypoLat !== null && hypoLon !== null) {
+        const epiIcon = L.divIcon({
+          className: 'tsunami-epicenter-marker',
+          html: `
+            <div style="position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;transform:translate(-50%, -50%);">
+              <svg width="34" height="34" viewBox="0 0 32 32" fill="none" style="filter: drop-shadow(0 2px 5px rgba(0,0,0,0.95));">
+                <path d="M6 6L26 26M26 6L6 26" stroke="#050810" stroke-width="8" stroke-linecap="round"/>
+                <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="4.8" stroke-linecap="round"/>
+                <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <div style="margin-top:2px;white-space:nowrap;background:rgba(15,23,42,0.94);border:1px solid #DC2626;border-radius:2px;padding:1px 6px;font-family:'JetBrains Mono',sans-serif;font-size:11px;font-weight:bold;color:#FCA5A5;box-shadow:0 2px 6px rgba(0,0,0,0.85);">
+                ✕ 震央
+              </div>
+            </div>
+          `,
+          iconSize: [34, 52],
+          iconAnchor: [17, 17],
+        });
+        L.marker([hypoLat, hypoLon], {
+          icon: epiIcon,
+          zIndexOffset: 3000,
+        }).addTo(group);
+      }
+    }
   }, [
     effectiveScene,
     data,
@@ -2072,6 +2290,35 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
           <span className="text-[10px] font-mono text-neutral-400 ml-1">
             (拡大時は全観測地点を表示)
           </span>
+        </div>
+      )}
+
+      {/* JMA-style Tsunami Map Legend (Matches JMA official broadcast) */}
+      {effectiveScene === 'tsunami' && (
+        <div
+          data-testid="tsunami-map-legend"
+          className="absolute bottom-3 right-3 z-[400] bg-[#111318]/94 border border-neutral-700/80 px-3 py-2 text-xs space-y-1 font-mono shadow-xl pointer-events-none select-none"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-red-500 font-bold text-sm leading-none">✕</span>
+            <span className="text-neutral-200">震央</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-3.5 h-1.5 bg-[#C026D3] rounded-xs" />
+            <span className="text-neutral-200">大津波警報</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-3.5 h-1.5 bg-[#EF4444] rounded-xs" />
+            <span className="text-neutral-200">津波警報</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-3.5 h-1.5 bg-[#FACC15] rounded-xs" />
+            <span className="text-neutral-200">津波注意報</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-3.5 h-1.5 bg-[#38BDF8] rounded-xs" />
+            <span className="text-neutral-200">津波予報（若干の海面変動）</span>
+          </div>
         </div>
       )}
     </div>

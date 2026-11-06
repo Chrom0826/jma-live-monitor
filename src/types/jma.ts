@@ -334,6 +334,9 @@ export interface TsunamiForecastReport {
   magnitude?: number;
   lat?: number;
   lon?: number;
+  depthKm?: number;
+  maxScaleLabel?: string;
+  occurrenceTime?: string;
   headline?: string;
   areas: TsunamiForecastArea[];
 }

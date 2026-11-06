@@ -4,7 +4,10 @@ import {
   computeEewWaveRadiiKm,
   formatEewArrivalLabel,
   formatEewScaleRange,
+  formatOccurrenceTimeJa,
+  getSeismicScaleBadgeStyle,
   getTsunamiAlertSeverity,
+  parseJmaTsunamiDetail,
   parseP2PEew,
   parseP2PTsunami,
   shouldReplaceEew,
@@ -836,6 +839,62 @@ test('P2PQuake EEW (code 556) & Tsunami (code 552) parsing, wave radii propagati
   const loopWithTsunami = [...DEFAULT_NORMAL_LOOP_SCENES, 'tsunami' as const];
   assert.equal(getNextSceneId('earthquake', loopWithTsunami), 'tsunami');
   assert.equal(getNextSceneId('tsunami', loopWithTsunami), 'radar'); // advances to rain radar!
+
+  // 7. Occurrence time formatting and Seismic scale badge styles
+  assert.equal(formatOccurrenceTimeJa('2026/11/06 19:39:00'), '11月06日 19時39分頃');
+  assert.equal(formatOccurrenceTimeJa('2026-11-06T19:39:00+09:00'), '11月06日 19時39分頃');
+  assert.equal(formatOccurrenceTimeJa(null), '-');
+
+  const style7 = getSeismicScaleBadgeStyle('7');
+  assert.equal(style7.bg, '#800080');
+  const style6Plus = getSeismicScaleBadgeStyle('6強');
+  assert.equal(style6Plus.bg, '#A50021');
+  const style3 = getSeismicScaleBadgeStyle('3');
+  assert.equal(style3.bg, '#38BDF8');
+
+  // 8. JMA Tsunami Detail parsing with earthquake coordinates, depth, occurrence time
+  const sampleJmaTsunamiDetail = {
+    Head: {
+      EventID: '20261106193900',
+      ReportDateTime: '2026-11-06T19:53:00+09:00',
+      InfoType: '発表',
+    },
+    Body: {
+      Earthquake: {
+        OriginTime: '2026-11-06T19:39:00+09:00',
+        Hypocenter: {
+          Area: {
+            Name: '関東東方沖',
+            Coordinate: '+35.5+141.6-10000/',
+          },
+        },
+        Magnitude: '6.1',
+        MaxInt: '3',
+      },
+      Tsunami: {
+        Forecast: {
+          Item: [
+            {
+              Category: { Kind: { Name: '津波予報' } },
+              Area: { Code: '310', Name: '千葉県九十九里・外房' },
+              MaxHeight: { Condition: '0.2m未満' },
+            },
+          ],
+        },
+      },
+    },
+  };
+  const parsedJmaTsunami = parseJmaTsunamiDetail(sampleJmaTsunamiDetail);
+  assert.ok(parsedJmaTsunami);
+  assert.equal(parsedJmaTsunami.hypocenterName, '関東東方沖');
+  assert.equal(parsedJmaTsunami.lat, 35.5);
+  assert.equal(parsedJmaTsunami.lon, 141.6);
+  assert.equal(parsedJmaTsunami.depthKm, 10);
+  assert.equal(parsedJmaTsunami.magnitude, 6.1);
+  assert.equal(parsedJmaTsunami.maxScaleLabel, '3');
+  assert.equal(parsedJmaTsunami.occurrenceTime, '2026-11-06T19:39:00+09:00');
+  assert.equal(parsedJmaTsunami.areas[0].grade, 'Forecast');
+  assert.equal(parsedJmaTsunami.areas[0].name, '千葉県九十九里・外房');
 });
 
 

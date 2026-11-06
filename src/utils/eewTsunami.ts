@@ -5,7 +5,7 @@ import {
   TsunamiForecastReport,
   TsunamiGrade,
 } from '../types/jma';
-import { formatSeismicScale } from './jmaParser';
+import { formatSeismicScale, parseJmaIsoCoordinate } from './jmaParser';
 
 /**
  * P2P地震情報 API v2 で利用する情報コード
@@ -505,8 +505,11 @@ export function parseJmaTsunamiDetail(
 
   const eq = Array.isArray(body.Earthquake) ? body.Earthquake[0] : body.Earthquake;
   const coord = String(eq?.Hypocenter?.Area?.Coordinate || '');
+  const parsedCoord = parseJmaIsoCoordinate(coord);
   const cm = /^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)/.exec(coord);
   const mag = Number(eq?.Magnitude);
+  const originTime = eq?.OriginTime ? String(eq.OriginTime) : undefined;
+  const maxInt = eq?.MaxInt ? String(eq.MaxInt) : undefined;
 
   return {
     id: `jma-tsunami-${head.EventID || ''}-${head.ReportDateTime || ''}`,
@@ -518,11 +521,46 @@ export function parseJmaTsunamiDetail(
       ? String(eq.Hypocenter.Area.Name)
       : undefined,
     magnitude: Number.isNaN(mag) ? undefined : mag,
-    lat: cm ? Number(cm[1]) : undefined,
-    lon: cm ? Number(cm[2]) : undefined,
+    lat: parsedCoord?.lat ?? (cm ? Number(cm[1]) : undefined),
+    lon: parsedCoord?.lon ?? (cm ? Number(cm[2]) : undefined),
+    depthKm: parsedCoord?.depthKm,
+    occurrenceTime: originTime,
+    maxScaleLabel: maxInt,
     headline: head.Headline?.Text ? String(head.Headline.Text) : undefined,
     areas: sortTsunamiAreas(areas),
   };
+}
+
+/**
+ * Formats a JST / ISO occurrence time string into a clean Japanese disaster label:
+ * Example: "2026/11/06 19:39:00" -> "11月06日 19時39分頃"
+ */
+export function formatOccurrenceTimeJa(str: string | null | undefined): string {
+  if (!str) return '-';
+  const ms = parseJstDateTimeMs(str);
+  if (!Number.isNaN(ms)) {
+    const jst = new Date(ms + 9 * 3600 * 1000);
+    const mo = String(jst.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(jst.getUTCDate()).padStart(2, '0');
+    const h = String(jst.getUTCHours()).padStart(2, '0');
+    const m = String(jst.getUTCMinutes()).padStart(2, '0');
+    return `${mo}月${d}日 ${h}時${m}分頃`;
+  }
+  return str.endsWith('頃') ? str : `${str}頃`;
+}
+
+/** Returns background and text color style for seismic intensity badge */
+export function getSeismicScaleBadgeStyle(scaleLabel: string): { bg: string; text: string } {
+  if (scaleLabel.includes('7')) return { bg: '#800080', text: '#FFFFFF' };
+  if (scaleLabel.includes('6強')) return { bg: '#A50021', text: '#FFFFFF' };
+  if (scaleLabel.includes('6弱')) return { bg: '#E60000', text: '#FFFFFF' };
+  if (scaleLabel.includes('5強')) return { bg: '#FF5A00', text: '#FFFFFF' };
+  if (scaleLabel.includes('5弱')) return { bg: '#FF9900', text: '#FFFFFF' };
+  if (scaleLabel.includes('4')) return { bg: '#FACC15', text: '#111827' };
+  if (scaleLabel.includes('3')) return { bg: '#38BDF8', text: '#0B1220' };
+  if (scaleLabel.includes('2')) return { bg: '#22C55E', text: '#0B1220' };
+  if (scaleLabel.includes('1')) return { bg: '#94A3B8', text: '#0B1220' };
+  return { bg: '#475569', text: '#FFFFFF' };
 }
 
 /**

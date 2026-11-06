@@ -2507,11 +2507,14 @@ export const TEST_EEW_REPORTS: EewReport[] = [
 export const TEST_TSUNAMI_FORECAST_DEMO: TsunamiForecastReport = {
   id: 'demo-tsunami-noto-large',
   issueTime: '2026/11/06 20:05:00',
+  occurrenceTime: '2026/11/06 20:00:00',
   validUntil: '2026/11/07 08:00:00',
   cancelled: false,
   source: 'demo',
   hypocenterName: '能登半島沖',
+  depthKm: 10,
   magnitude: 7.6,
+  maxScaleLabel: '7',
   lat: 37.5,
   lon: 137.3,
   headline:

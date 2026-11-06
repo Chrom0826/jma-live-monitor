@@ -78,8 +78,8 @@ export const SCENE_LIST: SceneMetadata[] = [
     id: 'tsunami',
     index: '08',
     shortLabel: '津波情報',
-    title: '津波警報・注意報・潮位実況',
-    subtitle: '気象庁 津波警報・注意報・予報 ＆ 沿岸潮位観測所データ',
+    title: '津波警報・注意報・予報',
+    subtitle: '気象庁 津波警報・注意報・予報 ＆ 沿岸発表状況',
     xmlSource: 'eqvol.xml / JMA Tsunami / P2P地震情報',
   },
 ];
