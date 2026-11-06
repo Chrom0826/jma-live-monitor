@@ -7,6 +7,7 @@ import {
   INITIAL_MUNICIPALITY_WARNINGS,
   INITIAL_NOWCAST_TIMES,
   INITIAL_PREF_SEVERITY_MAP,
+  INITIAL_TSUNAMI_FORECAST,
   INITIAL_TSUNAMI_STATIONS,
   INITIAL_TYPHOONS,
   INITIAL_VOLCANOES,
@@ -24,6 +25,7 @@ import {
   NowcastTimeEntry,
   RegionalWarningItem,
   RegionId,
+  TsunamiForecastReport,
   TyphoonReport,
   WarningSeverity,
   XmlFeedType,
@@ -37,6 +39,12 @@ import {
   parseJmaWarningMapData,
   PREFECTURE_NAMES,
 } from '../utils/jmaParser';
+import {
+  isTsunamiForecastActive,
+  P2P_QUAKE_ISSUE_TYPE_LABELS,
+  parseJmaTsunamiDetail,
+  parseP2PTsunami,
+} from '../utils/eewTsunami';
 
 const JMA_XML_URLS: Record<XmlFeedType, string> = {
   regular: 'https://www.data.jma.go.jp/developer/xml/feed/regular.xml',
@@ -66,8 +74,12 @@ const JMA_AMEDAS_LATEST_TIME_URL =
   'https://www.jma.go.jp/bosai/amedas/data/latest_time.txt';
 const JMA_QUAKE_LIST_URL =
   'https://www.jma.go.jp/bosai/quake/data/list.json';
+const JMA_TSUNAMI_LIST_URL =
+  'https://www.jma.go.jp/bosai/tsunami/data/list.json';
 const P2P_QUAKE_HISTORY_URL =
   'https://api.p2pquake.net/v2/history?codes=551&limit=20';
+const P2P_TSUNAMI_HISTORY_URL =
+  'https://api.p2pquake.net/v2/history?codes=552&limit=5';
 
 let cachedAmedasTable: Record<string, any> | null = null;
 let cachedJmaAreaConst: Record<string, any> | null = null;
@@ -516,6 +528,8 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
     const hypocenterName = hypo.name || '震源調査中';
     const maxScaleCode = typeof eq.maxScale === 'number' ? eq.maxScale : 10;
     const rawPoints = Array.isArray(item.points) ? item.points : [];
+    const hypocenterUnknown =
+      typeof hypo.latitude === 'number' && hypo.latitude <= -100;
     const hypoLat =
       typeof hypo.latitude === 'number' && hypo.latitude > 0
         ? hypo.latitude
@@ -524,6 +538,11 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       typeof hypo.longitude === 'number' && hypo.longitude > 0
         ? hypo.longitude
         : 139.76;
+
+    const issueType = String(item.issue?.type || '');
+    const issueTypeLabel =
+      P2P_QUAKE_ISSUE_TYPE_LABELS[issueType] ||
+      (issueType ? `地震情報（${issueType}）` : '地震情報');
 
     const stations: EarthquakeStationIntensity[] = [];
     for (let i = 0; i < Math.min(rawPoints.length, 45); i++) {
@@ -580,6 +599,8 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
         'この地震による津波の心配はありません。',
       foreignTsunami: eq.foreignTsunami || 'なし',
       sourceOffice: item.issue?.source || '気象庁（P2P地震情報経由）',
+      issueTypeLabel,
+      hypocenterUnknown,
       stations:
         stations.length > 0
           ? stations
@@ -822,6 +843,63 @@ async function fetchLiveJmaTyphoons(): Promise<{
   }
 }
 
+async function fetchLiveTsunami(): Promise<{
+  tsunami: TsunamiForecastReport | null;
+  live: boolean;
+}> {
+  // 1. Primary: Official JMA bosai/tsunami/data/list.json
+  try {
+    const res = await fetchWithTimeout(JMA_TSUNAMI_LIST_URL, 4000);
+    if (res.ok) {
+      const list = (await res.json()) as Array<Record<string, any>>;
+      if (Array.isArray(list) && list.length > 0) {
+        const target =
+          list.find(
+            (it) =>
+              it.json &&
+              it.ift !== '取消' &&
+              (it.ttl?.includes('津波') || it.ift === '発表')
+          ) || list[0];
+        if (target && target.json) {
+          const detailRes = await fetchWithTimeout(
+            `https://www.jma.go.jp/bosai/tsunami/data/${target.json}`,
+            3500
+          );
+          if (detailRes.ok) {
+            const detail = await detailRes.json();
+            const parsed = parseJmaTsunamiDetail(detail);
+            if (parsed && isTsunamiForecastActive(parsed)) {
+              return { tsunami: parsed, live: true };
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Fall through to P2PQuake
+  }
+
+  // 2. Secondary: P2PQuake code 552
+  try {
+    const res = await fetchWithTimeout(P2P_TSUNAMI_HISTORY_URL, 3500);
+    if (res.ok) {
+      const list = (await res.json()) as Array<Record<string, any>>;
+      if (Array.isArray(list) && list.length > 0) {
+        for (const item of list) {
+          const parsed = parseP2PTsunami(item);
+          if (parsed && isTsunamiForecastActive(parsed)) {
+            return { tsunami: parsed, live: true };
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  return { tsunami: null, live: false };
+}
+
 /**
  * Fetches all JMA XML & JSON feeds at low frequency (every 5 minutes) and returns a unified bundle.
  */
@@ -835,6 +913,7 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     liveTyphoonsRes,
     liveAmedasRes,
     quakeRes,
+    tsunamiRes,
     tokyoOverview,
   ] = await Promise.all([
     fetchSingleJmaXmlFeed('eqvol'),
@@ -845,6 +924,7 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     fetchLiveJmaTyphoons(),
     fetchLiveAmedasData(),
     fetchRecentEarthquakes(),
+    fetchLiveTsunami(),
     fetchJmaOverviewForecast(),
   ]);
 
@@ -885,6 +965,7 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     amedas: liveAmedasRes.amedas,
     volcanoes: INITIAL_VOLCANOES,
     tsunamiStations: INITIAL_TSUNAMI_STATIONS,
+    tsunamiForecast: tsunamiRes.tsunami ?? INITIAL_TSUNAMI_FORECAST,
     forecasts,
     earthquakes: quakeRes.earthquakes,
     lastXmlFetchTime: `${hh}:${mm}:${ss}`,
@@ -895,7 +976,8 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
         liveWarningsRes.live ||
         liveTyphoonsRes.live ||
         liveAmedasRes.live ||
-        tokyoOverview.live,
+        tokyoOverview.live ||
+        tsunamiRes.live,
       p2pQuakeLive: quakeRes.live,
     },
   };

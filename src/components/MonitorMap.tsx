@@ -3,13 +3,16 @@ import L from 'leaflet';
 import {
   AmedasMetric,
   EarthquakeReport,
+  EewReport,
   InterruptKind,
   MapViewportState,
   MonitorDataBundle,
   RegionConfig,
   RegionalWarningItem,
   SceneId,
+  TsunamiForecastReport,
   TsunamiStationItem,
+  TsunamiForecastArea,
   TyphoonReport,
   VolcanoStatusItem,
   WarningSeverity,
@@ -27,12 +30,39 @@ import {
   getWindDirectionRotationDeg,
   inferRegionFromCoords,
   isExtratropicalCyclone,
+  PREFECTURE_NAMES,
 } from '../utils/jmaParser';
+import {
+  computeEewWaveRadiiKm,
+  formatEewArrivalLabel,
+  formatEewScaleRange,
+  getTsunamiGradeStyle,
+  isEewStillActive,
+} from '../utils/eewTsunami';
 
 let cachedClass20GeoJson: any = null;
 let cachedClass10GeoJson: any = null;
+let cachedTsunamiGeoJson: any = null;
 const cachedClass20LabelPoints: Record<string, [number, number]> = {};
 let class20FetchPromise: Promise<{ class20: any; class10: any }> | null = null;
+let tsunamiFetchPromise: Promise<any> | null = null;
+
+function loadJmaTsunamiGeoJson(): Promise<any> {
+  if (cachedTsunamiGeoJson) return Promise.resolve(cachedTsunamiGeoJson);
+  if (tsunamiFetchPromise) return tsunamiFetchPromise;
+  tsunamiFetchPromise = fetch(
+    'https://www.jma.go.jp/bosai/common/const/geojson/tsunami.json'
+  )
+    .then((r) => (r.ok ? r.json() : null))
+    .then((json) => {
+      if (json && Array.isArray(json.features)) {
+        cachedTsunamiGeoJson = json;
+      }
+      return cachedTsunamiGeoJson;
+    })
+    .catch(() => null);
+  return tsunamiFetchPromise;
+}
 
 function loadJmaMunicipalityGeoJson(): Promise<{ class20: any; class10: any }> {
   if (cachedClass20GeoJson && cachedClass10GeoJson) {
@@ -94,6 +124,8 @@ interface MonitorMapProps {
   activeScene: SceneId;
   activeRegionConfig: RegionConfig;
   activeWarningDivision?: RegionalWarningItem | null;
+  activeEew?: EewReport | null;
+  activeTsunamiForecast?: TsunamiForecastReport | null;
   data: MonitorDataBundle;
   selectedEarthquake: EarthquakeReport;
   selectedTyphoon: TyphoonReport;
@@ -259,6 +291,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   activeScene,
   activeRegionConfig,
   activeWarningDivision,
+  activeEew,
+  activeTsunamiForecast,
   data,
   selectedEarthquake,
   selectedTyphoon,
@@ -277,6 +311,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   const geoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const muniGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const muniBorderLayerRef = useRef<L.GeoJSON | null>(null);
+  const tsunamiGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
   const hrpnsLayerRef = useRef<L.GridLayer | null>(null);
   const thnsLayerRef = useRef<L.GridLayer | null>(null);
@@ -305,13 +340,17 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   const [class10GeoJsonData, setClass10GeoJsonData] = useState<any>(
     cachedClass10GeoJson
   );
+  const [tsunamiGeoJsonData, setTsunamiGeoJsonData] = useState<any>(
+    cachedTsunamiGeoJson
+  );
   const [radarFrameIndex, setRadarFrameIndex] = useState<number>(0);
   // radarPass: 0 = 1st loop (Rain Radar only), 1 = 2nd loop (Rain Radar + Lightning Radar & LIDEN)
   const [radarPass, setRadarPass] = useState<0 | 1>(0);
   const [mapZoomVersion, setMapZoomVersion] = useState<number>(0);
+  const [eewAnimNow, setEewAnimNow] = useState<number>(Date.now());
 
   const effectiveScene: SceneId =
-    interruptKind === 'earthquake'
+    interruptKind === 'earthquake' || interruptKind === 'eew'
       ? 'earthquake'
       : interruptKind === 'volcano'
         ? 'volcano'
@@ -321,7 +360,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             ? 'typhoon'
             : activeScene;
 
-  // Load World Countries GeoJSON, 47-prefecture Japan GeoJSON, and JMA Municipality (`class20s`) + Region (`class10s`) GeoJSON once
+  // Real-time animation clock for EEW wave front propagation (P-wave & S-wave expansion)
+  useEffect(() => {
+    if (!activeEew || !isEewStillActive(activeEew)) return;
+    const timer = setInterval(() => {
+      setEewAnimNow(Date.now());
+    }, 200);
+    return () => clearInterval(timer);
+  }, [activeEew]);
+
+  // Load World Countries GeoJSON, 47-prefecture Japan GeoJSON, JMA Municipality (`class20s`) + Region (`class10s`), and Tsunami coastline GeoJSON
   useEffect(() => {
     let cancelled = false;
     fetch(`${import.meta.env.BASE_URL}world-countries.geojson`)
@@ -347,6 +395,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         if (!cancelled) {
           if (class20) setClass20GeoJsonData(class20);
           if (class10) setClass10GeoJsonData(class10);
+        }
+      })
+      .catch(() => {});
+
+    loadJmaTsunamiGeoJson()
+      .then((json) => {
+        if (!cancelled && json) {
+          setTsunamiGeoJsonData(json);
         }
       })
       .catch(() => {});
@@ -701,12 +757,113 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     data.muniSeverityMap,
   ]);
 
+  // Render JMA Tsunami Coastline Vector Layer (`tsunami.json`) in `tsunami` scene
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (tsunamiGeoJsonLayerRef.current) {
+      map.removeLayer(tsunamiGeoJsonLayerRef.current);
+      tsunamiGeoJsonLayerRef.current = null;
+    }
+
+    if (effectiveScene !== 'tsunami' || !tsunamiGeoJsonData) return;
+
+    const areaForecasts = activeTsunamiForecast?.areas || [];
+    const areaMapByCode: Record<string, TsunamiForecastArea> = {};
+    const areaMapByName: Record<string, TsunamiForecastArea> = {};
+    for (const a of areaForecasts) {
+      if (a.code) areaMapByCode[a.code] = a;
+      if (a.name) areaMapByName[a.name] = a;
+    }
+
+    const tsunamiLayer = L.geoJSON(tsunamiGeoJsonData, {
+      pane: 'vectorOverlayPane',
+      style: (feature) => {
+        const code = String(
+          feature?.properties?.code || feature?.properties?.areaCode || ''
+        );
+        const name = String(feature?.properties?.name || '');
+        const matched = areaMapByCode[code] || areaMapByName[name];
+        const grade = matched?.grade;
+        if (grade && grade !== 'Unknown') {
+          const gradeStyle = getTsunamiGradeStyle(grade);
+          const weight =
+            grade === 'MajorWarning'
+              ? 6.5
+              : grade === 'Warning'
+                ? 5.0
+                : grade === 'Watch'
+                  ? 4.0
+                  : 3.0;
+          return {
+            pane: 'vectorOverlayPane',
+            renderer: overlayRendererRef.current ?? undefined,
+            color: gradeStyle.hex,
+            weight,
+            opacity: 1,
+            lineCap: 'round',
+            lineJoin: 'round',
+          };
+        }
+        return {
+          pane: 'vectorOverlayPane',
+          renderer: overlayRendererRef.current ?? undefined,
+          color: '#334155',
+          weight: 1.5,
+          opacity: 0.45,
+        };
+      },
+      interactive: true,
+      onEachFeature: (feature, layer) => {
+        const code = String(
+          feature?.properties?.code || feature?.properties?.areaCode || ''
+        );
+        const name = String(feature?.properties?.name || '');
+        const matched = areaMapByCode[code] || areaMapByName[name];
+        if (matched && matched.grade && matched.grade !== 'Unknown') {
+          const gradeStyle = getTsunamiGradeStyle(matched.grade);
+          const heightStr = matched.maxHeightText
+            ? `予想の高さ: ${matched.maxHeightText}`
+            : '';
+          const arrivalStr = matched.firstHeightText
+            ? `第1波: ${matched.firstHeightText}`
+            : '';
+          layer.bindTooltip(
+            `
+            <div style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:3px 6px;">
+              <strong style="color:${gradeStyle.hex};">${gradeStyle.label}</strong>: ${matched.name}<br/>
+              ${heightStr ? `<span style="color:#FFF;">${heightStr}</span><br/>` : ''}
+              ${arrivalStr ? `<span style="color:#CBD5E1;">${arrivalStr}</span>` : ''}
+            </div>
+          `,
+            { sticky: true, className: 'tsunami-coastline-tooltip' }
+          );
+        }
+      },
+    }).addTo(map);
+
+    tsunamiGeoJsonLayerRef.current = tsunamiLayer;
+  }, [effectiveScene, tsunamiGeoJsonData, activeTsunamiForecast]);
+
   // Compute target camera center & zoom for the active scene
   const getSceneCameraTarget = (): {
     center: [number, number];
     zoom: number;
   } => {
     if (effectiveScene === 'earthquake') {
+      if (
+        activeEew &&
+        typeof activeEew.lat === 'number' &&
+        !Number.isNaN(activeEew.lat) &&
+        typeof activeEew.lon === 'number' &&
+        !Number.isNaN(activeEew.lon)
+      ) {
+        return {
+          center: [activeEew.lat, activeEew.lon],
+          zoom: 7.2,
+        };
+      }
       const validStations = selectedEarthquake.stations.filter(
         (s): s is typeof s & { lat: number; lon: number } =>
           typeof s.lat === 'number' &&
@@ -752,6 +909,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       };
     }
     if (effectiveScene === 'tsunami') {
+      if (activeTsunamiForecast && activeTsunamiForecast.areas.length > 0) {
+        return {
+          center: [37.2, 137.5],
+          zoom: 5.2,
+        };
+      }
       return {
         center: [activeTsunamiStation.lat, activeTsunamiStation.lon],
         zoom: 8,
@@ -866,6 +1029,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     activeTsunamiStation.id,
     activeTsunamiStation.lat,
     activeTsunamiStation.lon,
+    activeEew?.id,
+    activeEew?.serial,
+    activeTsunamiForecast?.areas.length,
   ]);
 
   // Update JMA High-Resolution Precipitation Nowcast (`hrpns`) + Lightning Nowcast (`thns`)
@@ -1541,30 +1707,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       const projectionZoom =
         Math.abs(currentZoom - targetZoom) <= 1 ? currentZoom : targetZoom;
 
-      const sortedStations = [...selectedEarthquake.stations]
-        .filter(
-          (st): st is typeof st & { lat: number; lon: number } =>
-            typeof st.lat === 'number' &&
-            typeof st.lon === 'number' &&
-            !Number.isNaN(st.lat) &&
-            !Number.isNaN(st.lon)
-        )
-        .sort((a, b) => b.scaleCode - a.scaleCode);
-
-      // Track placed screen-space bounding boxes so seismic intensity badges never overlap
+      // Track placed screen-space bounding boxes so badges never overlap
       const placedBoxes: Array<{
         x: number;
         y: number;
         w: number;
         h: number;
       }> = [];
-
-      // Reserve epicenter cross area first so station badges don't cover the '×' symbol
-      const epiPt = map.project(
-        [selectedEarthquake.lat, selectedEarthquake.lon],
-        projectionZoom
-      );
-      placedBoxes.push({ x: epiPt.x, y: epiPt.y, w: 30, h: 30 });
 
       const collidesWithPlaced = (
         x: number,
@@ -1584,6 +1733,160 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         }
         return false;
       };
+
+      // 1. EEW (緊急地震速報) Wave propagation concentric circles & Epicenter
+      if (activeEew) {
+        const eewLat =
+          typeof activeEew.lat === 'number' && !Number.isNaN(activeEew.lat)
+            ? activeEew.lat
+            : selectedEarthquake.lat;
+        const eewLon =
+          typeof activeEew.lon === 'number' && !Number.isNaN(activeEew.lon)
+            ? activeEew.lon
+            : selectedEarthquake.lon;
+        const eewDepth = activeEew.depthKm >= 0 ? activeEew.depthKm : 10;
+
+        // Wave propagation concentric circles (P-wave & S-wave expansion)
+        const { pKm, sKm } = computeEewWaveRadiiKm(
+          activeEew.originTime,
+          eewDepth,
+          eewAnimNow
+        );
+
+        if (pKm > 0) {
+          L.circle([eewLat, eewLon], {
+            pane: 'vectorOverlayPane',
+            renderer: overlayRenderer,
+            radius: pKm * 1000,
+            color: '#38BDF8',
+            weight: 2,
+            dashArray: '6 6',
+            fill: false,
+            opacity: 0.85,
+            interactive: false,
+          }).addTo(group);
+        }
+
+        if (sKm > 0) {
+          L.circle([eewLat, eewLon], {
+            pane: 'vectorOverlayPane',
+            renderer: overlayRenderer,
+            radius: sKm * 1000,
+            color: '#EF4444',
+            weight: 2.8,
+            fillColor: '#EF4444',
+            fillOpacity: 0.16,
+            opacity: 0.95,
+            interactive: false,
+          }).addTo(group);
+        }
+
+        // EEW Epicenter Marker
+        const isFinal = activeEew.serial >= 5;
+        const reportBadge = isFinal
+          ? `最終報(第${activeEew.serial}報)`
+          : `第${activeEew.serial}報`;
+        const epiPt = map.project([eewLat, eewLon], projectionZoom);
+        placedBoxes.push({ x: epiPt.x, y: epiPt.y, w: 60, h: 40 });
+
+        const magLabel =
+          activeEew.magnitude > 0
+            ? `M${activeEew.magnitude.toFixed(1)}`
+            : 'M不明';
+        const eewEpiIcon = L.divIcon({
+          className: 'custom-eew-epicenter-marker',
+          html: `
+            <div style="position:relative;display:flex;flex-direction:column;align-items:center;pointer-events:none;">
+              <div style="position:relative;display:flex;align-items:center;justify-content:center;width:40px;height:40px;">
+                <div style="position:absolute;width:36px;height:36px;border-radius:50%;background:rgba(239,68,68,0.45);animation:ping 1.4s cubic-bezier(0,0,0.2,1) infinite;"></div>
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                  <path d="M5 5L27 27M27 5L5 27" stroke="#0B0D12" stroke-width="7" stroke-linecap="square"/>
+                  <path d="M5 5L27 27M27 5L5 27" stroke="#EF4444" stroke-width="4.2" stroke-linecap="square"/>
+                  <path d="M5 5L27 27M27 5L5 27" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="square"/>
+                </svg>
+              </div>
+              <div style="background:rgba(18,20,26,0.96);border:2px solid #EF4444;padding:2px 8px;white-space:nowrap;margin-top:2px;box-shadow:0 3px 10px rgba(0,0,0,0.85);border-radius:3px;font-family:'JetBrains Mono',monospace;">
+                <span style="background:#EF4444;color:#FFFFFF;font-weight:900;font-size:10px;padding:1px 4px;margin-right:4px;">EEW</span>
+                <span style="color:#EF4444;font-size:11px;font-weight:800;">${reportBadge}</span>
+                <span style="color:#FFFFFF;font-size:11px;font-weight:800;margin-left:4px;">${magLabel}</span>
+              </div>
+            </div>
+          `,
+          iconSize: [160, 68],
+          iconAnchor: [80, 20],
+        });
+        L.marker([eewLat, eewLon], {
+          icon: eewEpiIcon,
+          zIndexOffset: 3000,
+        }).addTo(group);
+
+        // EEW Warning Area badges on the map
+        const prefCoordMap: Record<string, [number, number]> = {};
+        for (const p of Object.values(PREFECTURE_NAMES)) {
+          prefCoordMap[p.name] = [p.lat, p.lon];
+        }
+
+        activeEew.areas.forEach((area) => {
+          let pos = prefCoordMap[area.pref];
+          if (!pos) {
+            for (const [pName, pCoord] of Object.entries(prefCoordMap)) {
+              if (
+                area.pref.includes(pName) ||
+                pName.includes(area.pref) ||
+                area.name.includes(pName)
+              ) {
+                pos = pCoord;
+                break;
+              }
+            }
+          }
+          if (!pos) return;
+
+          const scaleText = formatEewScaleRange(area.scaleFrom, area.scaleTo);
+          const arrivalLabel = formatEewArrivalLabel(area, eewAnimNow);
+          const isArrived = arrivalLabel.includes('到達');
+          const pt = map.project(pos, projectionZoom);
+          const boxW = 120;
+          const boxH = 22;
+
+          if (!collidesWithPlaced(pt.x, pt.y, boxW, boxH, 2)) {
+            placedBoxes.push({ x: pt.x, y: pt.y, w: boxW, h: boxH });
+            const areaIcon = L.divIcon({
+              className: 'custom-eew-area-badge',
+              html: `
+                <div style="display:inline-flex;align-items:center;gap:4px;background:rgba(18,20,26,0.92);border:1.5px solid ${isArrived ? '#EF4444' : '#F59E0B'};padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.8);">
+                  <span style="color:#FFFFFF;font-size:10px;font-weight:700;">${area.name}</span>
+                  <span style="background:${isArrived ? '#EF4444' : '#F59E0B'};color:#000;font-size:10px;font-weight:900;padding:0 3px;border-radius:2px;">${scaleText}</span>
+                  <span style="color:${isArrived ? '#FCA5A5' : '#FDE047'};font-size:9px;font-weight:700;">${arrivalLabel}</span>
+                </div>
+              `,
+              iconSize: [boxW, boxH],
+              iconAnchor: [Math.round(boxW / 2), Math.round(boxH / 2)],
+            });
+            L.marker(pos, { icon: areaIcon, zIndexOffset: 2500 }).addTo(group);
+          }
+        });
+      }
+
+      // 2. Standard Observed Earthquake Stations (if available)
+      const sortedStations = [...selectedEarthquake.stations]
+        .filter(
+          (st): st is typeof st & { lat: number; lon: number } =>
+            typeof st.lat === 'number' &&
+            typeof st.lon === 'number' &&
+            !Number.isNaN(st.lat) &&
+            !Number.isNaN(st.lon)
+        )
+        .sort((a, b) => b.scaleCode - a.scaleCode);
+
+      // Reserve epicenter cross area for regular quake if no EEW is active
+      if (!activeEew) {
+        const epiPt = map.project(
+          [selectedEarthquake.lat, selectedEarthquake.lon],
+          projectionZoom
+        );
+        placedBoxes.push({ x: epiPt.x, y: epiPt.y, w: 30, h: 30 });
+      }
 
       sortedStations.forEach((st) => {
         const pt = map.project([st.lat, st.lon], projectionZoom);
@@ -1611,24 +1914,26 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         }
       });
 
-      const epiIcon = L.divIcon({
-        className: 'custom-epicenter-marker',
-        html: `
-          <div style="position:relative;display:flex;align-items:center;justify-content:center;width:32px;height:32px;">
-            <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
-              <path d="M6 6L26 26M26 6L6 26" stroke="#0B0D12" stroke-width="6.5" stroke-linecap="square"/>
-              <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="3.8" stroke-linecap="square"/>
-              <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.2" stroke-linecap="square"/>
-            </svg>
-          </div>
-        `,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
-      });
-      L.marker([selectedEarthquake.lat, selectedEarthquake.lon], {
-        icon: epiIcon,
-        zIndexOffset: 2000,
-      }).addTo(group);
+      if (!activeEew) {
+        const epiIcon = L.divIcon({
+          className: 'custom-epicenter-marker',
+          html: `
+            <div style="position:relative;display:flex;align-items:center;justify-content:center;width:32px;height:32px;">
+              <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+                <path d="M6 6L26 26M26 6L6 26" stroke="#0B0D12" stroke-width="6.5" stroke-linecap="square"/>
+                <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="3.8" stroke-linecap="square"/>
+                <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.2" stroke-linecap="square"/>
+              </svg>
+            </div>
+          `,
+          iconSize: [32, 32],
+          iconAnchor: [16, 16],
+        });
+        L.marker([selectedEarthquake.lat, selectedEarthquake.lon], {
+          icon: epiIcon,
+          zIndexOffset: 2000,
+        }).addTo(group);
+      }
     }
   }, [
     effectiveScene,
@@ -1640,6 +1945,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     selectedTyphoon,
     activeVolcano,
     activeTsunamiStation,
+    activeEew,
+    activeTsunamiForecast,
+    eewAnimNow,
     mapZoomVersion,
   ]);
 

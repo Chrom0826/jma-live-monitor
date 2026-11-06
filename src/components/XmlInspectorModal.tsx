@@ -20,8 +20,11 @@ interface XmlInspectorModalProps {
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
   onTriggerTestEarthquake: () => void;
+  onTriggerTestEew?: () => void;
   onTriggerTestVolcano: () => void;
   onTriggerTestTsunami: () => void;
+  onToggleTsunamiDemo?: () => void;
+  isTsunamiDemo?: boolean;
   onManualRefresh: () => void;
   isRefreshing: boolean;
   lastFetchTime: string;
@@ -43,8 +46,11 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
   isFullscreen,
   onToggleFullscreen,
   onTriggerTestEarthquake,
+  onTriggerTestEew,
   onTriggerTestVolcano,
   onTriggerTestTsunami,
+  onToggleTsunamiDemo,
+  isTsunamiDemo,
   onManualRefresh,
   isRefreshing,
   lastFetchTime,
@@ -235,7 +241,31 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                 <p className="text-[11px] text-neutral-400 mb-3">
                   ボタンを押すと即座にポップアップを閉じ、該当の割り込みズームを表示します。
                 </p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                  {onTriggerTestEew && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onTriggerTestEew();
+                        onClose();
+                      }}
+                      className="px-3 py-2.5 text-xs font-black bg-rose-950/90 hover:bg-rose-900 border-2 border-red-500 text-white transition-colors text-center cursor-pointer shadow-md shadow-red-950"
+                    >
+                      🚨 EEWデモ発火 (第1報→第3報→最終報)
+                    </button>
+                  )}
+                  {onToggleTsunamiDemo && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onToggleTsunamiDemo();
+                        onClose();
+                      }}
+                      className="px-3 py-2.5 text-xs font-bold bg-purple-950/90 hover:bg-purple-900 border border-purple-400 text-purple-100 transition-colors text-center cursor-pointer"
+                    >
+                      🌊 {isTsunamiDemo ? '津波実況に戻す' : '津波警報デモ発火 (大津波警報)'}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => {

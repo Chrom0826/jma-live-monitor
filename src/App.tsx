@@ -11,14 +11,17 @@ import {
   INITIAL_MUNICIPALITY_WARNINGS,
   INITIAL_NOWCAST_TIMES,
   INITIAL_PREF_SEVERITY_MAP,
+  INITIAL_TSUNAMI_FORECAST,
   INITIAL_TSUNAMI_STATIONS,
   INITIAL_TYPHOONS,
   INITIAL_VOLCANOES,
   INITIAL_WARNINGS,
   INITIAL_WEATHER_BULLETINS,
   INITIAL_XML_ENTRIES,
+  TEST_EEW_REPORTS,
   TEST_INTERRUPT_EARTHQUAKE,
   TEST_TSUNAMI_ANOMALY_STATION,
+  TEST_TSUNAMI_FORECAST_DEMO,
   TEST_VOLCANO_LEVEL_CHANGE,
 } from './data/fallbackData';
 import {
@@ -28,6 +31,7 @@ import {
 import {
   AmedasMetric,
   EarthquakeReport,
+  EewReport,
   InterruptKind,
   JmaXmlEntry,
   MapViewportState,
@@ -48,6 +52,11 @@ import {
   REGION_CONFIGS,
   SCENE_LIST,
 } from './utils/jmaParser';
+import {
+  parseP2PEew,
+  parseP2PTsunami,
+  shouldReplaceEew,
+} from './utils/eewTsunami';
 
 const INITIAL_BUNDLE: MonitorDataBundle = {
   xmlEntries: INITIAL_XML_ENTRIES,
@@ -62,6 +71,7 @@ const INITIAL_BUNDLE: MonitorDataBundle = {
   amedas: INITIAL_AMEDAS_STATIONS,
   volcanoes: INITIAL_VOLCANOES,
   tsunamiStations: INITIAL_TSUNAMI_STATIONS,
+  tsunamiForecast: INITIAL_TSUNAMI_FORECAST,
   forecasts: INITIAL_FORECASTS,
   earthquakes: INITIAL_EARTHQUAKES,
   lastXmlFetchTime: '13:43:07',
@@ -132,7 +142,10 @@ export default function App() {
   );
   const [activeTsunamiStation, setActiveTsunamiStation] =
     useState<TsunamiStationItem>(INITIAL_TSUNAMI_STATIONS[0]);
+  const [activeEew, setActiveEew] = useState<EewReport | null>(null);
+  const [isTsunamiDemo, setIsTsunamiDemo] = useState<boolean>(false);
   const [amedasMetric, setAmedasMetric] = useState<AmedasMetric>('temp');
+  const eewDemoTimerRef = useRef<NodeJS.Timeout[]>([]);
 
   // XML Inspector & Settings Popup Modal state
   const [isXmlModalOpen, setIsXmlModalOpen] = useState<boolean>(false);
@@ -279,7 +292,7 @@ export default function App() {
     return () => clearInterval(pollTimer);
   }, [refreshJmaData]);
 
-  // Subscribe to P2PQuake WebSocket for low-latency earthquake interrupt
+  // Subscribe to P2PQuake WebSocket for low-latency earthquake / EEW / Tsunami push delivery
   useEffect(() => {
     let ws: WebSocket | null = null;
     try {
@@ -287,7 +300,44 @@ export default function App() {
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
-          if (payload && payload.code === 551) {
+          if (!payload || typeof payload.code !== 'number') return;
+
+          // 1. EEW (緊急地震速報（警報） code: 556)
+          if (payload.code === 556) {
+            const eew = parseP2PEew(payload);
+            if (eew) {
+              setActiveEew((prev) => {
+                if (shouldReplaceEew(prev, eew)) {
+                  return eew;
+                }
+                return prev;
+              });
+              setInterruptKind('eew');
+              setActiveScene('earthquake');
+              // Immediately trigger low-latency refresh of earthquake data
+              refreshJmaData();
+            }
+          }
+          // 2. EEW Announcement Detection (NHKチャイム検出 code: 554)
+          else if (payload.code === 554) {
+            setActiveScene('earthquake');
+            refreshJmaData();
+          }
+          // 3. Tsunami forecast (津波予報 code: 552)
+          else if (payload.code === 552) {
+            const tsunami = parseP2PTsunami(payload);
+            if (tsunami) {
+              setData((prev) => ({
+                ...prev,
+                tsunamiForecast: tsunami,
+              }));
+              if (!tsunami.cancelled && tsunami.areas.length > 0) {
+                setActiveScene('tsunami');
+              }
+            }
+          }
+          // 4. Earthquake detail (各地の震度・震源情報 code: 551)
+          else if (payload.code === 551) {
             const report = convertP2PQuakeItem(payload);
             if (report && report.id !== latestEqIdRef.current) {
               latestEqIdRef.current = report.id;
@@ -300,6 +350,7 @@ export default function App() {
               }));
               setSelectedEarthquake(report);
               setInterruptKind('earthquake');
+              setActiveScene('earthquake');
             }
           }
         } catch {
@@ -314,7 +365,7 @@ export default function App() {
         ws.close();
       }
     };
-  }, []);
+  }, [refreshJmaData]);
 
   // Divisions (out of the 57 JMA divisions) that currently have 警報 (warning) or 特別警報 (special), ordered North to South
   const severeWarningDivisions = useMemo(
@@ -453,6 +504,32 @@ export default function App() {
     setActiveScene('earthquake');
   };
 
+  // Test Interrupt 1-b: EEW (緊急地震速報 Progressive Demo: 第1報 -> 第3報 -> 最終報)
+  const handleTriggerEewDemo = useCallback(() => {
+    eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
+    eewDemoTimerRef.current = [];
+
+    // Step 1: 第1報（M5.9 震度5強以上）
+    const r1 = { ...TEST_EEW_REPORTS[0], receivedAtMs: Date.now() };
+    setActiveEew(r1);
+    setInterruptKind('eew');
+    setActiveScene('earthquake');
+
+    // Step 2: 第3報（M6.8 震度6強） - 4秒後
+    const t1 = setTimeout(() => {
+      const r2 = { ...TEST_EEW_REPORTS[1], receivedAtMs: Date.now() };
+      setActiveEew(r2);
+    }, 4000);
+    eewDemoTimerRef.current.push(t1);
+
+    // Step 3: 最終報（M7.6 震度7） - 8秒後
+    const t2 = setTimeout(() => {
+      const r3 = { ...TEST_EEW_REPORTS[2], receivedAtMs: Date.now() };
+      setActiveEew(r3);
+    }, 8000);
+    eewDemoTimerRef.current.push(t2);
+  }, []);
+
   // Test Interrupt 2: Volcano Alert Level Change (zooms directly to volcano)
   const handleTriggerTestVolcano = () => {
     setActiveVolcano(TEST_VOLCANO_LEVEL_CHANGE);
@@ -467,8 +544,31 @@ export default function App() {
     setActiveScene('tsunami');
   };
 
+  // Tsunami Full-scale Demo Toggle (大津波警報・津波警報・注意報シミュレーション)
+  const handleToggleTsunamiDemo = useCallback(() => {
+    setIsTsunamiDemo((prev) => {
+      const next = !prev;
+      if (next) {
+        setData((d) => ({
+          ...d,
+          tsunamiForecast: TEST_TSUNAMI_FORECAST_DEMO,
+        }));
+        setActiveScene('tsunami');
+      } else {
+        setData((d) => ({
+          ...d,
+          tsunamiForecast: INITIAL_TSUNAMI_FORECAST,
+        }));
+      }
+      return next;
+    });
+  }, []);
+
   const handleDismissInterrupt = () => {
     setInterruptKind('none');
+    setActiveEew(null);
+    eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
+    eewDemoTimerRef.current = [];
     if (selectedEarthquake.isTest && data.earthquakes.length > 0) {
       setSelectedEarthquake(data.earthquakes[0]);
     }
@@ -698,6 +798,8 @@ export default function App() {
               activeScene={activeScene}
               activeRegionConfig={activeRegionConfig}
               activeWarningDivision={activeWarningDivision}
+              activeEew={activeEew}
+              activeTsunamiForecast={data.tsunamiForecast}
               data={data}
               selectedEarthquake={selectedEarthquake}
               selectedTyphoon={selectedTyphoon}
@@ -772,6 +874,10 @@ export default function App() {
                 selectedTyphoon={selectedTyphoon}
                 activeVolcano={activeVolcano}
                 activeTsunamiStation={activeTsunamiStation}
+                activeEew={activeEew}
+                activeTsunamiForecast={data.tsunamiForecast}
+                isTsunamiDemo={isTsunamiDemo}
+                onToggleTsunamiDemo={handleToggleTsunamiDemo}
                 amedasMetric={amedasMetric}
                 onChangeAmedasMetric={setAmedasMetric}
                 onSelectEarthquake={(eq) => {
@@ -880,8 +986,11 @@ export default function App() {
         isFullscreen={isFullscreen}
         onToggleFullscreen={toggleFullscreen}
         onTriggerTestEarthquake={handleTriggerTestEarthquake}
+        onTriggerTestEew={handleTriggerEewDemo}
         onTriggerTestVolcano={handleTriggerTestVolcano}
         onTriggerTestTsunami={handleTriggerTestTsunami}
+        onToggleTsunamiDemo={handleToggleTsunamiDemo}
+        isTsunamiDemo={isTsunamiDemo}
         onManualRefresh={refreshJmaData}
         isRefreshing={isRefreshingXml}
         lastFetchTime={data.lastXmlFetchTime}

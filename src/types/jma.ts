@@ -257,12 +257,91 @@ export interface EarthquakeReport {
   foreignTsunami: string;
   sourceOffice: string;
   isTest?: boolean;
+  /** P2P地震情報 issue.type の日本語ラベル（震度速報 / 震源に関する情報 / 各地の震度に関する情報 など） */
+  issueTypeLabel?: string;
+  /** 震度速報など震源未確定（hypocenter.latitude = -200）の場合 true */
+  hypocenterUnknown?: boolean;
   stations: EarthquakeStationIntensity[];
+}
+
+/** P2P地震情報 code 556（緊急地震速報（警報））の細分区域ごとの予測震度 */
+export interface EewForecastArea {
+  pref: string;
+  name: string;
+  /** 最大予測震度の下限（10倍値: 45=5弱, -1=不明） */
+  scaleFrom: number;
+  /** 最大予測震度の上限（10倍値: 99=～程度以上） */
+  scaleTo: number;
+  /** 10: 主要動未到達と予測 / 11: 既に到達と予測 / 19: PLUM法（到達予想なし） */
+  kindCode: string;
+  /** 主要動の到達予測時刻（JST "YYYY/MM/DD HH:mm:ss"）。到達済み・PLUM法の場合 null */
+  arrivalTime: string | null;
+}
+
+/** P2P地震情報 code 556（緊急地震速報（警報））を正規化したレポート（第n報） */
+export interface EewReport {
+  id: string;
+  eventId: string;
+  /** 情報番号（第n報） */
+  serial: number;
+  issueTime: string;
+  originTime: string;
+  hypocenterName: string;
+  lat: number;
+  lon: number;
+  depthKm: number;
+  magnitude: number;
+  isCancelled: boolean;
+  isTest: boolean;
+  /** 仮定震源要素（PLUM法等で震源が仮定されている） */
+  isAssumedHypocenter: boolean;
+  /** 全区域の最大予測震度（scaleTo の最大値、99 の場合は scaleFrom を採用） */
+  maxScaleCode: number;
+  maxScaleLabel: string;
+  areas: EewForecastArea[];
+  receivedAtMs: number;
+  isDemo?: boolean;
+}
+
+export type TsunamiGrade =
+  | 'MajorWarning'
+  | 'Warning'
+  | 'Watch'
+  | 'Forecast'
+  | 'Unknown';
+
+export interface TsunamiForecastArea {
+  /** 気象庁 津波予報区コード（tsunami.json の properties.code） */
+  code?: string;
+  name: string;
+  grade: TsunamiGrade;
+  immediate: boolean;
+  /** 第1波の到達予想（時刻 or 状態「津波到達中と推測」等） */
+  firstHeightText: string;
+  arrivalTime?: string;
+  /** 予想される津波の高さ（「３ｍ」「巨大」「0.2m未満」等） */
+  maxHeightText: string;
+  maxHeightValue?: number;
+}
+
+export interface TsunamiForecastReport {
+  id: string;
+  issueTime: string;
+  validUntil?: string;
+  cancelled: boolean;
+  source: 'p2p' | 'jma' | 'demo';
+  hypocenterName?: string;
+  magnitude?: number;
+  lat?: number;
+  lon?: number;
+  headline?: string;
+  areas: TsunamiForecastArea[];
 }
 
 export type InterruptKind =
   | 'none'
   | 'earthquake'
+  | 'eew'
   | 'volcano'
   | 'tsunami'
   | 'typhoon';
@@ -280,6 +359,8 @@ export interface MonitorDataBundle {
   amedas: AmedasStationData[];
   volcanoes: VolcanoStatusItem[];
   tsunamiStations: TsunamiStationItem[];
+  /** 現在発表中の津波警報・注意報・予報（P2P code 552 / 気象庁 bosai tsunami）。発表なしは null */
+  tsunamiForecast?: TsunamiForecastReport | null;
   forecasts: CityForecastItem[];
   earthquakes: EarthquakeReport[];
   lastXmlFetchTime: string;

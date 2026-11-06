@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  computeEewWaveRadiiKm,
+  formatEewArrivalLabel,
+  formatEewScaleRange,
+  parseP2PEew,
+  parseP2PTsunami,
+  shouldReplaceEew,
+} from './eewTsunami';
+import {
   AMEDAS_PATROL_STOPS,
   AUTO_PATROL_SEQUENCE,
   classifyXmlEntryScene,
@@ -656,6 +664,146 @@ test('Reiwa 8 r8/map.json parsing, 57 JMA divisions, muniSeverityMap, getActiveS
   for (let i = 1; i <= 5; i++) {
     assert.ok(AMEDAS_PATROL_STOPS[i].zoom >= 7.25);
   }
+});
+
+test('P2PQuake EEW (code 556) & Tsunami (code 552) parsing, wave radii propagation, and replacement logic work accurately', () => {
+  // 1. EEW parse test
+  const sampleEewPayload = {
+    code: 556,
+    id: 'eew-20261106-01',
+    issue: {
+      eventId: '20261106195600',
+      serial: '1',
+      time: '2026/11/06 19:56:15',
+    },
+    earthquake: {
+      originTime: '2026/11/06 19:56:00',
+      hypocenter: {
+        name: '茨城県南部',
+        latitude: 36.1,
+        longitude: 140.1,
+        depth: 50,
+        magnitude: 5.9,
+      },
+      condition: '通常',
+    },
+    areas: [
+      {
+        pref: '茨城県',
+        name: '茨城県南部',
+        scaleFrom: 50,
+        scaleTo: 99,
+        kindCode: '10',
+        arrivalTime: '2026/11/06 19:56:30',
+      },
+      {
+        pref: '千葉県',
+        name: '千葉県北西部',
+        scaleFrom: 45,
+        scaleTo: 50,
+        kindCode: '11',
+        arrivalTime: null,
+      },
+      {
+        pref: '東京都',
+        name: '東京都２３区',
+        scaleFrom: 40,
+        scaleTo: 45,
+        kindCode: '19',
+        arrivalTime: null,
+      },
+    ],
+  };
+
+  const eewReport = parseP2PEew(sampleEewPayload, 1700000000000);
+  assert.ok(eewReport);
+  assert.equal(eewReport.serial, 1);
+  assert.equal(eewReport.hypocenterName, '茨城県南部');
+  assert.equal(eewReport.lat, 36.1);
+  assert.equal(eewReport.lon, 140.1);
+  assert.equal(eewReport.depthKm, 50);
+  assert.equal(eewReport.magnitude, 5.9);
+  assert.equal(eewReport.maxScaleLabel, '5強以上');
+  assert.equal(eewReport.areas.length, 3);
+
+  // 2. Format scale ranges & arrival status
+  assert.equal(formatEewScaleRange(50, 99), '5強以上');
+  assert.equal(formatEewScaleRange(45, 50), '5弱～5強');
+  assert.equal(formatEewScaleRange(40, 40), '4');
+
+  // Arrived / PLUM test
+  assert.equal(formatEewArrivalLabel(eewReport.areas[1]), '既に到達と予測');
+  assert.equal(formatEewArrivalLabel(eewReport.areas[2]), '到達予想なし(PLUM法)');
+
+  // 3. shouldReplaceEew replacement rule
+  const nextSerialEew = { ...eewReport, serial: 3 };
+  assert.equal(shouldReplaceEew(eewReport, nextSerialEew), true); // higher serial replaces
+  assert.equal(shouldReplaceEew(nextSerialEew, eewReport), false); // older serial does not replace
+  const diffEventEew = { ...eewReport, eventId: '20261106200000', serial: 1 };
+  assert.equal(shouldReplaceEew(eewReport, diffEventEew), true); // new event always replaces
+
+  // 4. Wave propagation radii calculation (P-wave: 6.0km/s, S-wave: 3.5km/s)
+  // At 10s after origin: P-dist = 60km (hypo depth 50km -> horizontal radius = sqrt(60^2 - 50^2) = sqrt(1100) ≈ 33.16km)
+  // S-dist = 35km (< depth 50km -> horizontal surface radius = 0km)
+  const radii10s = computeEewWaveRadiiKm(
+    '2026/11/06 19:56:00',
+    50,
+    new Date('2026-11-06T19:56:10+09:00').getTime()
+  );
+  assert.ok(radii10s.pKm > 30 && radii10s.pKm < 35);
+  assert.equal(radii10s.sKm, 0);
+
+  // At 20s after origin: P-dist = 120km, S-dist = 70km (horizontal = sqrt(70^2 - 50^2) = sqrt(2400) ≈ 48.98km)
+  const radii20s = computeEewWaveRadiiKm(
+    '2026/11/06 19:56:00',
+    50,
+    new Date('2026-11-06T19:56:20+09:00').getTime()
+  );
+  assert.ok(radii20s.pKm > 100);
+  assert.ok(radii20s.sKm > 45 && radii20s.sKm < 52);
+
+  // 5. P2PQuake Tsunami (code 552) parse test
+  const sampleTsunamiPayload = {
+    code: 552,
+    id: 'tsunami-sample-01',
+    time: '2026/11/06 19:58:00',
+    cancelled: false,
+    areas: [
+      {
+        name: '岩手県',
+        grade: 'MajorWarning',
+        immediate: true,
+        firstHeight: { condition: '津波到達中と推測' },
+        maxHeight: { description: '巨大' },
+      },
+      {
+        name: '宮城県',
+        grade: 'Warning',
+        immediate: false,
+        firstHeight: { arrivalTime: '2026/11/06 20:10:00' },
+        maxHeight: { description: '３ｍ' },
+      },
+      {
+        name: '福島県',
+        grade: 'Watch',
+        immediate: false,
+        firstHeight: { arrivalTime: '2026/11/06 20:20:00' },
+        maxHeight: { description: '１ｍ' },
+      },
+    ],
+  };
+
+  const tsunamiReport = parseP2PTsunami(sampleTsunamiPayload);
+  assert.ok(tsunamiReport);
+  assert.equal(tsunamiReport.cancelled, false);
+  assert.equal(tsunamiReport.areas.length, 3);
+  assert.equal(tsunamiReport.areas[0].grade, 'MajorWarning');
+  assert.equal(tsunamiReport.areas[0].code, '210'); // maps '岩手県' to '210'
+  assert.equal(tsunamiReport.areas[0].maxHeightText, '巨大');
+  assert.equal(tsunamiReport.areas[1].grade, 'Warning');
+  assert.equal(tsunamiReport.areas[1].code, '220'); // maps '宮城県' to '220'
+  assert.equal(tsunamiReport.areas[2].grade, 'Watch');
+  assert.equal(tsunamiReport.areas[2].code, '250'); // maps '福島県' to '250'
 });
 
 

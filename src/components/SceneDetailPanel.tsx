@@ -1,14 +1,17 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AmedasMetric,
   AmedasStationData,
   EarthquakeReport,
+  EewReport,
   InterruptKind,
   MapViewportState,
   MonitorDataBundle,
   RegionConfig,
   RegionalWarningItem,
   SceneId,
+  TsunamiForecastArea,
+  TsunamiForecastReport,
   TsunamiStationItem,
   TyphoonReport,
   VolcanoStatusItem,
@@ -19,6 +22,12 @@ import {
   getAmedasMetricColor,
   getSeismicScaleStyle,
 } from '../utils/jmaParser';
+import {
+  formatEewArrivalLabel,
+  formatEewScaleRange,
+  getTsunamiGradeStyle,
+  isEewStillActive,
+} from '../utils/eewTsunami';
 
 interface SceneDetailPanelProps {
   activeScene: SceneId;
@@ -32,6 +41,10 @@ interface SceneDetailPanelProps {
   onSelectTyphoon: (tc: TyphoonReport) => void;
   activeVolcano: VolcanoStatusItem;
   activeTsunamiStation: TsunamiStationItem;
+  activeEew?: EewReport | null;
+  activeTsunamiForecast?: TsunamiForecastReport | null;
+  isTsunamiDemo?: boolean;
+  onToggleTsunamiDemo?: () => void;
   amedasMetric: AmedasMetric;
   onChangeAmedasMetric: (metric: AmedasMetric) => void;
   onSelectEarthquake: (eq: EarthquakeReport) => void;
@@ -79,8 +92,13 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
   onSelectTyphoon,
   activeVolcano,
   activeTsunamiStation,
+  activeEew = null,
+  activeTsunamiForecast = null,
+  isTsunamiDemo = false,
+  onToggleTsunamiDemo,
   amedasMetric,
   onChangeAmedasMetric,
+  onSelectEarthquake,
   interruptKind,
   onDismissInterrupt,
   isLoopPaused,
@@ -89,13 +107,23 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
+  const [eewAnimNow, setEewAnimNow] = useState<number>(Date.now());
 
   useEffect(() => {
     onSceneCompleteRef.current = onSceneComplete;
   }, [onSceneComplete]);
 
+  // Keep EEW arrival countdown timer active every second
+  useEffect(() => {
+    if (!activeEew || !isEewStillActive(activeEew)) return;
+    const timer = setInterval(() => {
+      setEewAnimNow(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [activeEew]);
+
   const effectiveScene: SceneId =
-    interruptKind === 'earthquake'
+    interruptKind === 'earthquake' || interruptKind === 'eew'
       ? 'earthquake'
       : interruptKind === 'volcano'
         ? 'volcano'
@@ -823,41 +851,235 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
         {effectiveScene === 'tsunami' && (
           <>
             <div className="pb-2">
-              <div className="bg-amber-600 px-2.5 py-1 text-[13px] font-bold text-slate-950">
-                潮位変化・津波観測フォーカス
+              <div className="bg-amber-600 px-2.5 py-1 text-[13px] font-bold text-slate-950 flex items-center justify-between">
+                <span>津波警報・注意報・予報</span>
+                {onToggleTsunamiDemo && (
+                  <button
+                    type="button"
+                    onClick={onToggleTsunamiDemo}
+                    className="px-2 py-0.5 text-[11px] font-mono bg-slate-950/80 hover:bg-slate-900 text-yellow-300 border border-yellow-400/60 rounded-xs transition-colors cursor-pointer"
+                  >
+                    {isTsunamiDemo ? '実況に戻す' : 'デモ津波警報表示'}
+                  </button>
+                )}
               </div>
-              <div className="px-2.5 pt-2 space-y-1">
-                <div className="text-sm font-extrabold text-white">
-                  {activeTsunamiStation.stationName}
+
+              {activeTsunamiForecast &&
+              activeTsunamiForecast.areas.length > 0 ? (
+                <div className="px-2.5 pt-2 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-mono text-neutral-300">
+                    <span>
+                      発表: {activeTsunamiForecast.issueTime || '随時'}
+                    </span>
+                    {activeTsunamiForecast.source === 'demo' && (
+                      <span className="bg-purple-600/80 text-white px-1.5 py-0.2 rounded-xs font-bold text-[10px]">
+                        デモデータ
+                      </span>
+                    )}
+                  </div>
+
+                  {activeTsunamiForecast.headline && (
+                    <p className="text-xs text-yellow-200 leading-snug bg-yellow-950/40 border-l-2 border-yellow-400 px-2 py-1">
+                      {activeTsunamiForecast.headline}
+                    </p>
+                  )}
+
+                  {/* Group areas by grade: MajorWarning -> Warning -> Watch -> Forecast */}
+                  {(['MajorWarning', 'Warning', 'Watch', 'Forecast'] as const).map(
+                    (targetGrade) => {
+                      const matchedAreas = activeTsunamiForecast.areas.filter(
+                        (a) => a.grade === targetGrade
+                      );
+                      if (matchedAreas.length === 0) return null;
+                      const style = getTsunamiGradeStyle(targetGrade);
+                      return (
+                        <div
+                          key={targetGrade}
+                          className="border border-neutral-700 bg-neutral-900/60 rounded-xs overflow-hidden"
+                        >
+                          <div
+                            className="px-2 py-0.5 text-xs font-bold flex items-center justify-between"
+                            style={{
+                              backgroundColor: style.hex,
+                              color: style.textHex,
+                            }}
+                          >
+                            <span>{style.label}</span>
+                            <span className="font-mono text-[11px]">
+                              {matchedAreas.length}沿岸
+                            </span>
+                          </div>
+                          <div className="p-1.5 space-y-1">
+                            {matchedAreas.map((area) => (
+                              <div
+                                key={area.code || area.name}
+                                className="flex items-center justify-between text-xs px-1 py-0.5 border-b border-neutral-800/80 last:border-none"
+                              >
+                                <span className="font-bold text-white">
+                                  {area.name}
+                                </span>
+                                <div className="text-right font-mono text-[11px] space-x-2">
+                                  <span className="text-amber-300 font-bold">
+                                    {area.maxHeightText}
+                                  </span>
+                                  <span className="text-neutral-400">
+                                    {area.firstHeightText}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
+                  )}
                 </div>
-                <div className="text-xs text-amber-300 font-bold">
-                  {activeTsunamiStation.statusLabel}
+              ) : (
+                <div className="px-2.5 py-3 text-xs text-neutral-300 space-y-2">
+                  <div className="p-2 bg-neutral-900/80 border border-neutral-700 text-neutral-300">
+                    現在、津波警報・注意報・予報は発表されていません。
+                  </div>
+                  <div className="text-[11px] text-neutral-400">
+                    右上の「デモ津波警報表示」ボタンをクリックすると、大津波警報・津波警報発令時の全国海岸線・予想高さ表示シミュレーションを確認できます。
+                  </div>
                 </div>
-                <div className="text-sm font-mono font-bold text-white pt-1">
-                  観測潮位: +{activeTsunamiStation.tideLevelM.toFixed(2)}m (
-                  {activeTsunamiStation.maxHeightText})
-                </div>
+              )}
+            </div>
+
+            {/* Tide observation stations */}
+            <div className="pb-2">
+              <div className="bg-[#3E434F] px-2.5 py-0.5 text-[12px] font-bold text-white flex items-center justify-between">
+                <span>潮位観測点（リアルタイム）</span>
+                <span className="text-[11px] font-mono text-cyan-300">
+                  {data.tsunamiStations.length}地点
+                </span>
+              </div>
+              <div className="pt-1">
+                {data.tsunamiStations.map((ts) => (
+                  <div
+                    key={ts.id}
+                    className="px-2.5 py-1 flex items-center justify-between text-xs font-mono border-b border-neutral-800/60"
+                  >
+                    <span className="text-white font-bold">
+                      {ts.stationName}
+                    </span>
+                    <span className="text-neutral-400 text-[11px]">
+                      {ts.areaName.slice(0, 8)}
+                    </span>
+                    <span className="text-cyan-300 font-bold">
+                      +{ts.tideLevelM.toFixed(2)}m
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
-            {data.tsunamiStations.map((ts) => (
-              <div key={ts.id} className="pb-1.5">
-                <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white">
-                  {ts.stationName}
-                </div>
-                <div className="px-2.5 pt-1 flex items-center justify-between text-xs font-mono">
-                  <span className="text-neutral-300">{ts.areaName.slice(0, 8)}</span>
-                  <span className="text-cyan-300 font-bold">
-                    +{ts.tideLevelM.toFixed(2)}m
-                  </span>
-                </div>
-              </div>
-            ))}
           </>
         )}
 
         {/* ==================== EARTHQUAKE ==================== */}
         {effectiveScene === 'earthquake' && (
           <>
+            {/* EEW (緊急地震速報) Live Banner (NERV / Broadcast Style) */}
+            {activeEew && isEewStillActive(activeEew) && (
+              <div className="pb-2 mb-2 bg-[#1A0B0E] border-2 border-red-500 rounded-xs shadow-lg shadow-red-950/60 animate-pulse-slow">
+                <div className="bg-red-600 px-2.5 py-1 text-[13px] font-black text-white flex items-center justify-between tracking-wide">
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping" />
+                    緊急地震速報 (警報)
+                  </span>
+                  <span className="font-mono text-xs bg-black/40 px-1.5 py-0.2 rounded-xs">
+                    第{activeEew.serial}報
+                    {activeEew.serial >= 5 ? ' (最終報)' : ''}
+                  </span>
+                </div>
+
+                <div className="px-2.5 pt-2 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-lg font-black text-white tracking-wide">
+                        {activeEew.hypocenterName || '震源調査中'}
+                      </div>
+                      <div className="text-xs font-mono text-neutral-300">
+                        {activeEew.magnitude > 0
+                          ? `M${activeEew.magnitude.toFixed(1)}`
+                          : 'M不明'}{' '}
+                        /{' '}
+                        {activeEew.depthKm >= 0
+                          ? `深さ約${activeEew.depthKm}km`
+                          : '深さ不明'}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[10px] text-neutral-400 font-mono">
+                        最大予測震度
+                      </div>
+                      <div className="text-2xl font-black text-yellow-300 font-mono tracking-wider">
+                        震度{activeEew.maxScaleLabel}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-[11px] font-mono text-neutral-400 flex items-center justify-between border-t border-red-900/50 pt-1">
+                    <span>発生: {activeEew.originTime || '直近'}</span>
+                    <span>発表: {activeEew.issueTime || '随時'}</span>
+                  </div>
+
+                  {/* Warning Areas with Arrival Countdown */}
+                  {activeEew.areas.length > 0 && (
+                    <div className="space-y-1 pt-1">
+                      <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
+                        <span>強い揺れの予想地域</span>
+                        <span className="font-mono text-[10px] text-neutral-400">
+                          {activeEew.areas.length}地域
+                        </span>
+                      </div>
+                      <div className="max-h-48 overflow-y-auto space-y-1 pr-0.5">
+                        {activeEew.areas.map((area) => {
+                          const scaleRange = formatEewScaleRange(
+                            area.scaleFrom,
+                            area.scaleTo
+                          );
+                          const arrival = formatEewArrivalLabel(
+                            area,
+                            eewAnimNow
+                          );
+                          const isArrived = arrival.includes('到達');
+                          return (
+                            <div
+                              key={`${area.pref}-${area.name}`}
+                              className="bg-neutral-900/90 border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between text-xs"
+                            >
+                              <div className="font-bold text-white">
+                                <span className="text-[11px] text-neutral-400 mr-1.5">
+                                  {area.pref}
+                                </span>
+                                {area.name}
+                              </div>
+                              <div className="flex items-center gap-2 font-mono">
+                                <span className="px-1.5 py-0.2 bg-yellow-400 text-slate-950 font-black rounded-xs text-[11px]">
+                                  {scaleRange}
+                                </span>
+                                <span
+                                  className={`text-[11px] font-bold ${
+                                    isArrived
+                                      ? 'text-red-400'
+                                      : 'text-amber-300'
+                                  }`}
+                                >
+                                  {arrival}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Regular Earthquake Detailed Report */}
             <div className="pb-2">
               <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
                 <span>震源・震度詳細</span>
@@ -1118,6 +1340,25 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
             <span className="px-1 bg-[#F97316] text-white rounded-xs">5</span>
             <span className="px-1 bg-[#EF4444] text-white rounded-xs">6</span>
             <span className="px-1 bg-[#9333EA] text-white rounded-xs">7</span>
+          </div>
+        ) : effectiveScene === 'tsunami' ? (
+          <div className="flex items-center justify-between text-[11px] font-bold text-white whitespace-nowrap">
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#C026D3] inline-block" />
+              大津波
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#EF4444] inline-block" />
+              津波警報
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#FACC15] inline-block" />
+              注意報
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#38BDF8] inline-block" />
+              予報
+            </span>
           </div>
         ) : (
           <div className="flex items-center justify-between text-[11px] font-mono text-neutral-300">
