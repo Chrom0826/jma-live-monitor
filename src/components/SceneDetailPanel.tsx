@@ -40,7 +40,7 @@ interface SceneDetailPanelProps {
   selectedTyphoon: TyphoonReport;
   onSelectTyphoon: (tc: TyphoonReport) => void;
   activeVolcano: VolcanoStatusItem;
-  activeTsunamiStation: TsunamiStationItem;
+  activeTsunamiStation?: TsunamiStationItem;
   activeEew?: EewReport | null;
   activeTsunamiForecast?: TsunamiForecastReport | null;
   isTsunamiDemo?: boolean;
@@ -91,7 +91,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
   selectedTyphoon,
   onSelectTyphoon,
   activeVolcano,
-  activeTsunamiStation,
+  activeTsunamiStation = null,
   activeEew = null,
   activeTsunamiForecast = null,
   isTsunamiDemo = false,
@@ -853,15 +853,12 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
             <div className="pb-2">
               <div className="bg-amber-600 px-2.5 py-1 text-[13px] font-bold text-slate-950 flex items-center justify-between">
                 <span>津波警報・注意報・予報</span>
-                {onToggleTsunamiDemo && (
-                  <button
-                    type="button"
-                    onClick={onToggleTsunamiDemo}
-                    className="px-2 py-0.5 text-[11px] font-mono bg-slate-950/80 hover:bg-slate-900 text-yellow-300 border border-yellow-400/60 rounded-xs transition-colors cursor-pointer"
-                  >
-                    {isTsunamiDemo ? '実況に戻す' : 'デモ津波警報表示'}
-                  </button>
-                )}
+                {activeTsunamiForecast &&
+                  activeTsunamiForecast.areas.length > 0 && (
+                    <span className="font-mono text-xs bg-slate-950/60 text-white px-1.5 py-0.2 rounded-xs">
+                      {activeTsunamiForecast.areas.length}沿岸発表中
+                    </span>
+                  )}
               </div>
 
               {activeTsunamiForecast &&
@@ -940,38 +937,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
                     現在、津波警報・注意報・予報は発表されていません。
                   </div>
                   <div className="text-[11px] text-neutral-400">
-                    右上の「デモ津波警報表示」ボタンをクリックすると、大津波警報・津波警報発令時の全国海岸線・予想高さ表示シミュレーションを確認できます。
+                    ※左下の「⚙ 設定」から津波警報デモを発火すると、大津波警報・津波警報時の全国海岸線表示を確認できます。
                   </div>
                 </div>
               )}
-            </div>
-
-            {/* Tide observation stations */}
-            <div className="pb-2">
-              <div className="bg-[#3E434F] px-2.5 py-0.5 text-[12px] font-bold text-white flex items-center justify-between">
-                <span>潮位観測点（リアルタイム）</span>
-                <span className="text-[11px] font-mono text-cyan-300">
-                  {data.tsunamiStations.length}地点
-                </span>
-              </div>
-              <div className="pt-1">
-                {data.tsunamiStations.map((ts) => (
-                  <div
-                    key={ts.id}
-                    className="px-2.5 py-1 flex items-center justify-between text-xs font-mono border-b border-neutral-800/60"
-                  >
-                    <span className="text-white font-bold">
-                      {ts.stationName}
-                    </span>
-                    <span className="text-neutral-400 text-[11px]">
-                      {ts.areaName.slice(0, 8)}
-                    </span>
-                    <span className="text-cyan-300 font-bold">
-                      +{ts.tideLevelM.toFixed(2)}m
-                    </span>
-                  </div>
-                ))}
-              </div>
             </div>
           </>
         )}

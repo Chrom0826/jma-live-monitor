@@ -130,7 +130,7 @@ interface MonitorMapProps {
   selectedEarthquake: EarthquakeReport;
   selectedTyphoon: TyphoonReport;
   activeVolcano: VolcanoStatusItem;
-  activeTsunamiStation: TsunamiStationItem;
+  activeTsunamiStation?: TsunamiStationItem;
   amedasMetric: AmedasMetric;
   onChangeAmedasMetric: (metric: AmedasMetric) => void;
   onViewportChange?: (viewport: MapViewportState) => void;
@@ -909,15 +909,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       };
     }
     if (effectiveScene === 'tsunami') {
-      if (activeTsunamiForecast && activeTsunamiForecast.areas.length > 0) {
-        return {
-          center: [37.2, 137.5],
-          zoom: 5.2,
-        };
-      }
       return {
-        center: [activeTsunamiStation.lat, activeTsunamiStation.lon],
-        zoom: 8,
+        center: [37.2, 137.5],
+        zoom: 5.2,
       };
     }
     if (effectiveScene === 'typhoon') {
@@ -1026,9 +1020,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     activeVolcano.id,
     activeVolcano.lat,
     activeVolcano.lon,
-    activeTsunamiStation.id,
-    activeTsunamiStation.lat,
-    activeTsunamiStation.lon,
     activeEew?.id,
     activeEew?.serial,
     activeTsunamiForecast?.areas.length,
@@ -1674,33 +1665,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         iconAnchor: [110, -10],
       });
       L.marker([activeVolcano.lat, activeVolcano.lon], { icon }).addTo(group);
-    } else if (effectiveScene === 'tsunami') {
-      L.circle([activeTsunamiStation.lat, activeTsunamiStation.lon], {
-        pane: 'vectorOverlayPane',
-        renderer: overlayRenderer,
-        radius: 18000,
-        color: '#F59E0B',
-        weight: 2,
-        fillColor: '#F59E0B',
-        fillOpacity: 0.2,
-        interactive: false,
-      }).addTo(group);
-
-      const icon = L.divIcon({
-        className: 'custom-tsunami-focus',
-        html: `
-          <div style="display:inline-flex;align-items:center;gap:6px;background:rgba(18,18,22,0.95);border:2px solid #F59E0B;padding:4px 10px;white-space:nowrap;font-family:'JetBrains Mono',monospace;">
-            <span style="color:#FDE047;font-size:12px;font-weight:800;">● 潮位変化観測</span>
-            <span style="color:#FFFFFF;font-size:12px;font-weight:700;">${activeTsunamiStation.stationName}</span>
-            <span style="color:#F59E0B;font-size:12px;font-weight:800;">+${activeTsunamiStation.tideLevelM.toFixed(2)}m</span>
-          </div>
-        `,
-        iconSize: [240, 32],
-        iconAnchor: [120, -10],
-      });
-      L.marker([activeTsunamiStation.lat, activeTsunamiStation.lon], {
-        icon,
-      }).addTo(group);
     } else if (effectiveScene === 'earthquake') {
       const targetZoom = getSceneCameraTarget().zoom;
       const currentZoom = map.getZoom();
@@ -1944,7 +1908,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     selectedEarthquake,
     selectedTyphoon,
     activeVolcano,
-    activeTsunamiStation,
     activeEew,
     activeTsunamiForecast,
     eewAnimNow,

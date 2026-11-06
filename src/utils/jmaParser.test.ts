@@ -4,6 +4,7 @@ import {
   computeEewWaveRadiiKm,
   formatEewArrivalLabel,
   formatEewScaleRange,
+  getTsunamiAlertSeverity,
   parseP2PEew,
   parseP2PTsunami,
   shouldReplaceEew,
@@ -804,6 +805,37 @@ test('P2PQuake EEW (code 556) & Tsunami (code 552) parsing, wave radii propagati
   assert.equal(tsunamiReport.areas[1].code, '220'); // maps '宮城県' to '220'
   assert.equal(tsunamiReport.areas[2].grade, 'Watch');
   assert.equal(tsunamiReport.areas[2].code, '250'); // maps '福島県' to '250'
+
+  // 6. Tsunami Alert Severity logic:
+  // MajorWarning / Warning / Watch -> 'warning_or_above' (locks onto tsunami scene)
+  assert.equal(getTsunamiAlertSeverity(tsunamiReport), 'warning_or_above');
+
+  // Cancelled -> 'none'
+  assert.equal(
+    getTsunamiAlertSeverity({ ...tsunamiReport, cancelled: true }),
+    'none'
+  );
+
+  // Forecast only (若干の海面変動) -> 'forecast' (dynamically included in normal loop, transitions to radar)
+  const forecastOnlyReport = {
+    ...tsunamiReport,
+    areas: [
+      {
+        name: '伊豆諸島',
+        code: '320',
+        grade: 'Forecast' as const,
+        immediate: false,
+        firstHeightText: '若干の海面変動',
+        maxHeightText: '0.2m未満',
+      },
+    ],
+  };
+  assert.equal(getTsunamiAlertSeverity(forecastOnlyReport), 'forecast');
+
+  // Normal loop sequence with Forecast: ... -> earthquake -> tsunami -> radar
+  const loopWithTsunami = [...DEFAULT_NORMAL_LOOP_SCENES, 'tsunami' as const];
+  assert.equal(getNextSceneId('earthquake', loopWithTsunami), 'tsunami');
+  assert.equal(getNextSceneId('tsunami', loopWithTsunami), 'radar'); // advances to rain radar!
 });
 
 

@@ -552,3 +552,31 @@ export function getTsunamiHighestGrade(report: TsunamiForecastReport): TsunamiGr
     'Unknown'
   );
 }
+
+export type TsunamiAlertSeverity = 'none' | 'forecast' | 'warning_or_above';
+
+/**
+ * Evaluates the severity of the currently active tsunami forecast:
+ * - 'warning_or_above': MajorWarning (大津波警報), Warning (津波警報), or Watch (津波注意報) is active.
+ *   The monitor LOCKS ONTO the tsunami tab continuously until cancelled.
+ * - 'forecast': Only Forecast (津波予報 / 若干の海面変動) is active.
+ *   The monitor includes the tsunami scene in the normal loop, and advances to rain radar ('radar') after hold.
+ * - 'none': No active tsunami forecast. The tsunami scene is not in the automatic loop.
+ */
+export function getTsunamiAlertSeverity(
+  report: TsunamiForecastReport | null | undefined,
+  nowMs: number = Date.now()
+): TsunamiAlertSeverity {
+  if (!isTsunamiForecastActive(report, nowMs)) return 'none';
+  if (!report || !Array.isArray(report.areas) || report.areas.length === 0) return 'none';
+
+  const hasWarningOrAbove = report.areas.some(
+    (a) => a.grade === 'MajorWarning' || a.grade === 'Warning' || a.grade === 'Watch'
+  );
+  if (hasWarningOrAbove) return 'warning_or_above';
+
+  const hasForecast = report.areas.some((a) => a.grade === 'Forecast');
+  if (hasForecast) return 'forecast';
+
+  return 'none';
+}

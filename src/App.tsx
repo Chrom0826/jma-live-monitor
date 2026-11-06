@@ -53,6 +53,7 @@ import {
   SCENE_LIST,
 } from './utils/jmaParser';
 import {
+  getTsunamiAlertSeverity,
   parseP2PEew,
   parseP2PTsunami,
   shouldReplaceEew,
@@ -140,8 +141,6 @@ export default function App() {
   const [activeVolcano, setActiveVolcano] = useState<VolcanoStatusItem>(
     INITIAL_VOLCANOES[0]
   );
-  const [activeTsunamiStation, setActiveTsunamiStation] =
-    useState<TsunamiStationItem>(INITIAL_TSUNAMI_STATIONS[0]);
   const [activeEew, setActiveEew] = useState<EewReport | null>(null);
   const [isTsunamiDemo, setIsTsunamiDemo] = useState<boolean>(false);
   const [amedasMetric, setAmedasMetric] = useState<AmedasMetric>('temp');
@@ -165,7 +164,6 @@ export default function App() {
 
   const latestEqIdRef = useRef<string>(INITIAL_EARTHQUAKES[0].id);
   const latestVolcanoXmlIdRef = useRef<string>('');
-  const latestTsunamiXmlIdRef = useRef<string>('');
 
   // Bottom XML Ticker refs (uses tiled scrollLeft instead of GPU-texture-limited translate3d)
   const tickerContainerRef = useRef<HTMLDivElement | null>(null);
@@ -263,24 +261,6 @@ export default function App() {
       } else if (volcanoLevelXml && !latestVolcanoXmlIdRef.current) {
         latestVolcanoXmlIdRef.current = volcanoLevelXml.id;
       }
-
-      // 3. Check for Tsunami / Abnormal Tide report in eqvol.xml
-      const tsunamiXml = bundle.xmlEntries.find(
-        (e) =>
-          e.category === 'tsunami' &&
-          (e.title.includes('津波') || e.title.includes('潮位'))
-      );
-      if (
-        tsunamiXml &&
-        latestTsunamiXmlIdRef.current &&
-        tsunamiXml.id !== latestTsunamiXmlIdRef.current
-      ) {
-        latestTsunamiXmlIdRef.current = tsunamiXml.id;
-        setActiveTsunamiStation(TEST_TSUNAMI_ANOMALY_STATION);
-        setInterruptKind('tsunami');
-      } else if (tsunamiXml && !latestTsunamiXmlIdRef.current) {
-        latestTsunamiXmlIdRef.current = tsunamiXml.id;
-      }
     } finally {
       setIsRefreshingXml(false);
     }
@@ -331,7 +311,8 @@ export default function App() {
                 ...prev,
                 tsunamiForecast: tsunami,
               }));
-              if (!tsunami.cancelled && tsunami.areas.length > 0) {
+              const sev = getTsunamiAlertSeverity(tsunami);
+              if (sev === 'warning_or_above') {
                 setActiveScene('tsunami');
               }
             }
@@ -396,12 +377,56 @@ export default function App() {
     severeWarningDivisions.length > 0 &&
     warningPatrolStep === severeWarningDivisions.length + 1;
 
+  // Dynamic Tsunami Alert Severity: 'none' | 'forecast' | 'warning_or_above'
+  const tsunamiSeverity = useMemo(
+    () => getTsunamiAlertSeverity(data.tsunamiForecast),
+    [data.tsunamiForecast]
+  );
+
+  // If a Tsunami Warning or Major Warning or Advisory is active, continuously lock onto the tsunami scene until cancelled!
+  useEffect(() => {
+    if (tsunamiSeverity === 'warning_or_above') {
+      setActiveScene('tsunami');
+    }
+  }, [tsunamiSeverity]);
+
+  // When Tsunami Forecast ('forecast' / 若干の海面変動) is active, dynamically include 'tsunami' in the normal loop.
+  // Order: ... -> forecast -> earthquake -> tsunami -> radar -> ...
+  // When 'warning_or_above' is active, scenes are restricted so it continuously locks onto 'tsunami'.
+  // When 'none', tsunami is excluded from the automated normal loop.
+  const effectiveEnabledScenes = useMemo<SceneId[]>(() => {
+    if (tsunamiSeverity === 'warning_or_above') {
+      return ['tsunami'];
+    }
+    if (tsunamiSeverity === 'forecast') {
+      if (enabledScenes.includes('tsunami')) {
+        return enabledScenes;
+      }
+      // Insert tsunami right after earthquake (or at the end so it advances to radar)
+      const eqIdx = enabledScenes.indexOf('earthquake');
+      if (eqIdx !== -1) {
+        const next = [...enabledScenes];
+        next.splice(eqIdx + 1, 0, 'tsunami');
+        return next;
+      }
+      return [...enabledScenes, 'tsunami'];
+    }
+    // 'none': do not include tsunami in normal automatic loop unless explicitly forced
+    return enabledScenes.filter((s) => s !== 'tsunami');
+  }, [enabledScenes, tsunamiSeverity]);
+
   // Step to next scene in the normal loop:
   // 1. In `'warnings'` (`regionScope === 'national' || 'auto'`), start at 全国表示, then zoom ONLY into divisions with 警報/特別警報 (`severeWarningDivisions`), return to 全国表示, then advance to next scene.
   // 2. When `regionScope === 'auto'` on `forecast` or `weather_info`, step North-to-South before advancing.
   // 3. When in `'typhoon'` and multiple typhoons/TDs/extratropical cyclones exist, automatically cycle through all of them in the right panel.
   // 4. When in `'amedas'`, step through `'temp' -> 'precip' -> 'wind' (-> 'snow')` (each metric performs 全国表示 -> 北海道〜沖縄連続スイープ -> 全国表示 in MonitorMap) before moving to the next scene.
+  // 5. If a Tsunami Warning/Advisory is active ('warning_or_above'), lock onto the tsunami scene continuously until cancelled.
   const advanceScene = useCallback(() => {
+    // If locked onto tsunami warning or above, stay on tsunami scene continuously until cancelled!
+    if (tsunamiSeverity === 'warning_or_above') {
+      return;
+    }
+
     if (
       activeScene === 'warnings' &&
       (regionScope === 'national' || regionScope === 'auto')
@@ -452,7 +477,7 @@ export default function App() {
     }
 
     setActiveScene((prevScene) => {
-      const nextScene = getNextSceneId(prevScene, enabledScenes);
+      const nextScene = getNextSceneId(prevScene, effectiveEnabledScenes);
       if (nextScene === 'warnings') {
         setWarningPatrolStep(0);
       }
@@ -474,11 +499,12 @@ export default function App() {
     data.amedas,
     data.typhoons,
     selectedTyphoon.id,
-    enabledScenes,
+    effectiveEnabledScenes,
     regionScope,
     patrolStepIndex,
     severeWarningDivisions.length,
     warningPatrolStep,
+    tsunamiSeverity,
   ]);
 
   const handleSelectSceneManual = (sceneId: SceneId) => {
@@ -535,13 +561,6 @@ export default function App() {
     setActiveVolcano(TEST_VOLCANO_LEVEL_CHANGE);
     setInterruptKind('volcano');
     setActiveScene('volcano');
-  };
-
-  // Test Interrupt 3: Tsunami / Abnormal Tide Level (zooms directly to tide station)
-  const handleTriggerTestTsunami = () => {
-    setActiveTsunamiStation(TEST_TSUNAMI_ANOMALY_STATION);
-    setInterruptKind('tsunami');
-    setActiveScene('tsunami');
   };
 
   // Tsunami Full-scale Demo Toggle (大津波警報・津波警報・注意報シミュレーション)
@@ -804,7 +823,6 @@ export default function App() {
               selectedEarthquake={selectedEarthquake}
               selectedTyphoon={selectedTyphoon}
               activeVolcano={activeVolcano}
-              activeTsunamiStation={activeTsunamiStation}
               amedasMetric={amedasMetric}
               onChangeAmedasMetric={setAmedasMetric}
               onViewportChange={setMapViewport}
@@ -873,11 +891,9 @@ export default function App() {
                 selectedEarthquake={selectedEarthquake}
                 selectedTyphoon={selectedTyphoon}
                 activeVolcano={activeVolcano}
-                activeTsunamiStation={activeTsunamiStation}
                 activeEew={activeEew}
                 activeTsunamiForecast={data.tsunamiForecast}
                 isTsunamiDemo={isTsunamiDemo}
-                onToggleTsunamiDemo={handleToggleTsunamiDemo}
                 amedasMetric={amedasMetric}
                 onChangeAmedasMetric={setAmedasMetric}
                 onSelectEarthquake={(eq) => {
@@ -988,7 +1004,6 @@ export default function App() {
         onTriggerTestEarthquake={handleTriggerTestEarthquake}
         onTriggerTestEew={handleTriggerEewDemo}
         onTriggerTestVolcano={handleTriggerTestVolcano}
-        onTriggerTestTsunami={handleTriggerTestTsunami}
         onToggleTsunamiDemo={handleToggleTsunamiDemo}
         isTsunamiDemo={isTsunamiDemo}
         onManualRefresh={refreshJmaData}

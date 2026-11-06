@@ -22,7 +22,7 @@ interface XmlInspectorModalProps {
   onTriggerTestEarthquake: () => void;
   onTriggerTestEew?: () => void;
   onTriggerTestVolcano: () => void;
-  onTriggerTestTsunami: () => void;
+  onTriggerTestTsunami?: () => void;
   onToggleTsunamiDemo?: () => void;
   isTsunamiDemo?: boolean;
   onManualRefresh: () => void;
@@ -285,16 +285,6 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                     className="px-3 py-2.5 text-xs font-bold bg-amber-950/90 hover:bg-amber-900 border border-amber-500 text-amber-100 transition-colors text-center cursor-pointer"
                   >
                     火山Lv変化 (桜島ズーム)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onTriggerTestTsunami();
-                      onClose();
-                    }}
-                    className="px-3 py-2.5 text-xs font-bold bg-sky-950/90 hover:bg-sky-900 border border-sky-500 text-sky-100 transition-colors text-center cursor-pointer"
-                  >
-                    潮位変化 (八丈島ズーム)
                   </button>
                 </div>
               </div>
