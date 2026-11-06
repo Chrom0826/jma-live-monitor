@@ -1,5 +1,7 @@
 import {
   AmedasStationData,
+  EarthquakeReport,
+  EarthquakeStationIntensity,
   JmaXmlEntry,
   RegionConfig,
   RegionId,
@@ -603,45 +605,349 @@ export function getSeismicScaleStyle(scaleCode: number): {
   text: string;
   border: string;
   hex: string;
+  badgeText: string;
 } {
-  if (scaleCode >= 60) {
+  if (scaleCode >= 70) {
     return {
       bg: 'bg-purple-950/90',
       text: 'text-purple-200',
       border: 'border-purple-500',
-      hex: '#A855F7',
+      hex: '#9333EA',
+      badgeText: '#FFFFFF',
     };
   }
-  if (scaleCode >= 45) {
+  if (scaleCode >= 60) {
+    return {
+      bg: 'bg-red-950/95',
+      text: 'text-red-200',
+      border: 'border-red-500',
+      hex: '#DC2626',
+      badgeText: '#FFFFFF',
+    };
+  }
+  if (scaleCode >= 55) {
     return {
       bg: 'bg-rose-950/90',
       text: 'text-rose-200',
       border: 'border-rose-500',
       hex: '#EF4444',
+      badgeText: '#FFFFFF',
     };
   }
-  if (scaleCode >= 40) {
+  if (scaleCode >= 50) {
+    return {
+      bg: 'bg-orange-950/90',
+      text: 'text-orange-200',
+      border: 'border-orange-500',
+      hex: '#F97316',
+      badgeText: '#FFFFFF',
+    };
+  }
+  if (scaleCode >= 45) {
     return {
       bg: 'bg-amber-950/90',
       text: 'text-amber-200',
       border: 'border-amber-500',
-      hex: '#EAB308',
+      hex: '#F59E0B',
+      badgeText: '#07090E',
+    };
+  }
+  if (scaleCode >= 40) {
+    return {
+      bg: 'bg-yellow-950/90',
+      text: 'text-yellow-200',
+      border: 'border-yellow-400',
+      hex: '#FACC15',
+      badgeText: '#07090E',
     };
   }
   if (scaleCode >= 30) {
     return {
-      bg: 'bg-cyan-950/90',
-      text: 'text-cyan-200',
-      border: 'border-cyan-500',
-      hex: '#06B6D4',
+      bg: 'bg-emerald-950/90',
+      text: 'text-emerald-200',
+      border: 'border-emerald-500',
+      hex: '#22C55E',
+      badgeText: '#07090E',
+    };
+  }
+  if (scaleCode >= 20) {
+    return {
+      bg: 'bg-sky-950/90',
+      text: 'text-sky-200',
+      border: 'border-sky-400',
+      hex: '#38BDF8',
+      badgeText: '#07090E',
     };
   }
   return {
     bg: 'bg-slate-800/90',
     text: 'text-slate-200',
-    border: 'border-slate-600',
+    border: 'border-slate-500',
     hex: '#64748B',
+    badgeText: '#F8FAFC',
   };
+}
+
+/**
+ * Converts JMA's intensity string (`"1"`, `"2"`, `"3"`, `"4"`, `"5-"`, `"5+"`, `"6-"`, `"6+"`, `"7"`)
+ * into a numeric `scaleCode` and human-readable `scaleLabel`.
+ */
+export function parseJmaIntensityString(intStr: string): {
+  scaleCode: number;
+  scaleLabel: string;
+} {
+  const s = String(intStr || '').trim();
+  switch (s) {
+    case '7':
+      return { scaleCode: 70, scaleLabel: '7' };
+    case '6+':
+    case '6強':
+      return { scaleCode: 60, scaleLabel: '6強' };
+    case '6-':
+    case '6弱':
+      return { scaleCode: 55, scaleLabel: '6弱' };
+    case '5+':
+    case '5強':
+      return { scaleCode: 50, scaleLabel: '5強' };
+    case '5-':
+    case '5弱':
+      return { scaleCode: 45, scaleLabel: '5弱' };
+    case '4':
+      return { scaleCode: 40, scaleLabel: '4' };
+    case '3':
+      return { scaleCode: 30, scaleLabel: '3' };
+    case '2':
+      return { scaleCode: 20, scaleLabel: '2' };
+    case '1':
+      return { scaleCode: 10, scaleLabel: '1' };
+    default:
+      return { scaleCode: 10, scaleLabel: '1' };
+  }
+}
+
+/**
+ * Parses JMA ISO-6709 coordinate string such as `"+37.8+141.5-80000/"` or `"+32.4+130.5+0/"`.
+ */
+export function parseJmaIsoCoordinate(cod: string): {
+  lat: number;
+  lon: number;
+  depthKm: number;
+} | null {
+  if (!cod || typeof cod !== 'string') return null;
+  const match = /^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)?/.exec(
+    cod.trim()
+  );
+  if (!match) return null;
+  const lat = Number(match[1]);
+  const lon = Number(match[2]);
+  if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+  const depthMeters = match[3] ? Math.abs(Number(match[3])) : 10000;
+  const depthKm = Math.round(depthMeters / 1000);
+  return { lat, lon, depthKm };
+}
+
+function formatJmaIsoDateTimeJst(isoStr: string, suffix: string): string {
+  if (!isoStr || typeof isoStr !== 'string') return suffix;
+  // Example: "2026-11-06T03:05:00+09:00" -> "2026/11/06 03:05 頃発生"
+  if (isoStr.length >= 16) {
+    const datePart = isoStr.slice(0, 10).replace(/-/g, '/');
+    const timePart = isoStr.slice(11, 16);
+    return `${datePart} ${timePart} ${suffix}`;
+  }
+  return `${isoStr} ${suffix}`;
+}
+
+function inferRegionFromHypocenterName(name: string, lat: number, lon: number): RegionId {
+  if (name.includes('北海道') || name.includes('釧路') || name.includes('十勝') || name.includes('千島'))
+    return 'hokkaido';
+  if (
+    name.includes('青森') ||
+    name.includes('岩手') ||
+    name.includes('宮城') ||
+    name.includes('秋田') ||
+    name.includes('山形') ||
+    name.includes('福島') ||
+    name.includes('三陸')
+  )
+    return 'tohoku';
+  if (
+    name.includes('茨城') ||
+    name.includes('栃木') ||
+    name.includes('群馬') ||
+    name.includes('埼玉') ||
+    name.includes('千葉') ||
+    name.includes('東京') ||
+    name.includes('神奈川') ||
+    name.includes('相模') ||
+    name.includes('山梨') ||
+    name.includes('長野') ||
+    name.includes('伊豆') ||
+    name.includes('小笠原')
+  )
+    return 'kanto';
+  if (
+    name.includes('新潟') ||
+    name.includes('富山') ||
+    name.includes('石川') ||
+    name.includes('福井') ||
+    name.includes('岐阜') ||
+    name.includes('静岡') ||
+    name.includes('愛知') ||
+    name.includes('能登')
+  )
+    return 'chubu';
+  if (
+    name.includes('三重') ||
+    name.includes('滋賀') ||
+    name.includes('京都') ||
+    name.includes('大阪') ||
+    name.includes('兵庫') ||
+    name.includes('奈良') ||
+    name.includes('和歌山')
+  )
+    return 'kinki';
+  if (
+    name.includes('鳥取') ||
+    name.includes('島根') ||
+    name.includes('岡山') ||
+    name.includes('広島') ||
+    name.includes('山口') ||
+    name.includes('徳島') ||
+    name.includes('香川') ||
+    name.includes('愛媛') ||
+    name.includes('高知') ||
+    name.includes('伊予') ||
+    name.includes('豊後')
+  )
+    return 'chugoku_shikoku';
+  if (
+    name.includes('沖縄') ||
+    name.includes('奄美') ||
+    name.includes('宮古') ||
+    name.includes('石垣') ||
+    name.includes('与那国')
+  )
+    return 'okinawa';
+  return inferRegionFromCoords(lat, lon).regionId;
+}
+
+/**
+ * Parses JMA's official `https://www.jma.go.jp/bosai/quake/data/{json}` detail report,
+ * extracting the hypocenter AND every individual seismic intensity meter (`IntensityStation`)
+ * with its exact latitude, longitude, and observed intensity (`1`, `2`, `3`, `4`, `5弱`, `5強`, `6弱`, `6強`, `7`).
+ */
+export function parseJmaQuakeDetailJson(
+  detailJson: Record<string, any>,
+  listSummary?: Record<string, any>
+): EarthquakeReport | null {
+  try {
+    if (!detailJson || typeof detailJson !== 'object') return null;
+
+    const head = detailJson.Head || {};
+    const body = detailJson.Body || {};
+    const eq = body.Earthquake || {};
+    const hypoArea = eq.Hypocenter?.Area || {};
+
+    const eid = String(head.EventID || listSummary?.eid || '');
+    const hypocenterName = String(
+      hypoArea.Name || listSummary?.anm || '震源調査中'
+    );
+    const coordStr = String(hypoArea.Coordinate || listSummary?.cod || '');
+    const parsedCoord = parseJmaIsoCoordinate(coordStr);
+
+    const lat = parsedCoord ? parsedCoord.lat : 35.68;
+    const lon = parsedCoord ? parsedCoord.lon : 139.76;
+    const depthKm = parsedCoord ? parsedCoord.depthKm : 10;
+
+    const rawMag = Number(eq.Magnitude ?? listSummary?.mag ?? 4.0);
+    const magnitude =
+      !Number.isNaN(rawMag) && rawMag > 0 ? Number(rawMag.toFixed(1)) : 4.0;
+
+    const obs = body.Intensity?.Observation || {};
+    const maxIntStr = String(obs.MaxInt || listSummary?.maxi || '1');
+    const maxIntInfo = parseJmaIntensityString(maxIntStr);
+
+    const stations: EarthquakeStationIntensity[] = [];
+    const prefs = Array.isArray(obs.Pref) ? obs.Pref : [];
+
+    for (const pref of prefs) {
+      const prefName = String(pref?.Name || '');
+      const areas = Array.isArray(pref?.Area) ? pref.Area : [];
+      for (const area of areas) {
+        const areaName = String(area?.Name || prefName);
+        const cities = Array.isArray(area?.City) ? area.City : [];
+        for (const city of cities) {
+          const cityName = String(city?.Name || areaName);
+          const intensityStations = Array.isArray(city?.IntensityStation)
+            ? city.IntensityStation
+            : [];
+          for (const st of intensityStations) {
+            const stName = String(st?.Name || cityName).replace(/[＊*]/g, '');
+            const intInfo = parseJmaIntensityString(
+              String(st?.Int || city?.MaxInt || pref?.MaxInt || '1')
+            );
+            const stLat = Number(st?.latlon?.lat);
+            const stLon = Number(st?.latlon?.lon);
+            stations.push({
+              prefecture: prefName,
+              city: cityName,
+              stationName: stName,
+              scaleCode: intInfo.scaleCode,
+              scaleLabel: intInfo.scaleLabel,
+              lat: !Number.isNaN(stLat) && stLat > 0 ? stLat : undefined,
+              lon: !Number.isNaN(stLon) && stLon > 0 ? stLon : undefined,
+            });
+          }
+        }
+      }
+    }
+
+    stations.sort((a, b) => b.scaleCode - a.scaleCode);
+
+    const reportIso = String(head.ReportDateTime || listSummary?.rdt || '');
+    const originIso = String(eq.OriginTime || listSummary?.at || reportIso);
+    const commentText = String(
+      body.Comments?.ForecastComment?.Text || ''
+    ).trim();
+
+    return {
+      id: eid ? `jma-eq-${eid}` : `jma-eq-${originIso}`,
+      issueTime: formatJmaIsoDateTimeJst(reportIso, '発表'),
+      occurrenceTime: formatJmaIsoDateTimeJst(originIso, '頃発生'),
+      hypocenterName,
+      regionId: inferRegionFromHypocenterName(hypocenterName, lat, lon),
+      lat,
+      lon,
+      depthKm,
+      magnitude,
+      maxScaleCode: maxIntInfo.scaleCode,
+      maxScaleLabel: maxIntInfo.scaleLabel,
+      domesticTsunami:
+        commentText || 'この地震による津波の心配はありません。',
+      foreignTsunami: 'なし',
+      sourceOffice: String(
+        detailJson.Control?.EditorialOffice ||
+          detailJson.Control?.PublishingOffice ||
+          '気象庁本庁（震源・震度情報）'
+      ),
+      stations:
+        stations.length > 0
+          ? stations
+          : [
+              {
+                prefecture: hypocenterName,
+                city: hypocenterName,
+                stationName: hypocenterName,
+                scaleCode: maxIntInfo.scaleCode,
+                scaleLabel: maxIntInfo.scaleLabel,
+                lat,
+                lon,
+              },
+            ],
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**

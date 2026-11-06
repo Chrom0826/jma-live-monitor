@@ -12,6 +12,9 @@ import {
   getNextSubRegion,
   parseJmaAmedasNationwide,
   parseJmaAtomXml,
+  parseJmaIntensityString,
+  parseJmaIsoCoordinate,
+  parseJmaQuakeDetailJson,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
   resolveLabelBoxCollisions,
@@ -250,4 +253,91 @@ test('computeWarningSummary aggregates warning severities accurately', () => {
 
   assert.equal(summary.warningCount, 1);
 });
+
+test('parseJmaQuakeDetailJson extracts hypocenter and individual IntensityStation coordinates', () => {
+  assert.deepEqual(parseJmaIntensityString('3'), { scaleCode: 30, scaleLabel: '3' });
+  assert.deepEqual(parseJmaIntensityString('5-'), { scaleCode: 45, scaleLabel: '5弱' });
+  assert.deepEqual(parseJmaIsoCoordinate('+37.8+141.5-80000/'), {
+    lat: 37.8,
+    lon: 141.5,
+    depthKm: 80,
+  });
+
+  const sampleDetail = {
+    Control: { EditorialOffice: '気象庁本庁' },
+    Head: {
+      EventID: '20261106030553',
+      ReportDateTime: '2026-11-06T03:09:00+09:00',
+    },
+    Body: {
+      Earthquake: {
+        OriginTime: '2026-11-06T03:05:00+09:00',
+        Hypocenter: {
+          Area: {
+            Name: '福島県沖',
+            Coordinate: '+37.8+141.5-80000/',
+          },
+        },
+        Magnitude: '4.3',
+      },
+      Intensity: {
+        Observation: {
+          MaxInt: '2',
+          Pref: [
+            {
+              Name: '岩手県',
+              Code: '03',
+              MaxInt: '2',
+              Area: [
+                {
+                  Name: '岩手県内陸南部',
+                  City: [
+                    {
+                      Name: '一関市',
+                      MaxInt: '2',
+                      IntensityStation: [
+                        {
+                          Name: '一関市室根町＊',
+                          Code: '0320938',
+                          Int: '2',
+                          latlon: { lat: 38.94, lon: 141.44 },
+                        },
+                        {
+                          Name: '一関市大東町',
+                          Code: '0320902',
+                          Int: '1',
+                          latlon: { lat: 39.02, lon: 141.4 },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+      Comments: {
+        ForecastComment: {
+          Text: 'この地震による津波の心配はありません。',
+        },
+      },
+    },
+  };
+
+  const eq = parseJmaQuakeDetailJson(sampleDetail);
+  assert.ok(eq);
+  assert.equal(eq.hypocenterName, '福島県沖');
+  assert.equal(eq.lat, 37.8);
+  assert.equal(eq.lon, 141.5);
+  assert.equal(eq.depthKm, 80);
+  assert.equal(eq.maxScaleLabel, '2');
+  assert.equal(eq.stations.length, 2);
+  assert.equal(eq.stations[0].stationName, '一関市室根町');
+  assert.equal(eq.stations[0].scaleLabel, '2');
+  assert.equal(eq.stations[0].lat, 38.94);
+  assert.equal(eq.stations[0].lon, 141.44);
+  assert.equal(eq.stations[1].scaleLabel, '1');
+});
+
 

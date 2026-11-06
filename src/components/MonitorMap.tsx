@@ -400,6 +400,39 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     zoom: number;
   } => {
     if (effectiveScene === 'earthquake') {
+      const validStations = selectedEarthquake.stations.filter(
+        (s): s is typeof s & { lat: number; lon: number } =>
+          typeof s.lat === 'number' &&
+          typeof s.lon === 'number' &&
+          !Number.isNaN(s.lat) &&
+          !Number.isNaN(s.lon)
+      );
+      if (validStations.length > 0) {
+        const lats = [
+          selectedEarthquake.lat,
+          ...validStations.map((s) => s.lat),
+        ];
+        const lons = [
+          selectedEarthquake.lon,
+          ...validStations.map((s) => s.lon),
+        ];
+        const minLat = Math.min(...lats);
+        const maxLat = Math.max(...lats);
+        const minLon = Math.min(...lons);
+        const maxLon = Math.max(...lons);
+        const latSpan = maxLat - minLat;
+        const lonSpan = maxLon - minLon;
+        const targetZoom =
+          latSpan <= 1.2 && lonSpan <= 1.5
+            ? 8
+            : latSpan <= 3.8 && lonSpan <= 4.8
+              ? 7
+              : 6;
+        return {
+          center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2],
+          zoom: targetZoom,
+        };
+      }
       return {
         center: [selectedEarthquake.lat, selectedEarthquake.lon],
         zoom: 7,
@@ -864,42 +897,100 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         icon,
       }).addTo(group);
     } else if (effectiveScene === 'earthquake') {
-      const stationOffsets: Array<[number, number]> = [
-        [-14, 24],
-        [115, 28],
-        [115, -4],
-        [115, 14],
-        [-14, -6],
-      ];
+      const targetZoom = getSceneCameraTarget().zoom;
+      const currentZoom = map.getZoom();
+      const projectionZoom =
+        Math.abs(currentZoom - targetZoom) <= 1 ? currentZoom : targetZoom;
 
-      selectedEarthquake.stations.forEach((st, idx) => {
-        if (typeof st.lat === 'number' && typeof st.lon === 'number') {
-          const style = getSeismicScaleStyle(st.scaleCode);
-          const anchor = stationOffsets[idx % stationOffsets.length];
+      const sortedStations = [...selectedEarthquake.stations]
+        .filter(
+          (st): st is typeof st & { lat: number; lon: number } =>
+            typeof st.lat === 'number' &&
+            typeof st.lon === 'number' &&
+            !Number.isNaN(st.lat) &&
+            !Number.isNaN(st.lon)
+        )
+        .sort((a, b) => b.scaleCode - a.scaleCode);
 
-          L.circleMarker([st.lat, st.lon], {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            radius: 5,
-            color: style.hex,
-            fillColor: style.hex,
-            fillOpacity: 1,
-            weight: 1.5,
-            interactive: false,
-          }).addTo(group);
+      // Track placed screen-space bounding boxes so seismic intensity badges never overlap
+      const placedBoxes: Array<{
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+      }> = [];
+
+      // Reserve epicenter cross area first so station badges don't cover the '×' symbol
+      const epiPt = map.project(
+        [selectedEarthquake.lat, selectedEarthquake.lon],
+        projectionZoom
+      );
+      placedBoxes.push({ x: epiPt.x, y: epiPt.y, w: 30, h: 30 });
+
+      const collidesWithPlaced = (
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        gap = 3
+      ): boolean => {
+        for (let i = 0; i < placedBoxes.length; i++) {
+          const b = placedBoxes[i];
+          if (
+            Math.abs(x - b.x) < (w + b.w) / 2 + gap &&
+            Math.abs(y - b.y) < (h + b.h) / 2 + gap
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      sortedStations.forEach((st) => {
+        const pt = map.project([st.lat, st.lon], projectionZoom);
+        const style = getSeismicScaleStyle(st.scaleCode);
+        const fullW = st.scaleLabel.length > 1 ? 52 : 44;
+        const fullH = 20;
+
+        if (!collidesWithPlaced(pt.x, pt.y, fullW, fullH, 3)) {
+          placedBoxes.push({ x: pt.x, y: pt.y, w: fullW, h: fullH });
 
           const stIcon = L.divIcon({
             className: 'custom-eq-station-marker',
             html: `
-              <div style="display:inline-flex;align-items:center;gap:5px;background:rgba(13,15,18,0.95);border:1px solid ${style.hex};padding:2px 6px;white-space:nowrap;font-family:'JetBrains Mono',monospace;">
-                <span style="background:${style.hex};color:#07090E;font-weight:800;font-size:11px;padding:0 4px;">${st.scaleLabel}</span>
-                <span style="color:#F8FAFC;font-size:11px;">${st.city.split('・')[0]}</span>
+              <div data-testid="eq-station-intensity-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:inline-flex;align-items:center;justify-content:center;gap:1px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono',monospace;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.85);">
+                <span style="font-size:9px;font-weight:800;line-height:1;">震度</span>
+                <span style="font-size:12px;font-weight:900;line-height:1;">${st.scaleLabel}</span>
               </div>
             `,
-            iconSize: [110, 22],
-            iconAnchor: anchor,
+            iconSize: [fullW, fullH],
+            iconAnchor: [Math.round(fullW / 2), Math.round(fullH / 2)],
           });
-          L.marker([st.lat, st.lon], { icon: stIcon }).addTo(group);
+          L.marker([st.lat, st.lon], {
+            icon: stIcon,
+            zIndexOffset: st.scaleCode * 10 + 100,
+          }).addTo(group);
+        } else {
+          const compactW = st.scaleLabel.length > 1 ? 24 : 18;
+          const compactH = 18;
+          if (!collidesWithPlaced(pt.x, pt.y, compactW, compactH, 2)) {
+            placedBoxes.push({ x: pt.x, y: pt.y, w: compactW, h: compactH });
+
+            const compactIcon = L.divIcon({
+              className: 'custom-eq-station-compact',
+              html: `
+                <div data-testid="eq-station-compact-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:flex;align-items:center;justify-content:center;width:${compactW}px;height:${compactH}px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:900;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.8);">
+                  ${st.scaleLabel}
+                </div>
+              `,
+              iconSize: [compactW, compactH],
+              iconAnchor: [Math.round(compactW / 2), Math.round(compactH / 2)],
+            });
+            L.marker([st.lat, st.lon], {
+              icon: compactIcon,
+              zIndexOffset: st.scaleCode * 10,
+            }).addTo(group);
+          }
         }
       });
 
@@ -908,10 +999,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         html: `
           <div style="position:relative;display:flex;align-items:center;justify-content:center;width:36px;height:36px;">
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-              <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="4" stroke-linecap="square"/>
-              <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.5" stroke-linecap="square"/>
+              <path d="M6 6L26 26M26 6L6 26" stroke="#0B0D12" stroke-width="6" stroke-linecap="square"/>
+              <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="3.5" stroke-linecap="square"/>
+              <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.2" stroke-linecap="square"/>
             </svg>
-            <div style="position:absolute;top:36px;left:50%;transform:translateX(-50%);background:rgba(127,29,29,0.96);border:1px solid #EF4444;color:#FEE2E2;font-size:11px;font-weight:700;padding:2px 8px;white-space:nowrap;font-family:'JetBrains Mono',monospace;">
+            <div style="position:absolute;top:36px;left:50%;transform:translateX(-50%);background:rgba(127,29,29,0.96);border:1px solid #EF4444;color:#FEE2E2;font-size:11px;font-weight:700;padding:2px 8px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 3px 10px rgba(0,0,0,0.75);">
               震源: ${selectedEarthquake.hypocenterName} (M${selectedEarthquake.magnitude.toFixed(1)} / ${selectedEarthquake.depthKm}km)
             </div>
           </div>
@@ -921,7 +1013,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       });
       L.marker([selectedEarthquake.lat, selectedEarthquake.lon], {
         icon: epiIcon,
-        zIndexOffset: 1000,
+        zIndexOffset: 2000,
       }).addTo(group);
     }
   }, [

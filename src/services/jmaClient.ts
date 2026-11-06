@@ -30,8 +30,10 @@ import {
   formatSeismicScale,
   parseJmaAmedasNationwide,
   parseJmaAtomXml,
+  parseJmaQuakeDetailJson,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
+  PREFECTURE_NAMES,
 } from '../utils/jmaParser';
 
 const JMA_XML_URLS: Record<XmlFeedType, string> = {
@@ -54,10 +56,13 @@ const JMA_AMEDAS_TABLE_URL =
   'https://www.jma.go.jp/bosai/amedas/const/amedastable.json';
 const JMA_AMEDAS_LATEST_TIME_URL =
   'https://www.jma.go.jp/bosai/amedas/data/latest_time.txt';
+const JMA_QUAKE_LIST_URL =
+  'https://www.jma.go.jp/bosai/quake/data/list.json';
 const P2P_QUAKE_HISTORY_URL =
   'https://api.p2pquake.net/v2/history?codes=551&limit=20';
 
 let cachedAmedasTable: Record<string, any> | null = null;
+const cachedJmaQuakeDetails = new Map<string, EarthquakeReport>();
 
 async function fetchWithTimeout(url: string, timeoutMs = 4500): Promise<Response> {
   const controller = new AbortController();
@@ -388,6 +393,19 @@ const TSUNAMI_LABEL_MAP: Record<string, string> = {
   Warning: '津波警報が発表されています！直ちに高台へ避難してください。',
 };
 
+function findPrefectureBaseCoords(
+  prefName: string,
+  fallbackLat: number,
+  fallbackLon: number
+): { lat: number; lon: number } {
+  for (const meta of Object.values(PREFECTURE_NAMES)) {
+    if (prefName.includes(meta.name) || meta.name.includes(prefName)) {
+      return { lat: meta.lat, lon: meta.lon };
+    }
+  }
+  return { lat: fallbackLat, lon: fallbackLon };
+}
+
 export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport | null {
   try {
     const eq = item.earthquake;
@@ -396,30 +414,49 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
     const hypocenterName = hypo.name || '震源調査中';
     const maxScaleCode = typeof eq.maxScale === 'number' ? eq.maxScale : 10;
     const rawPoints = Array.isArray(item.points) ? item.points : [];
+    const hypoLat =
+      typeof hypo.latitude === 'number' && hypo.latitude > 0
+        ? hypo.latitude
+        : 35.68;
+    const hypoLon =
+      typeof hypo.longitude === 'number' && hypo.longitude > 0
+        ? hypo.longitude
+        : 139.76;
 
-    const groupedByPrefAndCity = new Map<string, EarthquakeStationIntensity>();
-    for (const pt of rawPoints.slice(0, 30)) {
-      const pref = pt.pref || '';
-      const addr = pt.addr || '';
+    const stations: EarthquakeStationIntensity[] = [];
+    for (let i = 0; i < Math.min(rawPoints.length, 45); i++) {
+      const pt = rawPoints[i];
+      const pref = String(pt.pref || '');
+      const addr = String(pt.addr || '');
       const scale = typeof pt.scale === 'number' ? pt.scale : 10;
-      const key = `${pref}-${scale}`;
-      const existing = groupedByPrefAndCity.get(key);
-      if (!existing) {
-        groupedByPrefAndCity.set(key, {
-          prefecture: pref,
-          city: addr,
-          stationName: addr,
-          scaleCode: scale,
-          scaleLabel: formatSeismicScale(scale),
-        });
-      } else if (existing.city.length < 28 && !existing.city.includes(addr)) {
-        existing.city += `・${addr}`;
+      const base = findPrefectureBaseCoords(pref, hypoLat, hypoLon);
+
+      // Deterministic small spatial offset around prefecture/hypocenter when P2PQuake point lacks lat/lon
+      let hash = 0;
+      for (let c = 0; c < addr.length; c++) {
+        hash = (hash * 31 + addr.charCodeAt(c)) & 0xffff;
       }
+      const dLat = (((hash % 17) - 8) * 0.045);
+      const dLon = ((((hash >> 4) % 17) - 8) * 0.045);
+
+      stations.push({
+        prefecture: pref,
+        city: addr,
+        stationName: addr,
+        scaleCode: scale,
+        scaleLabel: formatSeismicScale(scale),
+        lat:
+          typeof pt.lat === 'number'
+            ? pt.lat
+            : Number((base.lat + dLat).toFixed(4)),
+        lon:
+          typeof pt.lon === 'number'
+            ? pt.lon
+            : Number((base.lon + dLon).toFixed(4)),
+      });
     }
 
-    const stations = Array.from(groupedByPrefAndCity.values()).sort(
-      (a, b) => b.scaleCode - a.scaleCode
-    );
+    stations.sort((a, b) => b.scaleCode - a.scaleCode);
 
     return {
       id: String(item.id || `p2p-${eq.time}`),
@@ -427,8 +464,8 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       occurrenceTime: `${eq.time || ''} 頃発生`,
       hypocenterName,
       regionId: guessRegionFromName(hypocenterName),
-      lat: typeof hypo.latitude === 'number' && hypo.latitude > 0 ? hypo.latitude : 35.68,
-      lon: typeof hypo.longitude === 'number' && hypo.longitude > 0 ? hypo.longitude : 139.76,
+      lat: hypoLat,
+      lon: hypoLon,
       depthKm: typeof hypo.depth === 'number' && hypo.depth >= 0 ? hypo.depth : 10,
       magnitude:
         typeof hypo.magnitude === 'number' && hypo.magnitude >= 0
@@ -451,6 +488,8 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
                 stationName: '各地の検震点',
                 scaleCode: maxScaleCode,
                 scaleLabel: formatSeismicScale(maxScaleCode),
+                lat: hypoLat,
+                lon: hypoLon,
               },
             ],
     };
@@ -459,10 +498,70 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
   }
 }
 
+/**
+ * Fetches recent earthquakes and exact seismic intensity station coordinates (`IntensityStation` with `latlon`)
+ * directly from JMA's official `bosai/quake/data/list.json` and detail JSONs, with fallback to P2PQuake.
+ */
 async function fetchRecentEarthquakes(): Promise<{
   earthquakes: EarthquakeReport[];
   live: boolean;
 }> {
+  // 1. Primary: Official JMA Bosai Earthquake JSON (includes exact lat/lon for every seismic intensity meter)
+  try {
+    const listRes = await fetchWithTimeout(JMA_QUAKE_LIST_URL, 4000);
+    if (listRes.ok) {
+      const listJson = (await listRes.json()) as Array<Record<string, any>>;
+      if (Array.isArray(listJson) && listJson.length > 0) {
+        const seenEids = new Set<string>();
+        const targetEntries: Array<Record<string, any>> = [];
+
+        for (const entry of listJson) {
+          const jsonFile = String(entry?.json || '');
+          const eid = String(entry?.eid || jsonFile);
+          if (!jsonFile || !eid || seenEids.has(eid)) continue;
+          // Prefer entries that have both hypocenter (cod) and intensity (maxi)
+          if (!entry.cod && !entry.maxi) continue;
+          seenEids.add(eid);
+          targetEntries.push(entry);
+          if (targetEntries.length >= 10) break;
+        }
+
+        const detailReports = await Promise.all(
+          targetEntries.map(async (entry) => {
+            const jsonFile = String(entry.json);
+            const cached = cachedJmaQuakeDetails.get(jsonFile);
+            if (cached) return cached;
+            try {
+              const detailRes = await fetchWithTimeout(
+                `https://www.jma.go.jp/bosai/quake/data/${jsonFile}`,
+                3500
+              );
+              if (!detailRes.ok) return null;
+              const detailData = await detailRes.json();
+              const parsed = parseJmaQuakeDetailJson(detailData, entry);
+              if (parsed) {
+                cachedJmaQuakeDetails.set(jsonFile, parsed);
+              }
+              return parsed;
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        const validReports = detailReports.filter(
+          (r): r is EarthquakeReport => r !== null
+        );
+        if (validReports.length > 0) {
+          return { earthquakes: validReports, live: true };
+        }
+      }
+    }
+  } catch {
+    // Fall through to P2PQuake fallback
+  }
+
+  // 2. Secondary fallback: P2PQuake API
   try {
     const res = await fetchWithTimeout(P2P_QUAKE_HISTORY_URL, 4000);
     if (!res.ok) {

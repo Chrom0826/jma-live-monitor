@@ -566,9 +566,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
                 <div className="text-base font-extrabold text-white">
                   {selectedEarthquake.hypocenterName}
                 </div>
-                <div className="text-xs font-mono text-neutral-200">
-                  M{selectedEarthquake.magnitude.toFixed(1)} / 深さ約
-                  {selectedEarthquake.depthKm}km
+                <div className="text-xs font-mono text-neutral-200 flex items-center justify-between">
+                  <span>
+                    M{selectedEarthquake.magnitude.toFixed(1)} / 深さ約
+                    {selectedEarthquake.depthKm}km
+                  </span>
+                  <span className="text-amber-300 font-bold">
+                    観測点 {selectedEarthquake.stations.length}箇所
+                  </span>
                 </div>
                 <div className="text-[11px] font-mono text-neutral-400">
                   {selectedEarthquake.occurrenceTime}
@@ -578,24 +583,67 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
                 </div>
               </div>
             </div>
-            {selectedEarthquake.stations.map((st, idx) => {
-              const style = getSeismicScaleStyle(st.scaleCode);
-              return (
-                <div key={`${st.prefecture}-${idx}`} className="pb-1.5">
-                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                    <span>{st.prefecture}</span>
-                    <span
-                      className={`px-1.5 text-xs font-mono font-extrabold ${style.bg} ${style.text}`}
-                    >
-                      震度{st.scaleLabel}
-                    </span>
+            {(() => {
+              const grouped = new Map<
+                string,
+                {
+                  prefecture: string;
+                  scaleCode: number;
+                  scaleLabel: string;
+                  names: string[];
+                  totalCount: number;
+                }
+              >();
+              for (const st of selectedEarthquake.stations) {
+                const key = `${st.prefecture}-${st.scaleCode}`;
+                const labelName = st.stationName || st.city;
+                const existing = grouped.get(key);
+                if (!existing) {
+                  grouped.set(key, {
+                    prefecture: st.prefecture,
+                    scaleCode: st.scaleCode,
+                    scaleLabel: st.scaleLabel,
+                    names: [labelName],
+                    totalCount: 1,
+                  });
+                } else {
+                  existing.totalCount += 1;
+                  if (
+                    existing.names.length < 4 &&
+                    !existing.names.includes(labelName)
+                  ) {
+                    existing.names.push(labelName);
+                  }
+                }
+              }
+              return Array.from(grouped.values()).map((grp, idx) => {
+                const style = getSeismicScaleStyle(grp.scaleCode);
+                const extraCount = grp.totalCount - grp.names.length;
+                return (
+                  <div
+                    key={`${grp.prefecture}-${grp.scaleCode}-${idx}`}
+                    className="pb-1.5"
+                  >
+                    <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
+                      <span>{grp.prefecture}</span>
+                      <span
+                        className="px-1.5 text-xs font-mono font-extrabold rounded-sm"
+                        style={{
+                          backgroundColor: style.hex,
+                          color: style.badgeText,
+                        }}
+                      >
+                        震度{grp.scaleLabel}
+                      </span>
+                    </div>
+                    <div className="px-2.5 pt-1 text-xs text-neutral-200 leading-relaxed">
+                      {grp.names.join('・')}
+                      {extraCount > 0 ? ` ほか${extraCount}地点` : ''}
+                    </div>
                   </div>
-                  <div className="px-2.5 pt-1 text-xs text-neutral-200">
-                    {st.city}
-                  </div>
-                </div>
-              );
-            })}
+                );
+              });
+            })()}
           </>
         )}
       </div>
@@ -680,6 +728,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
               <span className="w-2.5 h-2.5 rounded-full bg-[#F97316] inline-block" />
               26℃+
             </span>
+          </div>
+        ) : effectiveScene === 'earthquake' ? (
+          <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+            <span className="text-neutral-300">震度</span>
+            <span className="px-1 bg-[#64748B] text-white rounded-xs">1</span>
+            <span className="px-1 bg-[#38BDF8] text-slate-950 rounded-xs">2</span>
+            <span className="px-1 bg-[#22C55E] text-slate-950 rounded-xs">3</span>
+            <span className="px-1 bg-[#FACC15] text-slate-950 rounded-xs">4</span>
+            <span className="px-1 bg-[#F97316] text-white rounded-xs">5</span>
+            <span className="px-1 bg-[#EF4444] text-white rounded-xs">6</span>
+            <span className="px-1 bg-[#9333EA] text-white rounded-xs">7</span>
           </div>
         ) : (
           <div className="flex items-center justify-between text-[11px] font-mono text-neutral-300">
