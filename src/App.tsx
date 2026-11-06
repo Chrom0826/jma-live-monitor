@@ -7,6 +7,8 @@ import {
   INITIAL_EARTHQUAKES,
   INITIAL_FORECASTS,
   INITIAL_LIGHTNING_POINTS,
+  INITIAL_MUNI_SEVERITY_MAP,
+  INITIAL_MUNICIPALITY_WARNINGS,
   INITIAL_NOWCAST_TIMES,
   INITIAL_PREF_SEVERITY_MAP,
   INITIAL_TSUNAMI_STATIONS,
@@ -24,9 +26,11 @@ import {
   fetchMonitorDataBundle,
 } from './services/jmaClient';
 import {
+  AmedasMetric,
   EarthquakeReport,
   InterruptKind,
   JmaXmlEntry,
+  MapViewportState,
   MonitorDataBundle,
   RegionId,
   SceneId,
@@ -36,8 +40,10 @@ import {
 } from './types/jma';
 import {
   DEFAULT_NORMAL_LOOP_SCENES,
+  getActiveSevereWarningDivisions,
+  getNextAmedasMetric,
+  getNextPatrolStep,
   getNextSceneId,
-  getNextSubRegion,
   getSeismicScaleStyle,
   REGION_CONFIGS,
   SCENE_LIST,
@@ -48,6 +54,8 @@ const INITIAL_BUNDLE: MonitorDataBundle = {
   nowcastTimes: INITIAL_NOWCAST_TIMES,
   lightningPoints: INITIAL_LIGHTNING_POINTS,
   warnings: INITIAL_WARNINGS,
+  municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
+  muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
   prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
   typhoons: INITIAL_TYPHOONS,
   bulletins: INITIAL_WEATHER_BULLETINS,
@@ -100,6 +108,12 @@ export default function App() {
   // Region selection: 'national' by default so the full Japan map is shown clearly
   const [regionScope, setRegionScope] = useState<'auto' | RegionId>('national');
   const [patrolRegionId, setPatrolRegionId] = useState<RegionId>('national');
+  const [patrolStepIndex, setPatrolStepIndex] = useState<number>(0);
+  // Warning patrol step: 0 = initial national view, 1..N = active 警報/特別警報 divisions (North->South), N+1 = final national view
+  const [warningPatrolStep, setWarningPatrolStep] = useState<number>(0);
+  const [mapViewport, setMapViewport] = useState<MapViewportState | undefined>(
+    undefined
+  );
 
   // Loop timing controls (base hold duration for non-scrolling scenes)
   const [loopIntervalSec, setLoopIntervalSec] = useState<number>(15);
@@ -118,6 +132,7 @@ export default function App() {
   );
   const [activeTsunamiStation, setActiveTsunamiStation] =
     useState<TsunamiStationItem>(INITIAL_TSUNAMI_STATIONS[0]);
+  const [amedasMetric, setAmedasMetric] = useState<AmedasMetric>('temp');
 
   // XML Inspector & Settings Popup Modal state
   const [isXmlModalOpen, setIsXmlModalOpen] = useState<boolean>(false);
@@ -301,19 +316,133 @@ export default function App() {
     };
   }, []);
 
-  // Step to next scene in the normal loop
+  // Divisions (out of the 57 JMA divisions) that currently have 警報 (warning) or 特別警報 (special), ordered North to South
+  const severeWarningDivisions = useMemo(
+    () => getActiveSevereWarningDivisions(data.warnings),
+    [data.warnings]
+  );
+
+  const activeWarningDivision = useMemo(() => {
+    if (
+      activeScene === 'warnings' &&
+      (regionScope === 'national' || regionScope === 'auto') &&
+      warningPatrolStep >= 1 &&
+      warningPatrolStep <= severeWarningDivisions.length
+    ) {
+      return severeWarningDivisions[warningPatrolStep - 1];
+    }
+    return null;
+  }, [
+    activeScene,
+    regionScope,
+    warningPatrolStep,
+    severeWarningDivisions,
+  ]);
+
+  const isFinalWarningNational =
+    activeScene === 'warnings' &&
+    (regionScope === 'national' || regionScope === 'auto') &&
+    severeWarningDivisions.length > 0 &&
+    warningPatrolStep === severeWarningDivisions.length + 1;
+
+  // Step to next scene in the normal loop:
+  // 1. In `'warnings'` (`regionScope === 'national' || 'auto'`), start at 全国表示, then zoom ONLY into divisions with 警報/特別警報 (`severeWarningDivisions`), return to 全国表示, then advance to next scene.
+  // 2. When `regionScope === 'auto'` on `forecast` or `weather_info`, step North-to-South before advancing.
+  // 3. When in `'typhoon'` and multiple typhoons/TDs/extratropical cyclones exist, automatically cycle through all of them in the right panel.
+  // 4. When in `'amedas'`, step through `'temp' -> 'precip' -> 'wind' (-> 'snow')` (each metric performs 全国表示 -> 北海道〜沖縄連続スイープ -> 全国表示 in MonitorMap) before moving to the next scene.
   const advanceScene = useCallback(() => {
+    if (
+      activeScene === 'warnings' &&
+      (regionScope === 'national' || regionScope === 'auto')
+    ) {
+      if (
+        severeWarningDivisions.length > 0 &&
+        warningPatrolStep <= severeWarningDivisions.length
+      ) {
+        setWarningPatrolStep((prev) => prev + 1);
+        return;
+      }
+      setWarningPatrolStep(0);
+    }
+
+    const isRegionalPatrolScene =
+      activeScene === 'forecast' || activeScene === 'weather_info';
+
+    if (regionScope === 'auto' && isRegionalPatrolScene) {
+      const { nextStepIndex, regionId, completedCycle } =
+        getNextPatrolStep(patrolStepIndex);
+      if (!completedCycle) {
+        setPatrolStepIndex(nextStepIndex);
+        setPatrolRegionId(regionId);
+        return;
+      }
+      setPatrolStepIndex(0);
+      setPatrolRegionId('national');
+    }
+
+    if (activeScene === 'typhoon' && data.typhoons.length > 1) {
+      const curIdx = data.typhoons.findIndex(
+        (t) => t.id === selectedTyphoon.id
+      );
+      if (curIdx !== -1 && curIdx < data.typhoons.length - 1) {
+        setSelectedTyphoon(data.typhoons[curIdx + 1]);
+        return;
+      }
+      setSelectedTyphoon(data.typhoons[0]);
+    }
+
+    if (activeScene === 'amedas') {
+      const nextMetric = getNextAmedasMetric(amedasMetric, data.amedas);
+      if (nextMetric) {
+        setAmedasMetric(nextMetric);
+        return;
+      }
+      setAmedasMetric('temp');
+    }
+
     setActiveScene((prevScene) => {
       const nextScene = getNextSceneId(prevScene, enabledScenes);
+      if (nextScene === 'warnings') {
+        setWarningPatrolStep(0);
+      }
+      if (nextScene === 'amedas') {
+        setAmedasMetric('temp');
+      }
+      if (nextScene === 'typhoon' && data.typhoons.length > 0) {
+        setSelectedTyphoon(data.typhoons[0]);
+      }
       if (regionScope === 'auto') {
-        setPatrolRegionId((prevReg) => getNextSubRegion(prevReg));
+        setPatrolStepIndex(0);
+        setPatrolRegionId('national');
       }
       return nextScene;
     });
-  }, [enabledScenes, regionScope]);
+  }, [
+    activeScene,
+    amedasMetric,
+    data.amedas,
+    data.typhoons,
+    selectedTyphoon.id,
+    enabledScenes,
+    regionScope,
+    patrolStepIndex,
+    severeWarningDivisions.length,
+    warningPatrolStep,
+  ]);
 
   const handleSelectSceneManual = (sceneId: SceneId) => {
     setInterruptKind('none');
+    setWarningPatrolStep(0);
+    if (sceneId === 'amedas') {
+      setAmedasMetric('temp');
+    }
+    if (sceneId === 'typhoon' && data.typhoons.length > 0) {
+      setSelectedTyphoon(data.typhoons[0]);
+    }
+    if (regionScope === 'auto') {
+      setPatrolStepIndex(0);
+      setPatrolRegionId('national');
+    }
     setActiveScene(sceneId);
   };
 
@@ -365,6 +494,15 @@ export default function App() {
       setIsFullscreen(false);
     }
   };
+
+  // Sort earthquake list so the largest seismic intensity (`maxScaleCode`) is always at the top
+  const sortedEarthquakes = useMemo(() => {
+    return [...data.earthquakes].sort(
+      (a, b) =>
+        b.maxScaleCode - a.maxScaleCode ||
+        b.occurrenceTime.localeCompare(a.occurrenceTime)
+    );
+  }, [data.earthquakes]);
 
   const activeRegionConfig = useMemo(() => {
     const targetId = regionScope === 'auto' ? patrolRegionId : regionScope;
@@ -440,7 +578,7 @@ export default function App() {
               data-testid="left-earthquake-history-list"
               className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
             >
-              {data.earthquakes.map((eq) => {
+              {sortedEarthquakes.map((eq) => {
                 const isSelected = selectedEarthquake.id === eq.id;
                 const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
                 return (
@@ -559,11 +697,15 @@ export default function App() {
             <MonitorMap
               activeScene={activeScene}
               activeRegionConfig={activeRegionConfig}
+              activeWarningDivision={activeWarningDivision}
               data={data}
               selectedEarthquake={selectedEarthquake}
               selectedTyphoon={selectedTyphoon}
               activeVolcano={activeVolcano}
               activeTsunamiStation={activeTsunamiStation}
+              amedasMetric={amedasMetric}
+              onChangeAmedasMetric={setAmedasMetric}
+              onViewportChange={setMapViewport}
               interruptKind={interruptKind}
               isLoopPaused={isLoopPaused}
               onSceneComplete={advanceScene}
@@ -572,7 +714,15 @@ export default function App() {
             {/* Floating Top-Left Scene Title Box (Matches NERV防災ライブ `全国の気象警報・注意報`) */}
             <div className="absolute top-3 left-3 z-[400] bg-[#111318]/94 border border-[#686E7A] px-4 py-2.5 pointer-events-auto">
               <h1 className="text-[28px] font-extrabold tracking-tight text-white leading-none">
-                {sceneMeta.title}
+                {effectiveScene === 'amedas'
+                  ? amedasMetric === 'precip'
+                    ? '全国アメダス気象実況（降水量）'
+                    : amedasMetric === 'wind'
+                      ? '全国アメダス気象実況（風向・風速）'
+                      : amedasMetric === 'snow'
+                        ? '全国アメダス気象実況（積雪深）'
+                        : '全国アメダス気象実況（気温分布）'
+                  : sceneMeta.title}
               </h1>
               <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-neutral-200">
                 <span className="font-mono font-semibold text-neutral-100">
@@ -614,11 +764,16 @@ export default function App() {
               <SceneDetailPanel
                 activeScene={activeScene}
                 activeRegionConfig={activeRegionConfig}
+                activeWarningDivision={activeWarningDivision}
+                isFinalWarningNational={isFinalWarningNational}
+                mapViewport={mapViewport}
                 data={data}
                 selectedEarthquake={selectedEarthquake}
                 selectedTyphoon={selectedTyphoon}
                 activeVolcano={activeVolcano}
                 activeTsunamiStation={activeTsunamiStation}
+                amedasMetric={amedasMetric}
+                onChangeAmedasMetric={setAmedasMetric}
                 onSelectEarthquake={(eq) => {
                   setSelectedEarthquake(eq);
                   setActiveScene('earthquake');
@@ -711,8 +866,11 @@ export default function App() {
         regionScope={regionScope}
         onChangeRegionScope={(val) => {
           setRegionScope(val);
+          setPatrolStepIndex(0);
           if (val !== 'auto') {
             setPatrolRegionId(val);
+          } else {
+            setPatrolRegionId('national');
           }
         }}
         loopIntervalSec={loopIntervalSec}

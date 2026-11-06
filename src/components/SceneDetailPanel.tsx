@@ -1,9 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import {
+  AmedasMetric,
+  AmedasStationData,
   EarthquakeReport,
   InterruptKind,
+  MapViewportState,
   MonitorDataBundle,
   RegionConfig,
+  RegionalWarningItem,
   SceneId,
   TsunamiStationItem,
   TyphoonReport,
@@ -11,19 +15,25 @@ import {
   WarningSeverity,
 } from '../types/jma';
 import {
-  getAmedasTempGradientColor,
+  computeAmedasTop5Rankings,
+  getAmedasMetricColor,
   getSeismicScaleStyle,
 } from '../utils/jmaParser';
 
 interface SceneDetailPanelProps {
   activeScene: SceneId;
   activeRegionConfig: RegionConfig;
+  activeWarningDivision?: RegionalWarningItem | null;
+  isFinalWarningNational?: boolean;
+  mapViewport?: MapViewportState;
   data: MonitorDataBundle;
   selectedEarthquake: EarthquakeReport;
   selectedTyphoon: TyphoonReport;
   onSelectTyphoon: (tc: TyphoonReport) => void;
   activeVolcano: VolcanoStatusItem;
   activeTsunamiStation: TsunamiStationItem;
+  amedasMetric: AmedasMetric;
+  onChangeAmedasMetric: (metric: AmedasMetric) => void;
   onSelectEarthquake: (eq: EarthquakeReport) => void;
   interruptKind: InterruptKind;
   onDismissInterrupt: () => void;
@@ -60,12 +70,17 @@ function renderSeverityDot(severity: WarningSeverity) {
 export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
   activeScene,
   activeRegionConfig,
+  activeWarningDivision = null,
+  isFinalWarningNational = false,
+  mapViewport,
   data,
   selectedEarthquake,
   selectedTyphoon,
   onSelectTyphoon,
   activeVolcano,
   activeTsunamiStation,
+  amedasMetric,
+  onChangeAmedasMetric,
   interruptKind,
   onDismissInterrupt,
   isLoopPaused,
@@ -90,26 +105,57 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
             ? 'typhoon'
             : activeScene;
 
-  const filteredWarnings =
-    activeRegionConfig.id === 'national'
-      ? data.warnings
-      : data.warnings.filter((w) => w.regionId === activeRegionConfig.id);
+  // Determine whether the map is zoomed into a specific region (either via regional patrol/selection or manual map zoom >= 6)
+  const isZoomedIn =
+    (activeRegionConfig.id !== 'national' &&
+      activeRegionConfig.id !== 'world') ||
+    (mapViewport ? mapViewport.zoom >= 6 : false);
 
-  const displayWarnings =
-    filteredWarnings.length > 0 ? filteredWarnings : data.warnings;
+  const syncedRegionId =
+    activeRegionConfig.id !== 'national' && activeRegionConfig.id !== 'world'
+      ? activeRegionConfig.id
+      : mapViewport && mapViewport.zoom >= 6
+        ? mapViewport.inferredRegionId
+        : 'national';
 
-  // Reset scroll position to top when scene changes
+  const isPointInViewport = (lat: number, lon: number): boolean => {
+    if (!mapViewport || mapViewport.zoom < 6) return true;
+    const b = mapViewport.bounds;
+    return (
+      lat >= b.south - 0.6 &&
+      lat <= b.north + 0.6 &&
+      lon >= b.west - 0.6 &&
+      lon <= b.east + 0.6
+    );
+  };
+
+  // Right panel always groups warnings by the 57 JMA divisions:
+  // 「宗谷」「網走・北見・紋別」「上川・留萌」「石狩・空知・後志」「釧路・根室」「胆振・日高」「渡島・檜山」
+  // 「各都府県」「鹿児島県（奄美地方除く）」「奄美地方」「沖縄本島地方」「大東島地方」「宮古島地方」「八重山地方」
+  const displayWarnings = data.warnings;
+
+  // Reset scroll position to top when scene, zoomed region, typhoon, or AMeDAS metric changes
   useEffect(() => {
     const el = scrollContainerRef.current;
-    if (el) {
-      el.scrollTop = 0;
+    if (!el) return;
+    if (effectiveScene === 'warnings' && activeWarningDivision) {
+      return;
     }
-  }, [effectiveScene, activeRegionConfig.id]);
+    el.scrollTop = 0;
+  }, [
+    effectiveScene,
+    activeRegionConfig.id,
+    activeWarningDivision,
+    isFinalWarningNational,
+    amedasMetric,
+    selectedTyphoon.id,
+    selectedEarthquake.id,
+  ]);
 
   // Auto-scroll right-side information list and transition to next scene when scroll finishes
-  // ('radar' scene transition is controlled by MonitorMap after all radar timeframes play)
+  // ('radar' and 'amedas' scene transitions are controlled by MonitorMap)
   useEffect(() => {
-    if (effectiveScene === 'radar') return;
+    if (effectiveScene === 'radar' || effectiveScene === 'amedas') return;
     if (isLoopPaused || interruptKind !== 'none') return;
 
     const el = scrollContainerRef.current;
@@ -121,13 +167,57 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
     let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
 
+    // Special handling for warnings scene when zoomed into an active 警報/特別警報 division
+    if (effectiveScene === 'warnings' && activeWarningDivision) {
+      const targetCode =
+        activeWarningDivision.divisionCode || activeWarningDivision.id;
+      const targetNode = el.querySelector(
+        `[data-division-code="${targetCode}"]`
+      ) as HTMLElement | null;
+      if (targetNode) {
+        const targetScrollTop = Math.max(
+          0,
+          targetNode.offsetTop - el.clientHeight * 0.25
+        );
+        el.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+      }
+      fallbackTimer = setTimeout(() => {
+        if (!cancelled) {
+          onSceneCompleteRef.current();
+        }
+      }, 4200);
+
+      return () => {
+        cancelled = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      };
+    }
+
+    // Special handling for final nationwide return view in warnings scene after zooming into active divisions
+    if (effectiveScene === 'warnings' && isFinalWarningNational) {
+      el.scrollTo({ top: 0, behavior: 'smooth' });
+      fallbackTimer = setTimeout(() => {
+        if (!cancelled) {
+          onSceneCompleteRef.current();
+        }
+      }, 3200);
+
+      return () => {
+        cancelled = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      };
+    }
+
+    const minSceneDurationMs = Math.max(10000, loopIntervalSec * 1000);
+    const sceneStartTime = performance.now();
     const maxScroll = el.scrollHeight - el.clientHeight;
 
     if (maxScroll > 6) {
-      // Scrollable list (e.g., Warnings list, AMeDAS list):
-      // Pause briefly at top, smoothly scroll down to the bottom, pause briefly, then transition scene
+      // Scrollable list (e.g., nationwide Warnings list, Earthquake station list):
+      // Pause briefly at top, smoothly scroll down to the bottom, and hold so the total scene display time
+      // is ALWAYS at least `minSceneDurationMs` (never flashes by in an instant when scroll distance is short!)
       let virtualScrollTop = el.scrollTop;
-      const scrollSpeedPxPerTick = 2.0; // ~60px/s at 30fps
+      const scrollSpeedPxPerTick = 2.4; // ~72px/s at 30fps
 
       startDelayTimer = setTimeout(() => {
         if (cancelled) return;
@@ -140,9 +230,13 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
           const currentMax = container.scrollHeight - container.clientHeight;
           if (currentMax <= 4) {
             if (scrollIntervalId) clearInterval(scrollIntervalId);
+            const remainingHoldMs = Math.max(
+              2000,
+              minSceneDurationMs - (performance.now() - sceneStartTime)
+            );
             endHoldTimer = setTimeout(() => {
               if (!cancelled) onSceneCompleteRef.current();
-            }, 1300);
+            }, remainingHoldMs);
             return;
           }
 
@@ -154,20 +248,24 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
 
           if (virtualScrollTop >= currentMax - 1.5) {
             if (scrollIntervalId) clearInterval(scrollIntervalId);
+            const remainingHoldMs = Math.max(
+              2000,
+              minSceneDurationMs - (performance.now() - sceneStartTime)
+            );
             endHoldTimer = setTimeout(() => {
               if (!cancelled) onSceneCompleteRef.current();
-            }, 1300);
+            }, remainingHoldMs);
           }
         }, 33);
-      }, 1100);
+      }, 1500);
     } else {
-      // Non-overflowing right panel (e.g., Typhoon / Forecast / Earthquake):
-      // Hold for loopIntervalSec seconds, then advance to next scene
+      // Non-overflowing right panel (e.g., Typhoon / Forecast / Earthquake with short list):
+      // Hold for at least minSceneDurationMs before advancing to next scene
       fallbackTimer = setTimeout(() => {
         if (!cancelled) {
           onSceneCompleteRef.current();
         }
-      }, loopIntervalSec * 1000);
+      }, minSceneDurationMs);
     }
 
     return () => {
@@ -179,6 +277,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
     };
   }, [
     effectiveScene,
+    activeRegionConfig.id,
+    activeWarningDivision,
+    isFinalWarningNational,
+    syncedRegionId,
+    isZoomedIn,
+    amedasMetric,
+    selectedTyphoon.id,
+    selectedEarthquake.id,
     isLoopPaused,
     interruptKind,
     loopIntervalSec,
@@ -221,32 +327,73 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
         data-testid="scene-detail-scroll-container"
         className="flex-1 bg-[#111318]/92 border border-[#686E7A] overflow-y-auto divide-y divide-[#2B303A]"
       >
-        {/* ==================== WARNINGS (NERV Style Regional Strip) ==================== */}
-        {effectiveScene === 'warnings' &&
-          displayWarnings.map((w) => (
-            <div key={w.id} className="pb-1.5">
-              <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white tracking-wide">
-                {w.prefecture}
-              </div>
-              <div className="px-2.5 pt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                {w.badgeItems && w.badgeItems.length > 0 ? (
-                  w.badgeItems.map((badge) => (
-                    <span
-                      key={`${w.id}-${badge.code}`}
-                      className="inline-flex items-center gap-1 text-[13px] font-bold text-white whitespace-nowrap"
-                    >
-                      {renderSeverityDot(badge.severity)}
-                      <span>{badge.name}</span>
-                    </span>
-                  ))
-                ) : (
-                  <span className="text-xs text-neutral-300">
-                    {w.activeWarnings.join('・')}
-                  </span>
-                )}
-              </div>
+        {/* ==================== WARNINGS (NERV Style 57-Division Regional Strip) ==================== */}
+        {effectiveScene === 'warnings' && (
+          <>
+            <div className="bg-[#1A1E26] px-2.5 py-1 text-[11px] font-mono text-amber-300 font-bold flex items-center justify-between">
+              <span>
+                {activeWarningDivision
+                  ? `警報発表地域 (${activeWarningDivision.prefecture})`
+                  : '全国 地域別警報・注意報'}
+              </span>
+              <span>{displayWarnings.length}区分</span>
             </div>
-          ))}
+            {displayWarnings.map((w) => {
+              const divKey = w.divisionCode || w.id;
+              const isFocusedDivision =
+                activeWarningDivision != null &&
+                (activeWarningDivision.divisionCode ||
+                  activeWarningDivision.id) === divKey;
+              return (
+                <div
+                  key={w.id}
+                  data-division-code={divKey}
+                  className={`pb-1.5 transition-colors ${
+                    isFocusedDivision
+                      ? 'bg-red-950/65 ring-1 ring-inset ring-red-500'
+                      : ''
+                  }`}
+                >
+                  <div
+                    className={`px-2.5 py-0.5 text-[13px] font-bold tracking-wide flex items-center justify-between ${
+                      isFocusedDivision
+                        ? 'bg-red-700 text-white'
+                        : w.severity === 'special'
+                          ? 'bg-purple-900 text-white'
+                          : w.severity === 'warning'
+                            ? 'bg-red-900/90 text-white'
+                            : 'bg-[#3E434F] text-white'
+                    }`}
+                  >
+                    <span>{w.prefecture}</span>
+                    {(w.severity === 'warning' || w.severity === 'special') && (
+                      <span className="text-[10px] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs">
+                        {w.severity === 'special' ? '特別警報' : '警報'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="px-2.5 pt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                    {w.badgeItems && w.badgeItems.length > 0 ? (
+                      w.badgeItems.map((badge) => (
+                        <span
+                          key={`${w.id}-${badge.code}`}
+                          className="inline-flex items-center gap-1 text-[13px] font-bold text-white whitespace-nowrap"
+                        >
+                          {renderSeverityDot(badge.severity)}
+                          <span>{badge.name}</span>
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-xs text-neutral-300">
+                        {w.activeWarnings.join('・')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </>
+        )}
 
         {/* ==================== TYPHOON TRACK & FORECAST CONE ==================== */}
         {effectiveScene === 'typhoon' && (
@@ -400,83 +547,239 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
           </>
         )}
 
-        {/* ==================== AMEDAS (Nationwide Temperature Distribution) ==================== */}
-        {effectiveScene === 'amedas' && (
-          <>
-            <div className="pb-2">
-              <div className="bg-[#3E434F] px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
-                <span>全国アメダス観測網</span>
-                <span className="text-[11px] font-mono text-amber-300">
-                  {data.amedas.length}地点
-                </span>
-              </div>
-              <div className="px-2.5 pt-1.5 text-[11px] text-neutral-300 font-mono">
-                全国の気温観測点を重ならないようフィルタリング表示中
-              </div>
-            </div>
-            {[...data.amedas]
-              .sort((a, b) => b.temp - a.temp)
-              .filter((_, idx, arr) => {
-                const step = Math.max(1, Math.floor(arr.length / 22));
-                return idx % step === 0;
-              })
-              .slice(0, 22)
-              .map((st) => {
-                const dotHex = getAmedasTempGradientColor(st.temp);
-                return (
-                  <div key={st.id} className="pb-1.5">
-                    <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span
-                          className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: dotHex }}
-                        />
-                        <span>{st.stationName}</span>
+        {/* ==================== AMEDAS (Nationwide Top-5 Rankings Fixed: Temp High 5 + Low 5 / Precip Top 5 / Wind Top 5 / Snow Top 5) ==================== */}
+        {effectiveScene === 'amedas' &&
+          (() => {
+            const rankings = computeAmedasTop5Rankings(data.amedas);
+
+            const renderRankingCard = (
+              st: AmedasStationData,
+              rankIdx: number,
+              sectionKey: string
+            ) => {
+              const dotHex = getAmedasMetricColor(st, amedasMetric);
+              return (
+                <div
+                  key={`${sectionKey}-${st.id}`}
+                  data-testid={`amedas-rank-item-${sectionKey}`}
+                  className="pb-1.5"
+                >
+                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-[11px] font-mono font-extrabold text-amber-300">
+                        {rankIdx + 1}.
                       </span>
-                      <span className="text-[11px] text-neutral-200">
-                        {st.prefecture}
-                      </span>
-                    </div>
-                    <div className="px-2.5 pt-1 flex items-center justify-between text-xs font-mono">
                       <span
-                        className="font-extrabold"
-                        style={{ color: dotHex }}
-                      >
-                        {st.temp.toFixed(1)}℃
-                      </span>
-                      <span className="text-cyan-300">
-                        {st.precip1h.toFixed(1)}mm/h
-                      </span>
-                      <span className="text-neutral-300">
-                        {st.windSpeed.toFixed(1)}m/s
-                      </span>
-                    </div>
+                        className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: dotHex }}
+                      />
+                      <span>{st.stationName}</span>
+                    </span>
+                    <span className="text-[11px] text-neutral-200">
+                      {st.prefecture}
+                    </span>
                   </div>
-                );
-              })}
-          </>
-        )}
+                  <div className="px-2.5 pt-1 flex items-center justify-between text-xs font-mono">
+                    {amedasMetric === 'temp' ? (
+                      <>
+                        <span
+                          className="font-extrabold text-sm"
+                          style={{ color: dotHex }}
+                        >
+                          {st.temp.toFixed(1)} ℃
+                        </span>
+                        <span className="text-neutral-300">
+                          {st.windDirection} {st.windSpeed.toFixed(1)}m/s
+                        </span>
+                      </>
+                    ) : amedasMetric === 'precip' ? (
+                      <>
+                        <span className="text-cyan-300 font-extrabold text-sm">
+                          {st.precip1h.toFixed(1)} mm/h
+                        </span>
+                        <span className="text-neutral-300">
+                          {st.hasTemp !== false
+                            ? `${st.temp.toFixed(1)}℃`
+                            : `${st.windSpeed.toFixed(1)}m/s`}
+                        </span>
+                      </>
+                    ) : amedasMetric === 'wind' ? (
+                      <>
+                        <span
+                          className="font-extrabold text-sm"
+                          style={{ color: dotHex }}
+                        >
+                          {st.windDirection} {st.windSpeed.toFixed(1)} m/s
+                        </span>
+                        <span className="text-neutral-300">
+                          {st.hasTemp !== false
+                            ? `${st.temp.toFixed(1)}℃`
+                            : `${st.precip1h.toFixed(1)}mm/h`}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-sky-200 font-extrabold text-sm">
+                          積雪 {st.snowCm ?? 0} cm
+                        </span>
+                        <span className="text-neutral-300">
+                          {st.hasTemp !== false ? `${st.temp.toFixed(1)}℃` : ''}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            };
+
+            return (
+              <>
+                <div className="pb-2">
+                  <div className="bg-[#3E434F] px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
+                    <span>アメダス観測ランキング</span>
+                    <span className="text-[11px] font-mono text-amber-300">
+                      TOP 5
+                    </span>
+                  </div>
+                  <div className="px-2 pt-1.5 grid grid-cols-4 gap-1">
+                    {(
+                      [
+                        { id: 'temp', label: '気温' },
+                        { id: 'precip', label: '降水' },
+                        { id: 'wind', label: '風速' },
+                        { id: 'snow', label: '積雪' },
+                      ] as Array<{ id: AmedasMetric; label: string }>
+                    ).map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => onChangeAmedasMetric(m.id)}
+                        className={`py-0.5 text-[11px] font-bold border transition-colors cursor-pointer ${
+                          amedasMetric === m.id
+                            ? 'bg-amber-500/25 border-amber-400 text-white'
+                            : 'bg-[#181B22] border-neutral-700 text-neutral-400 hover:text-neutral-200'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {amedasMetric === 'temp' ? (
+                  <>
+                    <div
+                      data-testid="amedas-ranking-header-temp-high"
+                      className="bg-red-950/80 border-y border-red-500/50 px-2.5 py-1 text-xs font-extrabold text-red-200 flex items-center justify-between"
+                    >
+                      <span>▲ 気温が高い順</span>
+                      <span className="font-mono text-[10px]">上位5地点</span>
+                    </div>
+                    {rankings.tempHigh5.map((st, idx) =>
+                      renderRankingCard(st, idx, 'temp-high')
+                    )}
+                    <div
+                      data-testid="amedas-ranking-header-temp-low"
+                      className="bg-sky-950/80 border-y border-sky-500/50 px-2.5 py-1 text-xs font-extrabold text-sky-200 flex items-center justify-between"
+                    >
+                      <span>▼ 気温が低い順</span>
+                      <span className="font-mono text-[10px]">上位5地点</span>
+                    </div>
+                    {rankings.tempLow5.map((st, idx) =>
+                      renderRankingCard(st, idx, 'temp-low')
+                    )}
+                  </>
+                ) : amedasMetric === 'precip' ? (
+                  <>
+                    <div
+                      data-testid="amedas-ranking-header-precip"
+                      className="bg-cyan-950/80 border-y border-cyan-500/50 px-2.5 py-1 text-xs font-extrabold text-cyan-200 flex items-center justify-between"
+                    >
+                      <span>▲ 降水量が多い順</span>
+                      <span className="font-mono text-[10px]">上位5地点</span>
+                    </div>
+                    {rankings.precipTop5.length === 0 ? (
+                      <div className="px-2.5 py-4 text-xs text-neutral-400 font-mono text-center">
+                        現在、降水（0.5mm/h以上）を観測している地点はありません
+                      </div>
+                    ) : (
+                      rankings.precipTop5.map((st, idx) =>
+                        renderRankingCard(st, idx, 'precip-top')
+                      )
+                    )}
+                  </>
+                ) : amedasMetric === 'wind' ? (
+                  <>
+                    <div
+                      data-testid="amedas-ranking-header-wind"
+                      className="bg-emerald-950/80 border-y border-emerald-500/50 px-2.5 py-1 text-xs font-extrabold text-emerald-200 flex items-center justify-between"
+                    >
+                      <span>▲ 風が強い順</span>
+                      <span className="font-mono text-[10px]">上位5地点</span>
+                    </div>
+                    {rankings.windTop5.map((st, idx) =>
+                      renderRankingCard(st, idx, 'wind-top')
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div
+                      data-testid="amedas-ranking-header-snow"
+                      className="bg-indigo-950/80 border-y border-indigo-500/50 px-2.5 py-1 text-xs font-extrabold text-indigo-200 flex items-center justify-between"
+                    >
+                      <span>▲ 積雪量が多い順</span>
+                      <span className="font-mono text-[10px]">上位5地点</span>
+                    </div>
+                    {rankings.snowTop5.length === 0 ? (
+                      <div className="px-2.5 py-4 text-xs text-neutral-400 font-mono text-center">
+                        現在、積雪（1cm以上）を観測している地点はありません
+                      </div>
+                    ) : (
+                      rankings.snowTop5.map((st, idx) =>
+                        renderRankingCard(st, idx, 'snow-top')
+                      )
+                    )}
+                  </>
+                )}
+              </>
+            );
+          })()}
 
         {/* ==================== FORECAST ==================== */}
         {effectiveScene === 'forecast' &&
-          data.forecasts.map((fc) => (
-            <div key={fc.id} className="pb-1.5">
-              <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                <span>{fc.cityName}</span>
-                <span className="text-[11px] font-mono text-neutral-200">
-                  降水 {Math.max(...fc.pops)}%
-                </span>
+          (() => {
+            const scopedForecasts = isZoomedIn
+              ? (() => {
+                  const matched = data.forecasts.filter((fc) =>
+                    activeRegionConfig.id !== 'national' &&
+                    activeRegionConfig.id !== 'world'
+                      ? fc.regionId === activeRegionConfig.id
+                      : isPointInViewport(fc.lat, fc.lon) ||
+                        fc.regionId === syncedRegionId
+                  );
+                  return matched.length > 0 ? matched : data.forecasts;
+                })()
+              : data.forecasts;
+
+            return scopedForecasts.map((fc) => (
+              <div key={fc.id} className="pb-1.5">
+                <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
+                  <span>{fc.cityName}</span>
+                  <span className="text-[11px] font-mono text-neutral-200">
+                    降水 {Math.max(...fc.pops)}%
+                  </span>
+                </div>
+                <div className="px-2.5 pt-1 flex items-center justify-between text-xs">
+                  <span className="text-white font-bold">{fc.todayWeather}</span>
+                  <span className="font-mono">
+                    <span className="text-red-400 font-bold">{fc.tempMax}℃</span>
+                    <span className="text-neutral-500">/</span>
+                    <span className="text-sky-400 font-bold">{fc.tempMin}℃</span>
+                  </span>
+                </div>
               </div>
-              <div className="px-2.5 pt-1 flex items-center justify-between text-xs">
-                <span className="text-white font-bold">{fc.todayWeather}</span>
-                <span className="font-mono">
-                  <span className="text-red-400 font-bold">{fc.tempMax}℃</span>
-                  <span className="text-neutral-500">/</span>
-                  <span className="text-sky-400 font-bold">{fc.tempMin}℃</span>
-                </span>
-              </div>
-            </div>
-          ))}
+            ));
+          })()}
 
         {/* ==================== VOLCANO ==================== */}
         {effectiveScene === 'volcano' && (
@@ -616,7 +919,12 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
                   }
                 }
               }
-              return Array.from(grouped.values()).map((grp, idx) => {
+              return Array.from(grouped.values())
+                .sort(
+                  (a, b) =>
+                    b.scaleCode - a.scaleCode || b.totalCount - a.totalCount
+                )
+                .map((grp, idx) => {
                 const style = getSeismicScaleStyle(grp.scaleCode);
                 const extraCount = grp.totalCount - grp.names.length;
                 return (
@@ -672,12 +980,16 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
         ) : effectiveScene === 'typhoon' ? (
           <div className="flex items-center justify-between text-[11px] font-bold text-white whitespace-nowrap">
             <span className="inline-flex items-center gap-1">
+              <span className="inline-block w-3 h-0.5 bg-sky-400" />
+              過去軌跡
+            </span>
+            <span className="inline-flex items-center gap-1">
               <span className="inline-block w-2.5 h-2.5 rounded-full bg-red-600" />
-              暴風域(25m/s)
+              暴風域
             </span>
             <span className="inline-flex items-center gap-1">
               <span className="inline-block w-2.5 h-2.5 rounded-full bg-yellow-400" />
-              強風域(15m/s)
+              強風域
             </span>
             <span className="inline-flex items-center gap-1">
               <span className="inline-block w-2.5 h-2.5 rounded-full border border-dashed border-white" />
@@ -707,28 +1019,95 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
             <span className="text-yellow-300 font-bold">●雷検知</span>
           </div>
         ) : effectiveScene === 'amedas' ? (
-          <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#93C5FD] inline-block" />
-              0℃
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#E0F2FE] inline-block" />
-              8℃
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#FEF08A] inline-block" />
-              14℃
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#FACC15] inline-block" />
-              20℃
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#F97316] inline-block" />
-              26℃+
-            </span>
-          </div>
+          amedasMetric === 'precip' ? (
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#38BDF8] inline-block" />
+                1mm
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#2563EB] inline-block" />
+                5mm
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#FACC15] inline-block" />
+                10mm
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#EF4444] inline-block" />
+                30mm
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#9333EA] inline-block" />
+                50+
+              </span>
+            </div>
+          ) : amedasMetric === 'wind' ? (
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#64748B] inline-block" />
+                &lt;5m/s
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#22C55E] inline-block" />
+                5+
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#FACC15] inline-block" />
+                10+
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#F97316] inline-block" />
+                15+
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#EF4444] inline-block" />
+                20+
+              </span>
+            </div>
+          ) : amedasMetric === 'snow' ? (
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#F8FAFC] inline-block" />
+                1cm+
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#BAE6FD] inline-block" />
+                5cm+
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#38BDF8] inline-block" />
+                20cm+
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#2563EB] inline-block" />
+                100cm+
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#93C5FD] inline-block" />
+                0℃
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#E0F2FE] inline-block" />
+                8℃
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#FEF08A] inline-block" />
+                14℃
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#FACC15] inline-block" />
+                20℃
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#F97316] inline-block" />
+                26℃+
+              </span>
+            </div>
+          )
         ) : effectiveScene === 'earthquake' ? (
           <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
             <span className="text-neutral-300">震度</span>

@@ -1,4 +1,5 @@
 import {
+  AmedasMetric,
   AmedasStationData,
   EarthquakeReport,
   EarthquakeStationIntensity,
@@ -44,8 +45,8 @@ export const SCENE_LIST: SceneMetadata[] = [
     id: 'amedas',
     index: '04',
     shortLabel: 'アメダス実況',
-    title: '全国アメダス気象実況（気温分布）',
-    subtitle: '全国約930観測点 リアルタイム気温グラデーション＆降水量・風速',
+    title: '全国アメダス気象実況（気温・降水・風速・積雪）',
+    subtitle: '全国約1,300観測点 リアルタイム気温・降水量・風速・積雪深',
     xmlSource: 'JMA AMeDAS / 全国気象観測',
   },
   {
@@ -266,24 +267,121 @@ export const PREFECTURE_NAMES: Record<
   47: { name: '沖縄県', regionId: 'okinawa', lat: 26.21, lon: 127.68 },
 };
 
-const HOKKAIDO_SUBOFFICE_NAMES: Record<string, string> = {
-  '011000': '宗谷地方',
-  '012010': '上川地方',
-  '012020': '留萌地方',
-  '013010': '網走地方',
-  '013020': '北見地方',
-  '013030': '紋別地方',
-  '014010': '根室地方',
-  '014020': '釧路地方',
-  '014030': '十勝地方',
-  '015010': '胆振地方',
-  '015020': '日高地方',
-  '016010': '石狩地方',
-  '016020': '空知地方',
-  '016030': '後志地方',
-  '017010': '渡島地方',
-  '017020': '檜山地方',
-};
+export interface WarningDivisionMeta {
+  code: string;
+  name: string;
+  prefId: number;
+  regionId: RegionId;
+  lat: number;
+  lon: number;
+  zoom: number;
+  order: number;
+}
+
+export const WARNING_DIVISIONS: Record<string, WarningDivisionMeta> = (() => {
+  const map: Record<string, WarningDivisionMeta> = {};
+  let order = 0;
+  const add = (
+    code: string,
+    name: string,
+    prefId: number,
+    regionId: RegionId,
+    lat: number,
+    lon: number,
+    zoom = 7
+  ) => {
+    map[code] = { code, name, prefId, regionId, lat, lon, zoom, order: order++ };
+  };
+
+  // Hokkaido 7 divisions (North-to-South / West-to-East)
+  add('011000', '宗谷', 1, 'hokkaido', 45.12, 141.95, 7);
+  add('013000', '網走・北見・紋別', 1, 'hokkaido', 43.95, 143.85, 7);
+  add('012000', '上川・留萌', 1, 'hokkaido', 44.05, 142.05, 7);
+  add('016000', '石狩・空知・後志', 1, 'hokkaido', 43.1, 141.35, 7);
+  add('014100', '釧路・根室', 1, 'hokkaido', 43.15, 144.25, 7);
+  add('015000', '胆振・日高', 1, 'hokkaido', 42.45, 142.0, 7);
+  add('017000', '渡島・檜山', 1, 'hokkaido', 42.0, 140.4, 7);
+
+  // Tohoku through Miyazaki (02..45)
+  for (let prefId = 2; prefId <= 45; prefId++) {
+    const meta = PREFECTURE_NAMES[prefId];
+    if (!meta) continue;
+    const code = `${String(prefId).padStart(2, '0')}0000`;
+    add(code, meta.name, prefId, meta.regionId, meta.lat, meta.lon, 7);
+  }
+
+  // Kagoshima (2 divisions)
+  add('460100', '鹿児島県（奄美地方除く）', 46, 'kyushu', 31.56, 130.56, 7);
+  add('460040', '奄美地方', 46, 'kyushu', 28.25, 129.35, 7);
+
+  // Okinawa (4 divisions)
+  add('471000', '沖縄本島地方', 47, 'okinawa', 26.35, 127.8, 7);
+  add('472000', '大東島地方', 47, 'okinawa', 25.85, 131.25, 8);
+  add('473000', '宮古島地方', 47, 'okinawa', 24.8, 125.28, 8);
+  add('474000', '八重山地方', 47, 'okinawa', 24.34, 124.15, 8);
+
+  return map;
+})();
+
+/**
+ * Resolves any JMA `class10` / `office` / `class20` area code to one of the 57 JMA warning divisions:
+ * 「宗谷」「網走・北見・紋別」「上川・留萌」「石狩・空知・後志」「釧路・根室」「胆振・日高」「渡島・檜山」
+ * 「[各都府県]」「鹿児島県（奄美地方除く）」「奄美地方」「沖縄本島地方」「大東島地方」「宮古島地方」「八重山地方」
+ */
+export function resolveWarningDivision(
+  areaCode: string,
+  areaJson?: Record<string, any> | null,
+  fallbackClass10Code?: string
+): WarningDivisionMeta | null {
+  const code = String(areaCode || '').trim();
+  if (!code) return null;
+
+  if (WARNING_DIVISIONS[code]) {
+    return WARNING_DIVISIONS[code];
+  }
+
+  // If 7-digit class20 code and areaJson is available, walk up class20 -> class15 -> class10,
+  // or fall back to the enclosing officeBlock's class10 code.
+  let c10 = code;
+  if (code.length === 7) {
+    const c15 = areaJson?.class20s?.[code]?.parent;
+    const resolvedC10 = c15 ? areaJson?.class15s?.[c15]?.parent : undefined;
+    if (resolvedC10) {
+      c10 = String(resolvedC10);
+    } else if (fallbackClass10Code) {
+      c10 = String(fallbackClass10Code);
+    }
+  }
+
+  if (WARNING_DIVISIONS[c10]) {
+    return WARNING_DIVISIONS[c10];
+  }
+
+  if (c10.startsWith('011')) return WARNING_DIVISIONS['011000'];
+  if (c10.startsWith('012')) return WARNING_DIVISIONS['012000'];
+  if (c10.startsWith('013')) return WARNING_DIVISIONS['013000'];
+  if (c10.startsWith('014')) return WARNING_DIVISIONS['014100'];
+  if (c10.startsWith('015')) return WARNING_DIVISIONS['015000'];
+  if (c10.startsWith('016')) return WARNING_DIVISIONS['016000'];
+  if (c10.startsWith('017')) return WARNING_DIVISIONS['017000'];
+
+  if (c10 === '460040' || c10.startsWith('46004')) {
+    return WARNING_DIVISIONS['460040'];
+  }
+  if (c10.startsWith('46')) {
+    return WARNING_DIVISIONS['460100'];
+  }
+
+  if (c10.startsWith('471')) return WARNING_DIVISIONS['471000'];
+  if (c10.startsWith('472')) return WARNING_DIVISIONS['472000'];
+  if (c10.startsWith('473')) return WARNING_DIVISIONS['473000'];
+  if (c10.startsWith('474')) return WARNING_DIVISIONS['474000'];
+  if (c10.startsWith('47')) return WARNING_DIVISIONS['471000'];
+
+  const prefPrefix = c10.slice(0, 2);
+  const prefCode = `${prefPrefix}0000`;
+  return WARNING_DIVISIONS[prefCode] || null;
+}
 
 function compareSeverity(a: WarningSeverity, b: WarningSeverity): number {
   const rank: Record<WarningSeverity, number> = {
@@ -296,106 +394,306 @@ function compareSeverity(a: WarningSeverity, b: WarningSeverity): number {
 }
 
 /**
- * Parses JMA's live `https://www.jma.go.jp/bosai/warning/data/warning/map.json`
- * into a 47-prefecture severity lookup table (`prefSeverityMap`) AND a compact
- * regional list (`RegionalWarningItem[]`) for the NERV-style right sidebar.
+ * Parses JMA's live `https://www.jma.go.jp/bosai/warning/data/r8/map.json`
+ * (as well as legacy `warning/data/warning/map.json`) into:
+ * - `warnings`: grouped by the 57 JMA divisions (`宗谷`, `網走・北見・紋別`, `上川・留萌`, `石狩・空知・後志`, `釧路・根室`, `胆振・日高`, `渡島・檜山`, `[各都府県]`, `鹿児島県（奄美地方除く）`, `奄美地方`, `沖縄本島地方`, `大東島地方`, `宮古島地方`, `八重山地方`)
+ * - `municipalityWarnings`: municipality-level (`class20s`) items
+ * - `muniSeverityMap`: 7-digit municipality code -> `WarningSeverity` for fine-grained municipality polygon coloring
+ * - `prefSeverityMap`: 1..47 prefecture ID -> `WarningSeverity`
  */
-export function parseJmaWarningMapData(rawArray: Array<Record<string, any>>): {
+export function parseJmaWarningMapData(
+  rawArray: Array<Record<string, any>>,
+  areaJson?: Record<string, any> | null,
+  xyJson?: Record<string, any> | null
+): {
   warnings: RegionalWarningItem[];
+  municipalityWarnings: RegionalWarningItem[];
+  muniSeverityMap: Record<string, WarningSeverity>;
   prefSeverityMap: Record<number, WarningSeverity>;
 } {
   const prefSeverityMap: Record<number, WarningSeverity> = {};
   for (let i = 1; i <= 47; i++) {
     prefSeverityMap[i] = 'normal';
   }
+  const muniSeverityMap: Record<string, WarningSeverity> = {};
 
   const warnings: RegionalWarningItem[] = [];
+  const municipalityWarningsMap = new Map<string, RegionalWarningItem>();
+  const class20sMeta = areaJson?.class20s || {};
+  const class20sXy = xyJson?.class20s || {};
+
+  const extractBadgeItems = (
+    rawWarnings: any[]
+  ): { badgeItems: WarningBadgeItem[]; maxSeverity: WarningSeverity } => {
+    const activeCodes = new Set<string>();
+    for (const w of rawWarnings) {
+      if (typeof w === 'string' && w.trim()) {
+        activeCodes.add(w.trim());
+      } else if (
+        w &&
+        w.code &&
+        w.status !== '解除' &&
+        w.status !== '発表警報・注意報はなし'
+      ) {
+        activeCodes.add(String(w.code));
+      }
+    }
+
+    const badgeItems: WarningBadgeItem[] = [];
+    let maxSeverity: WarningSeverity = 'normal';
+
+    for (const c of activeCodes) {
+      const info = JMA_WARNING_CODE_TABLE[c];
+      if (!info) continue;
+      if (
+        !badgeItems.some(
+          (b) => b.name === info.name && b.severity === info.severity
+        )
+      ) {
+        badgeItems.push({ code: c, name: info.name, severity: info.severity });
+      }
+      if (compareSeverity(info.severity, maxSeverity) > 0) {
+        maxSeverity = info.severity;
+      }
+    }
+
+    badgeItems.sort((a, b) => compareSeverity(b.severity, a.severity));
+    return { badgeItems, maxSeverity };
+  };
+
+  const upsertDivisionWarning = (
+    areaCode: string,
+    rawWarnings: any[],
+    reportTime: string
+  ) => {
+    const divMeta = resolveWarningDivision(areaCode, areaJson);
+    if (!divMeta) return;
+
+    const { badgeItems, maxSeverity } = extractBadgeItems(rawWarnings);
+    if (badgeItems.length === 0) return;
+
+    if (
+      compareSeverity(maxSeverity, prefSeverityMap[divMeta.prefId] || 'normal') >
+      0
+    ) {
+      prefSeverityMap[divMeta.prefId] = maxSeverity;
+    }
+
+    const existing = warnings.find((w) => w.divisionCode === divMeta.code);
+    if (existing) {
+      for (const item of badgeItems) {
+        if (
+          !existing.badgeItems.some(
+            (b) => b.name === item.name && b.severity === item.severity
+          )
+        ) {
+          existing.badgeItems.push(item);
+        }
+      }
+      existing.badgeItems.sort((a, b) =>
+        compareSeverity(b.severity, a.severity)
+      );
+      existing.activeWarnings = existing.badgeItems.map((b) => b.name);
+      if (compareSeverity(maxSeverity, existing.severity) > 0) {
+        existing.severity = maxSeverity;
+      }
+      existing.headline = `${divMeta.name}に${existing.activeWarnings.join('・')}発表中`;
+    } else {
+      warnings.push({
+        id: `warn-${divMeta.code}`,
+        prefId: divMeta.prefId,
+        prefecture: divMeta.name,
+        regionId: divMeta.regionId,
+        areaName: divMeta.name,
+        divisionCode: divMeta.code,
+        lat: divMeta.lat,
+        lon: divMeta.lon,
+        zoom: divMeta.zoom,
+        severity: maxSeverity,
+        activeWarnings: badgeItems.map((b) => b.name),
+        badgeItems,
+        updatedAt: reportTime,
+        office: '気象庁',
+        headline: `${divMeta.name}に${badgeItems.map((b) => b.name).join('・')}発表中`,
+      });
+    }
+  };
+
+  const upsertMunicipalityWarning = (
+    codeStr: string,
+    rawWarnings: any[],
+    reportTime: string,
+    fallbackClass10Code?: string
+  ) => {
+    if (codeStr.length < 2) return;
+    const prefId = Number(codeStr.slice(0, 2));
+    if (!prefId || prefId < 1 || prefId > 47) return;
+    const prefMeta = PREFECTURE_NAMES[prefId];
+    if (!prefMeta) return;
+
+    const { badgeItems, maxSeverity } = extractBadgeItems(rawWarnings);
+    if (badgeItems.length === 0) return;
+
+    const prevMuniSev = muniSeverityMap[codeStr] || 'normal';
+    if (compareSeverity(maxSeverity, prevMuniSev) > 0) {
+      muniSeverityMap[codeStr] = maxSeverity;
+    }
+    if (compareSeverity(maxSeverity, prefSeverityMap[prefId] || 'normal') > 0) {
+      prefSeverityMap[prefId] = maxSeverity;
+    }
+
+    const divMeta = resolveWarningDivision(
+      codeStr,
+      areaJson,
+      fallbackClass10Code
+    );
+    const muniInfo = class20sMeta[codeStr];
+    const muniName = String(muniInfo?.name || '').trim();
+    if (!muniName && areaJson) return;
+    const resolvedMuniName = muniName || `${prefMeta.name}(${codeStr})`;
+
+    const existing = municipalityWarningsMap.get(codeStr);
+    if (existing) {
+      for (const item of badgeItems) {
+        if (
+          !existing.badgeItems.some(
+            (b) => b.name === item.name && b.severity === item.severity
+          )
+        ) {
+          existing.badgeItems.push(item);
+        }
+      }
+      existing.badgeItems.sort((a, b) =>
+        compareSeverity(b.severity, a.severity)
+      );
+      existing.activeWarnings = existing.badgeItems.map((b) => b.name);
+      if (compareSeverity(maxSeverity, existing.severity) > 0) {
+        existing.severity = maxSeverity;
+      }
+      existing.headline = `${existing.prefecture}に${existing.activeWarnings.join('・')}発表中`;
+      return;
+    }
+
+    const xy = class20sXy[codeStr];
+    let lat = divMeta?.lat ?? prefMeta.lat;
+    let lon = divMeta?.lon ?? prefMeta.lon;
+    if (Array.isArray(xy) && xy.length >= 2) {
+      const parsedLat = Number(xy[0]);
+      const parsedLon = Number(xy[1]);
+      if (!Number.isNaN(parsedLat) && !Number.isNaN(parsedLon)) {
+        lat = parsedLat;
+        lon = parsedLon;
+      }
+    } else {
+      const numCode = Number(codeStr) || 0;
+      lat = Number((lat + (((numCode % 19) - 9) * 0.04)).toFixed(4));
+      lon = Number((lon + ((((numCode >> 4) % 19) - 9) * 0.04)).toFixed(4));
+    }
+
+    const fullHeader = `${divMeta?.name || prefMeta.name} ${resolvedMuniName}`;
+    municipalityWarningsMap.set(codeStr, {
+      id: `muni-warn-${codeStr}`,
+      prefId,
+      prefecture: fullHeader,
+      regionId: divMeta?.regionId || prefMeta.regionId,
+      areaName: resolvedMuniName,
+      divisionCode: divMeta?.code,
+      muniCode: codeStr,
+      lat,
+      lon,
+      severity: maxSeverity,
+      activeWarnings: badgeItems.map((b) => b.name),
+      badgeItems,
+      updatedAt: reportTime,
+      office: '気象庁',
+      headline: `${fullHeader}に${badgeItems.map((b) => b.name).join('・')}発表中`,
+      isMunicipality: true,
+    });
+  };
 
   for (const officeBlock of rawArray) {
+    const reportTime =
+      String(
+        officeBlock.reportDatetime ||
+          officeBlock.warning?.reportDatetime ||
+          ''
+      ).slice(11, 16) || '最新';
+
+    const blockFallbackC10 = String(
+      officeBlock.warning?.class10Items?.[0]?.areaCode ||
+        officeBlock.areaTypes?.[0]?.areas?.[0]?.code ||
+        officeBlock.officeCode ||
+        ''
+    );
+
+    // Format A: JMA Reiwa 8 (`warning/data/r8/map.json`) -> `officeBlock.warning.{class10Items, class20Items}`
+    if (officeBlock.warning && typeof officeBlock.warning === 'object') {
+      const c10Items = officeBlock.warning.class10Items;
+      if (Array.isArray(c10Items)) {
+        for (const item of c10Items) {
+          const codeStr = String(item?.areaCode || '');
+          const kinds = Array.isArray(item?.kinds) ? item.kinds : [];
+          upsertDivisionWarning(codeStr, kinds, reportTime);
+        }
+      }
+      const c20Items = officeBlock.warning.class20Items;
+      if (Array.isArray(c20Items)) {
+        for (const item of c20Items) {
+          const codeStr = String(item?.areaCode || '');
+          const kinds = Array.isArray(item?.kinds) ? item.kinds : [];
+          upsertMunicipalityWarning(
+            codeStr,
+            kinds,
+            reportTime,
+            blockFallbackC10
+          );
+        }
+      }
+    }
+
+    // Format B: Legacy `warning/data/warning/map.json` -> `officeBlock.areaTypes`
     const areas = officeBlock.areaTypes?.[0]?.areas;
-    if (!Array.isArray(areas) || areas.length === 0) continue;
-
-    for (const area of areas) {
-      const codeStr = String(area.code || '');
-      if (codeStr.length < 2) continue;
-      const prefId = Number(codeStr.slice(0, 2));
-      if (!prefId || prefId < 1 || prefId > 47) continue;
-
-      const prefMeta = PREFECTURE_NAMES[prefId];
-      if (!prefMeta) continue;
-
-      const activeCodes = new Set<string>();
-      const rawWarnings = Array.isArray(area.warnings) ? area.warnings : [];
-      for (const w of rawWarnings) {
-        if (
-          w &&
-          w.code &&
-          w.status !== '解除' &&
-          w.status !== '発表警報・注意報はなし'
-        ) {
-          activeCodes.add(String(w.code));
-        }
+    if (Array.isArray(areas) && areas.length > 0) {
+      for (const area of areas) {
+        const codeStr = String(area.code || '');
+        const rawWarnings = Array.isArray(area.warnings) ? area.warnings : [];
+        upsertDivisionWarning(codeStr, rawWarnings, reportTime);
       }
+    }
 
-      if (activeCodes.size === 0) continue;
-
-      const badgeItems: WarningBadgeItem[] = [];
-      let maxSeverity: WarningSeverity = 'normal';
-
-      for (const c of activeCodes) {
-        const info = JMA_WARNING_CODE_TABLE[c];
-        if (!info) continue;
-        if (!badgeItems.some((b) => b.name === info.name && b.severity === info.severity)) {
-          badgeItems.push({ code: c, name: info.name, severity: info.severity });
-        }
-        if (compareSeverity(info.severity, maxSeverity) > 0) {
-          maxSeverity = info.severity;
-        }
-      }
-
-      if (badgeItems.length === 0) continue;
-
-      badgeItems.sort((a, b) => compareSeverity(b.severity, a.severity));
-
-      if (compareSeverity(maxSeverity, prefSeverityMap[prefId] || 'normal') > 0) {
-        prefSeverityMap[prefId] = maxSeverity;
-      }
-
-      const displayAreaName =
-        HOKKAIDO_SUBOFFICE_NAMES[codeStr] || prefMeta.name;
-
-      const existing = warnings.find((w) => w.prefecture === displayAreaName);
-      if (existing) {
-        for (const item of badgeItems) {
-          if (!existing.badgeItems.some((b) => b.name === item.name)) {
-            existing.badgeItems.push(item);
-            existing.activeWarnings.push(item.name);
-          }
-        }
-        if (compareSeverity(maxSeverity, existing.severity) > 0) {
-          existing.severity = maxSeverity;
-        }
-      } else {
-        warnings.push({
-          id: `warn-${codeStr}`,
-          prefId,
-          prefecture: displayAreaName,
-          regionId: prefMeta.regionId,
-          areaName: displayAreaName,
-          lat: prefMeta.lat,
-          lon: prefMeta.lon,
-          severity: maxSeverity,
-          activeWarnings: badgeItems.map((b) => b.name),
-          badgeItems,
-          updatedAt: String(officeBlock.reportDatetime || '').slice(11, 16) || '最新',
-          office: '気象庁',
-          headline: `${displayAreaName}に${badgeItems.map((b) => b.name).join('・')}発表中`,
-        });
+    const muniAreas = officeBlock.areaTypes?.[1]?.areas;
+    if (Array.isArray(muniAreas) && muniAreas.length > 0) {
+      for (const muni of muniAreas) {
+        const codeStr = String(muni.code || '');
+        const rawWarnings = Array.isArray(muni.warnings) ? muni.warnings : [];
+        upsertMunicipalityWarning(
+          codeStr,
+          rawWarnings,
+          reportTime,
+          blockFallbackC10
+        );
       }
     }
   }
 
-  return { warnings, prefSeverityMap };
+  // Sort `warnings` in North-to-South JMA division order
+  warnings.sort((a, b) => {
+    const orderA = a.divisionCode
+      ? (WARNING_DIVISIONS[a.divisionCode]?.order ?? 999)
+      : 999;
+    const orderB = b.divisionCode
+      ? (WARNING_DIVISIONS[b.divisionCode]?.order ?? 999)
+      : 999;
+    return orderA - orderB;
+  });
+
+  const municipalityWarnings = Array.from(municipalityWarningsMap.values());
+  return {
+    warnings,
+    municipalityWarnings,
+    muniSeverityMap,
+    prefSeverityMap,
+  };
 }
 
 function formatJstDayHour(isoStr: string, suffix: string): string {
@@ -403,9 +701,9 @@ function formatJstDayHour(isoStr: string, suffix: string): string {
     const d = new Date(isoStr);
     if (!Number.isNaN(d.getTime())) {
       const jst = new Date(d.getTime() + 9 * 3600 * 1000);
-      const day = jst.getUTCDate();
+      const day = String(jst.getUTCDate()).padStart(2, '0');
       const hour = String(jst.getUTCHours()).padStart(2, '0');
-      return `${day}日${hour}時 ${suffix}`;
+      return suffix ? `${day}日${hour}時 ${suffix}` : `${day}日${hour}時`;
     }
   } catch {
     // ignore
@@ -414,12 +712,55 @@ function formatJstDayHour(isoStr: string, suffix: string): string {
 }
 
 /**
- * Pure parser for JMA's live `https://www.jma.go.jp/bosai/typhoon/data/{tcId}/specifications.json`.
- * Extracts current center position, gale/storm radii, and forecast track points with probability circle radii.
+ * Formats a typhoon forecast point's time label into a compact single-line map label such as `'06日21時'`.
+ */
+export function formatCompactTyphoonTime(timeLabel: string): string {
+  const m = /(\d{1,2})日(\d{1,2})時/.exec(String(timeLabel || ''));
+  if (m) {
+    return `${m[1].padStart(2, '0')}日${m[2].padStart(2, '0')}時`;
+  }
+  return String(timeLabel || '').split(' ')[0] || timeLabel;
+}
+
+/**
+ * Returns the compact single-line center label for a typhoon or tropical/extratropical cyclone on the map
+ * (e.g., `'台風第31号'`, `'熱帯低気圧'`, or `'温帯低気圧'`).
+ */
+export function formatCompactTyphoonCenterLabel(
+  tc: TyphoonReport,
+  pt?: TyphoonTrackPoint
+): string {
+  const cat = pt?.categoryJp || tc.categoryJp || '';
+  if (cat.includes('温帯低気圧')) return '温帯低気圧';
+  if (cat.includes('熱帯低気圧')) return '熱帯低気圧';
+  if (tc.displayNumber && tc.displayNumber.startsWith('台風第')) {
+    return tc.displayNumber;
+  }
+  return cat || tc.displayNumber || '台風';
+}
+
+/**
+ * Returns true if the cyclone has already transitioned into an extratropical cyclone (`温帯低気圧`).
+ * When true, its trajectory on the map is drawn as a single solid gray line without intermediate circle dots.
+ */
+export function isExtratropicalCyclone(tc: TyphoonReport): boolean {
+  const currentCat = tc.points[0]?.categoryJp || tc.categoryJp || '';
+  return (
+    currentCat.includes('温帯低気圧') ||
+    tc.categoryJp.includes('温帯低気圧') ||
+    tc.displayNumber.includes('温帯低気圧')
+  );
+}
+
+/**
+ * Pure parser for JMA's live `https://www.jma.go.jp/bosai/typhoon/data/{tcId}/specifications.json`
+ * and optional `forecast.json` (which contains `track.preTyphoon` and `track.typhoon` past trajectory coordinates).
+ * Extracts current center position, past track, gale/storm radii, and forecast track points with probability circle radii.
  */
 export function parseJmaTyphoonSpecifications(
   rawSpecs: Array<Record<string, any>>,
-  tcId = 'TC'
+  tcId = 'TC',
+  rawForecastJson?: Array<Record<string, any>>
 ): TyphoonReport | null {
   if (!Array.isArray(rawSpecs) || rawSpecs.length < 2) {
     return null;
@@ -428,10 +769,16 @@ export function parseJmaTyphoonSpecifications(
   const header = rawSpecs[0];
   const rawNumber = String(header.typhoonNumber || '');
   const shortNum = rawNumber.length >= 2 ? Number(rawNumber.slice(-2)) : 0;
-  const displayNumber = shortNum > 0 ? `台風第${shortNum}号` : '熱帯低気圧・台風';
-  const nameJp = header.name?.jp || '発生中';
-  const nameEn = header.name?.en || '';
   const categoryJp = header.category?.jp || '台風';
+  const displayNumber = categoryJp.includes('温帯低気圧')
+    ? shortNum > 0
+      ? `温帯低気圧 (旧台風${shortNum}号)`
+      : '温帯低気圧'
+    : shortNum > 0
+      ? `台風第${shortNum}号`
+      : '熱帯低気圧';
+  const nameJp = header.name?.jp || categoryJp;
+  const nameEn = header.name?.en || '';
   const issueIso = header.issue?.JST || '';
   const issueTimeJst = issueIso
     ? `${issueIso.slice(5, 7)}月${issueIso.slice(8, 10)}日 ${issueIso.slice(11, 16)} 発表`
@@ -454,7 +801,7 @@ export function parseJmaTyphoonSpecifications(
     const validIso = item.validtime?.JST || '';
     const timeLabel = formatJstDayHour(
       validIso,
-      isForecast ? `(${advHours}h後予報)` : '実況'
+      isForecast ? '' : '実況'
     );
 
     // Gale warning radius (強風域 15m/s以上)
@@ -505,6 +852,35 @@ export function parseJmaTyphoonSpecifications(
 
   if (points.length === 0) return null;
 
+  // Extract historical trajectory (pastTrack) from forecast.json or specifications.json if present
+  const pastTrack: Array<[number, number]> = [];
+  const appendCoord = (c: any) => {
+    if (!Array.isArray(c) || c.length < 2) return;
+    const lat = Number(c[0]);
+    const lon = Number(c[1]);
+    if (Number.isNaN(lat) || Number.isNaN(lon)) return;
+    const prev = pastTrack[pastTrack.length - 1];
+    if (!prev || Math.abs(prev[0] - lat) > 0.001 || Math.abs(prev[1] - lon) > 0.001) {
+      pastTrack.push([lat, lon]);
+    }
+  };
+
+  const trackSourceList = Array.isArray(rawForecastJson) ? rawForecastJson : rawSpecs;
+  for (const item of trackSourceList) {
+    const tr = item?.track;
+    if (tr && typeof tr === 'object') {
+      if (Array.isArray(tr.preTyphoon)) {
+        tr.preTyphoon.forEach(appendCoord);
+      }
+      if (Array.isArray(tr.typhoon)) {
+        tr.typhoon.forEach(appendCoord);
+      }
+    }
+  }
+  if (pastTrack.length > 0) {
+    appendCoord([points[0].lat, points[0].lon]);
+  }
+
   return {
     id: tcId,
     typhoonNumber: rawNumber,
@@ -514,6 +890,8 @@ export function parseJmaTyphoonSpecifications(
     categoryJp,
     issueTimeJst,
     isLiveJma: true,
+    lastSeenMs: Date.now(),
+    pastTrack: pastTrack.length >= 2 ? pastTrack : undefined,
     points,
   };
 }
@@ -1085,6 +1463,48 @@ export function getNextSceneId(
   return orderedIds[(currentIndex + 1) % orderedIds.length];
 }
 
+/**
+ * North-to-South regional patrol sequence for `'auto'` mode (`日本全国＋地方 自動巡回`):
+ * Starts at `'national'` (全国表示), steps North-to-South (`北海道 -> 東北 -> 関東 -> 中部 -> 近畿 -> 中国・四国 -> 九州 -> 沖縄`),
+ * returns to `'national'` (全国表示) at the end, and THEN advances to the next data/scene.
+ */
+export const AUTO_PATROL_SEQUENCE: RegionId[] = [
+  'national',
+  'hokkaido',
+  'tohoku',
+  'kanto',
+  'chubu',
+  'kinki',
+  'chugoku_shikoku',
+  'kyushu',
+  'okinawa',
+  'national',
+];
+
+export function getNextPatrolStep(currentStepIndex: number): {
+  nextStepIndex: number;
+  regionId: RegionId;
+  completedCycle: boolean;
+} {
+  const safeIdx =
+    currentStepIndex >= 0 && currentStepIndex < AUTO_PATROL_SEQUENCE.length
+      ? currentStepIndex
+      : 0;
+  if (safeIdx >= AUTO_PATROL_SEQUENCE.length - 1) {
+    return {
+      nextStepIndex: 0,
+      regionId: AUTO_PATROL_SEQUENCE[0],
+      completedCycle: true,
+    };
+  }
+  const nextIdx = safeIdx + 1;
+  return {
+    nextStepIndex: nextIdx,
+    regionId: AUTO_PATROL_SEQUENCE[nextIdx],
+    completedCycle: false,
+  };
+}
+
 export function getNextSubRegion(currentSubRegion: RegionId): RegionId {
   const patrolOrder: RegionId[] = [
     'national',
@@ -1187,7 +1607,7 @@ const WIND_DIR_NAMES = [
   '北',
 ];
 
-function inferRegionFromCoords(lat: number, lon: number): {
+export function inferRegionFromCoords(lat: number, lon: number): {
   regionId: RegionId;
   prefecture: string;
 } {
@@ -1201,42 +1621,221 @@ function inferRegionFromCoords(lat: number, lon: number): {
   return { regionId: 'kanto', prefecture: '関東甲信' };
 }
 
+export function getAmedasPrecipColor(mm: number): string {
+  if (mm >= 50) return '#9333EA'; // purple (very heavy rain)
+  if (mm >= 30) return '#EF4444'; // red (heavy rain)
+  if (mm >= 20) return '#F97316'; // orange
+  if (mm >= 10) return '#FACC15'; // yellow
+  if (mm >= 5) return '#2563EB';  // vivid blue
+  if (mm >= 1) return '#38BDF8';  // sky blue
+  return '#BAE6FD';               // light cyan (0.5mm)
+}
+
+export function getAmedasWindColor(ms: number): string {
+  if (ms >= 25) return '#9333EA'; // purple (storm force)
+  if (ms >= 20) return '#EF4444'; // red
+  if (ms >= 15) return '#F97316'; // orange (gale)
+  if (ms >= 10) return '#FACC15'; // yellow (strong wind)
+  if (ms >= 5) return '#22C55E';  // emerald green
+  return '#64748B';               // calm slate
+}
+
+export function getAmedasSnowColor(cm: number): string {
+  if (cm >= 150) return '#9333EA'; // deep purple
+  if (cm >= 100) return '#2563EB'; // deep blue
+  if (cm >= 50) return '#0284C7';  // cyan-blue
+  if (cm >= 20) return '#38BDF8';  // sky blue
+  if (cm >= 5) return '#BAE6FD';   // ice blue
+  return '#F8FAFC';                // crisp snow white
+}
+
+export function getAmedasMetricColor(
+  st: AmedasStationData,
+  metric: AmedasMetric
+): string {
+  switch (metric) {
+    case 'precip':
+      return getAmedasPrecipColor(st.precip1h);
+    case 'wind':
+      return getAmedasWindColor(st.windSpeed);
+    case 'snow':
+      return getAmedasSnowColor(st.snowCm ?? 0);
+    case 'temp':
+    default:
+      return getAmedasTempGradientColor(st.temp);
+  }
+}
+
+/**
+ * Returns the visual radius (px) for AMeDAS station markers based on map zoom level.
+ * Zooming in progressively enlarges the markers so stations are easy to see.
+ */
+export function getAmedasPointRadiusForZoom(zoom: number): number {
+  if (zoom <= 3) return 2.5;
+  if (zoom <= 4) return 3.0;
+  if (zoom <= 5) return 3.6;
+  if (zoom <= 6) return 4.8;
+  if (zoom <= 7) return 6.2;
+  if (zoom <= 8) return 8.0;
+  if (zoom <= 9) return 10.0;
+  if (zoom <= 10) return 12.0;
+  return 14.0;
+}
+
+/**
+ * Returns the pixel size (`width` & `height`) for AMeDAS wind direction arrows based on map zoom level.
+ * Designed so wind direction arrows are prominently visible even at nationwide/regional zoom (`zoom = 5..6`).
+ */
+export function getAmedasWindArrowSizeForZoom(zoom: number): number {
+  if (zoom <= 3) return 15;
+  if (zoom <= 4) return 18;
+  if (zoom <= 5) return 22;
+  if (zoom <= 6) return 26;
+  if (zoom <= 7) return 30;
+  if (zoom <= 8) return 34;
+  return 38;
+}
+
+/**
+ * Computes Top-5 station rankings for the AMeDAS right-side panel:
+ * - `tempHigh5`: Top 5 highest temperature stations
+ * - `tempLow5`: Top 5 lowest temperature stations
+ * - `precipTop5`: Top 5 highest precipitation stations (`precip1h > 0`)
+ * - `windTop5`: Top 5 strongest wind speed stations (`windSpeed > 0`)
+ * - `snowTop5`: Top 5 deepest snow stations (`snowCm > 0`)
+ */
+export function computeAmedasTop5Rankings(stations: AmedasStationData[]): {
+  tempHigh5: AmedasStationData[];
+  tempLow5: AmedasStationData[];
+  precipTop5: AmedasStationData[];
+  windTop5: AmedasStationData[];
+  snowTop5: AmedasStationData[];
+} {
+  const validTemp = stations.filter(
+    (st) => st.hasTemp !== false && !Number.isNaN(st.temp)
+  );
+  const tempHigh5 = [...validTemp]
+    .sort((a, b) => b.temp - a.temp)
+    .slice(0, 5);
+  const tempLow5 = [...validTemp]
+    .sort((a, b) => a.temp - b.temp)
+    .slice(0, 5);
+  const precipTop5 = stations
+    .filter((st) => st.precip1h > 0)
+    .sort((a, b) => b.precip1h - a.precip1h)
+    .slice(0, 5);
+  const windTop5 = stations
+    .filter((st) => st.windSpeed > 0)
+    .sort((a, b) => b.windSpeed - a.windSpeed)
+    .slice(0, 5);
+  const snowTop5 = stations
+    .filter((st) => (st.snowCm ?? 0) > 0)
+    .sort((a, b) => (b.snowCm ?? 0) - (a.snowCm ?? 0))
+    .slice(0, 5);
+
+  return {
+    tempHigh5,
+    tempLow5,
+    precipTop5,
+    windTop5,
+    snowTop5,
+  };
+}
+
+/**
+ * Converts a 16-compass Japanese wind direction string (where the wind blows FROM, e.g. `'北'`, `'西北西'`)
+ * into the clockwise rotation angle in degrees (`0° = Up/North`) for an arrow pointing in the direction
+ * the wind is blowing TOWARD (風下方向).
+ */
+export function getWindDirectionRotationDeg(windDirection: string): number {
+  const idx = WIND_DIR_NAMES.indexOf(String(windDirection || '').trim());
+  if (idx <= 0) {
+    return 0;
+  }
+  // idx 1 = 北北東 (22.5°), ..., idx 16 = 北 (360°/0°)
+  const fromDeg = (idx * 22.5) % 360;
+  return (fromDeg + 180) % 360;
+}
+
+/**
+ * Returns the next AMeDAS metric in the automatic loop sequence (`'temp' -> 'precip' -> 'wind' -> ('snow') -> null`).
+ * Returns `null` when all active AMeDAS metrics have been displayed so the monitor can advance to the next scene.
+ */
+export function getNextAmedasMetric(
+  current: AmedasMetric,
+  stations: AmedasStationData[]
+): AmedasMetric | null {
+  const hasSnow = stations.some((st) => (st.snowCm ?? 0) > 0);
+  const sequence: AmedasMetric[] = hasSnow
+    ? ['temp', 'precip', 'wind', 'snow']
+    : ['temp', 'precip', 'wind'];
+  const idx = sequence.indexOf(current);
+  if (idx === -1 || idx >= sequence.length - 1) {
+    return null;
+  }
+  return sequence[idx + 1];
+}
+
 /**
  * Parses JMA's nationwide `amedastable.json` and `map/{YYYYMMDDHHMMSS}.json`
- * into ~900+ temperature-observing AMeDAS station points across Japan.
+ * into ~1,286 AMeDAS station points across Japan (including temperature, precipitation, wind, and snow stations).
  */
 export function parseJmaAmedasNationwide(
   tableJson: Record<string, any>,
   latestMapJson: Record<string, any>,
-  observedAtLabel = '最新観測'
+  observedAtLabel = '最新観測',
+  hourlySnowMapJson?: Record<string, any> | null
 ): AmedasStationData[] {
   if (!tableJson || !latestMapJson) return [];
   const results: AmedasStationData[] = [];
 
   for (const [code, obs] of Object.entries(latestMapJson)) {
-    if (!obs || !Array.isArray(obs.temp) || obs.temp[0] === null || obs.temp[0] === undefined) {
-      continue;
-    }
+    if (!obs || typeof obs !== 'object') continue;
     const meta = tableJson[code];
     if (!meta || !Array.isArray(meta.lat) || !Array.isArray(meta.lon)) continue;
 
     const lat = Number((Number(meta.lat[0]) + Number(meta.lat[1]) / 60).toFixed(4));
     const lon = Number((Number(meta.lon[0]) + Number(meta.lon[1]) / 60).toFixed(4));
-    const temp = Number(obs.temp[0]);
-    if (Number.isNaN(lat) || Number.isNaN(lon) || Number.isNaN(temp)) continue;
+    if (Number.isNaN(lat) || Number.isNaN(lon)) continue;
 
-    const precip1h = Array.isArray(obs.precipitation1h) && obs.precipitation1h[0] != null
-      ? Number(obs.precipitation1h[0])
-      : 0;
-    const windSpeed = Array.isArray(obs.wind) && obs.wind[0] != null
-      ? Number(obs.wind[0])
-      : 0;
-    const windDirIdx = Array.isArray(obs.windDirection) && obs.windDirection[0] != null
-      ? Number(obs.windDirection[0])
-      : 0;
-    const humidity = Array.isArray(obs.humidity) && obs.humidity[0] != null
-      ? Number(obs.humidity[0])
-      : 60;
+    const rawTemp =
+      Array.isArray(obs.temp) && obs.temp[0] !== null && obs.temp[0] !== undefined
+        ? Number(obs.temp[0])
+        : Number.NaN;
+    const hasTemp = !Number.isNaN(rawTemp);
+    const temp = hasTemp ? rawTemp : 0;
+
+    const precip1h =
+      Array.isArray(obs.precipitation1h) && obs.precipitation1h[0] != null
+        ? Number(obs.precipitation1h[0])
+        : 0;
+    const windSpeed =
+      Array.isArray(obs.wind) && obs.wind[0] != null ? Number(obs.wind[0]) : 0;
+    const windDirIdx =
+      Array.isArray(obs.windDirection) && obs.windDirection[0] != null
+        ? Number(obs.windDirection[0])
+        : 0;
+    const humidity =
+      Array.isArray(obs.humidity) && obs.humidity[0] != null
+        ? Number(obs.humidity[0])
+        : 60;
+
+    const rawSnow =
+      Array.isArray(obs.snow) && obs.snow[0] != null
+        ? Number(obs.snow[0])
+        : Array.isArray(hourlySnowMapJson?.[code]?.snow) &&
+            hourlySnowMapJson?.[code]?.snow[0] != null
+          ? Number(hourlySnowMapJson[code].snow[0])
+          : 0;
+    const snowCm = !Number.isNaN(rawSnow) && rawSnow > 0 ? rawSnow : 0;
+
+    const hasAnyObs =
+      hasTemp ||
+      (Array.isArray(obs.precipitation1h) && obs.precipitation1h[0] != null) ||
+      (Array.isArray(obs.wind) && obs.wind[0] != null) ||
+      snowCm > 0;
+    if (!hasAnyObs) continue;
+
     const { regionId, prefecture } = inferRegionFromCoords(lat, lon);
 
     results.push({
@@ -1247,10 +1846,12 @@ export function parseJmaAmedasNationwide(
       lat,
       lon,
       temp,
+      hasTemp,
       precip1h,
       windSpeed,
       windDirection: WIND_DIR_NAMES[windDirIdx] || '北',
       humidity,
+      snowCm,
       observedAt: observedAtLabel,
     });
   }
@@ -1342,5 +1943,111 @@ export function filterNonOverlappingPoints<
 
   return accepted;
 }
+
+/**
+ * Returns only the warning divisions (`宗谷`, `上川・留萌`, `石狩・空知・後志`, `[各都府県]`, etc.)
+ * that currently have `警報` (`'warning'`) or `特別警報` (`'special'`) active, sorted North-to-South.
+ * Used during `warnings` automatic patrol so the camera ONLY zooms in to divisions with Warning or higher!
+ */
+export function getActiveSevereWarningDivisions(
+  warnings: RegionalWarningItem[]
+): RegionalWarningItem[] {
+  return warnings
+    .filter((w) => w.severity === 'warning' || w.severity === 'special')
+    .sort((a, b) => {
+      const orderA = a.divisionCode
+        ? (WARNING_DIVISIONS[a.divisionCode]?.order ?? 999)
+        : 999;
+      const orderB = b.divisionCode
+        ? (WARNING_DIVISIONS[b.divisionCode]?.order ?? 999)
+        : 999;
+      return orderA - orderB;
+    });
+}
+
+/**
+ * Formats the on-map municipality label for zoomed-in `warnings` view:
+ * Strictly returns ONLY the municipality name (`市区町村名のみ`, e.g., `'稚内市'`, `'札幌市'`)
+ * without appending any warning type text (`雷` etc.).
+ */
+export function formatMunicipalityMapLabel(
+  muni: Pick<RegionalWarningItem, 'areaName'>
+): string {
+  return String(muni.areaName || '').trim();
+}
+
+/**
+ * North-to-South waypoints along the Japanese archipelago from Hokkaido to Okinawa
+ * for AMeDAS smooth continuous zoomed-in sweep (`北海道から順に滑らかに途中で止まらず沖縄まで拡大表示`).
+ */
+export const ARCHIPELAGO_SWEEP_WAYPOINTS: Array<[number, number]> = [
+  [43.8, 142.3], // 北海道（道北・道央）
+  [42.1, 140.6], // 北海道（道南・渡島）
+  [40.2, 140.6], // 北東北（青森・岩手・秋田）
+  [38.1, 140.4], // 南東北（宮城・山形・福島）
+  [36.0, 139.5], // 関東（東京・埼玉・茨城）
+  [35.3, 137.3], // 中部・東海（静岡・愛知・岐阜）
+  [34.8, 135.5], // 近畿（京都・大阪・兵庫）
+  [34.3, 133.3], // 中国・四国（広島・岡山・香川）
+  [33.4, 130.9], // 北部九州（福岡・大分・佐賀）
+  [31.7, 130.7], // 南部九州（熊本・宮崎・鹿児島）
+  [28.3, 129.4], // 奄美地方
+  [26.2, 127.7], // 沖縄本島地方
+];
+
+/**
+ * Smoothly interpolates a `[lat, lon]` camera coordinate along `ARCHIPELAGO_SWEEP_WAYPOINTS`
+ * for `progress` in `[0, 1]` (0 = Hokkaido, 1 = Okinawa) without any intermediate stops.
+ */
+export function interpolateArchipelagoSweepPosition(
+  progress: number
+): [number, number] {
+  const clamped = Math.max(0, Math.min(1, progress));
+  const pts = ARCHIPELAGO_SWEEP_WAYPOINTS;
+  const segments = pts.length - 1;
+  if (segments <= 0) return pts[0] || [36.8, 137.5];
+
+  const exactIdx = clamped * segments;
+  const idx = Math.min(segments - 1, Math.floor(exactIdx));
+  const localT = exactIdx - idx;
+  const [lat0, lon0] = pts[idx];
+  const [lat1, lon1] = pts[idx + 1];
+  return [lat0 + (lat1 - lat0) * localT, lon0 + (lon1 - lon0) * localT];
+}
+
+export interface AmedasPatrolStop {
+  id: string;
+  label: string;
+  center: [number, number];
+  zoom: number;
+}
+
+/**
+ * 5-region patrol sequence for AMeDAS camera movement:
+ * 全国表示 -> 北海道 -> 東北 -> 関東中部近畿 -> 中国四国九州 -> 沖縄 -> 全国表示
+ * Smoothly flies (`flyTo`) to each regional stop (zoomed in so the region fills 80%+ of the map screen)
+ * and pauses for ~5 seconds at each stop.
+ */
+export const AMEDAS_PATROL_STOPS: AmedasPatrolStop[] = [
+  { id: 'national_start', label: '全国表示', center: [36.8, 137.5], zoom: 5 },
+  { id: 'hokkaido', label: '北海道', center: [43.45, 143.1], zoom: 7.5 },
+  { id: 'tohoku', label: '東北', center: [39.15, 141.0], zoom: 7.25 },
+  {
+    id: 'kanto_chubu_kinki',
+    label: '関東・中部・近畿',
+    center: [35.65, 138.1],
+    zoom: 7.25,
+  },
+  {
+    id: 'chugoku_shikoku_kyushu',
+    label: '中国・四国・九州',
+    center: [33.3, 132.5],
+    zoom: 7.25,
+  },
+  { id: 'okinawa', label: '沖縄', center: [26.2, 127.6], zoom: 7.5 },
+  { id: 'national_end', label: '全国表示', center: [36.8, 137.5], zoom: 5 },
+];
+
+
 
 

@@ -68,6 +68,7 @@ export interface LightningPoint {
   lon: number;
   timeJst: string;
   type: number;
+  validtime?: string;
 }
 
 export type WarningSeverity = 'special' | 'warning' | 'advisory' | 'normal';
@@ -86,12 +87,28 @@ export interface RegionalWarningItem {
   areaName: string;
   lat: number;
   lon: number;
+  zoom?: number;
+  divisionCode?: string;
+  muniCode?: string;
   severity: WarningSeverity;
   activeWarnings: string[];
   badgeItems: WarningBadgeItem[];
   updatedAt: string;
   office: string;
   headline: string;
+  isMunicipality?: boolean;
+}
+
+export interface MapViewportState {
+  zoom: number;
+  center: [number, number];
+  bounds: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  };
+  inferredRegionId: RegionId;
 }
 
 export interface TyphoonTrackPoint {
@@ -125,6 +142,8 @@ export interface TyphoonReport {
   issueTimeJst: string; // e.g. '11月5日 21:45 発表'
   isLiveJma: boolean;
   isTest?: boolean;
+  lastSeenMs?: number;
+  pastTrack?: Array<[number, number]>;
   points: TyphoonTrackPoint[];
 }
 
@@ -141,6 +160,8 @@ export interface WeatherBulletinItem {
   lon: number;
 }
 
+export type AmedasMetric = 'temp' | 'precip' | 'wind' | 'snow';
+
 export interface AmedasStationData {
   id: string;
   stationName: string;
@@ -149,10 +170,12 @@ export interface AmedasStationData {
   lat: number;
   lon: number;
   temp: number;
+  hasTemp?: boolean;
   precip1h: number;
   windSpeed: number;
   windDirection: string;
   humidity: number;
+  snowCm?: number;
   observedAt: string;
 }
 
@@ -249,6 +272,8 @@ export interface MonitorDataBundle {
   nowcastTimes: NowcastTimeEntry[];
   lightningPoints: LightningPoint[];
   warnings: RegionalWarningItem[];
+  municipalityWarnings?: RegionalWarningItem[];
+  muniSeverityMap?: Record<string, WarningSeverity>;
   prefSeverityMap: Record<number, WarningSeverity>;
   typhoons: TyphoonReport[];
   bulletins: WeatherBulletinItem[];

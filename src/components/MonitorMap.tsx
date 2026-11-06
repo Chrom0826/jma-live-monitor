@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import {
+  AmedasMetric,
   EarthquakeReport,
   InterruptKind,
+  MapViewportState,
   MonitorDataBundle,
   RegionConfig,
+  RegionalWarningItem,
   SceneId,
   TsunamiStationItem,
   TyphoonReport,
@@ -12,20 +15,93 @@ import {
   WarningSeverity,
 } from '../types/jma';
 import {
+  AMEDAS_PATROL_STOPS,
   computeTyphoonConeEnvelope,
-  filterNonOverlappingPoints,
-  getAmedasTempGradientColor,
+  formatCompactTyphoonCenterLabel,
+  formatCompactTyphoonTime,
+  formatMunicipalityMapLabel,
+  getAmedasMetricColor,
+  getAmedasPointRadiusForZoom,
+  getAmedasWindArrowSizeForZoom,
   getSeismicScaleStyle,
+  getWindDirectionRotationDeg,
+  inferRegionFromCoords,
+  isExtratropicalCyclone,
 } from '../utils/jmaParser';
+
+let cachedClass20GeoJson: any = null;
+let cachedClass10GeoJson: any = null;
+const cachedClass20LabelPoints: Record<string, [number, number]> = {};
+let class20FetchPromise: Promise<{ class20: any; class10: any }> | null = null;
+
+function loadJmaMunicipalityGeoJson(): Promise<{ class20: any; class10: any }> {
+  if (cachedClass20GeoJson && cachedClass10GeoJson) {
+    return Promise.resolve({
+      class20: cachedClass20GeoJson,
+      class10: cachedClass10GeoJson,
+    });
+  }
+  if (class20FetchPromise) return class20FetchPromise;
+
+  class20FetchPromise = Promise.all([
+    Promise.all(
+      Array.from({ length: 10 }, (_, idx) =>
+        fetch(
+          `https://www.jma.go.jp/bosai/common/const/geojson/class20s_${idx}.json`
+        )
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)
+      )
+    ),
+    fetch('https://www.jma.go.jp/bosai/common/const/geojson/class10s.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+  ]).then(([c20Parts, c10Json]) => {
+    const validParts = c20Parts.filter(
+      (p) => p && Array.isArray(p.features)
+    );
+    if (validParts.length > 0) {
+      const allFeatures = validParts.flatMap((p) => p.features);
+      for (const f of allFeatures) {
+        const code = String(f?.properties?.code || '');
+        const lp = f?.properties?.labelPoints?.[0];
+        if (code && Array.isArray(lp) && lp.length >= 2) {
+          const lon = Number(lp[0]);
+          const lat = Number(lp[1]);
+          if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+            cachedClass20LabelPoints[code] = [lat, lon];
+          }
+        }
+      }
+      cachedClass20GeoJson = {
+        type: 'FeatureCollection',
+        features: allFeatures,
+      };
+    }
+    if (c10Json && Array.isArray(c10Json.features)) {
+      cachedClass10GeoJson = c10Json;
+    }
+    return {
+      class20: cachedClass20GeoJson,
+      class10: cachedClass10GeoJson,
+    };
+  });
+
+  return class20FetchPromise;
+}
 
 interface MonitorMapProps {
   activeScene: SceneId;
   activeRegionConfig: RegionConfig;
+  activeWarningDivision?: RegionalWarningItem | null;
   data: MonitorDataBundle;
   selectedEarthquake: EarthquakeReport;
   selectedTyphoon: TyphoonReport;
   activeVolcano: VolcanoStatusItem;
   activeTsunamiStation: TsunamiStationItem;
+  amedasMetric: AmedasMetric;
+  onChangeAmedasMetric: (metric: AmedasMetric) => void;
+  onViewportChange?: (viewport: MapViewportState) => void;
   interruptKind: InterruptKind;
   isLoopPaused: boolean;
   onSceneComplete: () => void;
@@ -109,17 +185,23 @@ function createJmaSeamlessNowcastLayer(
   });
 }
 
+// Unified nationwide camera position fixed to Radar's nationwide view (`[36.8, 137.5], zoom: 5`)
+const NATIONAL_CAMERA_VIEW: { center: [number, number]; zoom: number } = {
+  center: [36.8, 137.5],
+  zoom: 5,
+};
+
 // Scene-specific camera positions when in 'national' mode
 const SCENE_CAMERA_TARGETS: Record<
   SceneId,
   { center: [number, number]; zoom: number }
 > = {
-  warnings: { center: [38.2, 137.5], zoom: 5 },
-  radar: { center: [36.8, 137.5], zoom: 5 },
+  warnings: NATIONAL_CAMERA_VIEW,
+  radar: NATIONAL_CAMERA_VIEW,
   typhoon: { center: [37.5, 149.0], zoom: 4 },
-  weather_info: { center: [37.5, 138.0], zoom: 5 },
-  amedas: { center: [37.8, 137.5], zoom: 5 },
-  forecast: { center: [36.2, 137.5], zoom: 5 },
+  weather_info: NATIONAL_CAMERA_VIEW,
+  amedas: NATIONAL_CAMERA_VIEW,
+  forecast: NATIONAL_CAMERA_VIEW,
   volcano: { center: [31.585, 130.657], zoom: 9 },
   tsunami: { center: [33.095, 139.772], zoom: 8 },
   earthquake: { center: [36.4, 140.8], zoom: 7 },
@@ -176,11 +258,15 @@ function getPrefecturePolygonStyle(
 export const MonitorMap: React.FC<MonitorMapProps> = ({
   activeScene,
   activeRegionConfig,
+  activeWarningDivision,
   data,
   selectedEarthquake,
   selectedTyphoon,
   activeVolcano,
   activeTsunamiStation,
+  amedasMetric,
+  onChangeAmedasMetric,
+  onViewportChange,
   interruptKind,
   isLoopPaused,
   onSceneComplete,
@@ -189,22 +275,39 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   const mapInstanceRef = useRef<L.Map | null>(null);
   const worldGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const geoJsonLayerRef = useRef<L.GeoJSON | null>(null);
+  const muniGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
+  const muniBorderLayerRef = useRef<L.GeoJSON | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
   const hrpnsLayerRef = useRef<L.GridLayer | null>(null);
   const thnsLayerRef = useRef<L.GridLayer | null>(null);
   const worldRendererRef = useRef<L.SVG | null>(null);
   const japanRendererRef = useRef<L.SVG | null>(null);
+  const muniCanvasRendererRef = useRef<L.Canvas | null>(null);
+  const muniBorderRendererRef = useRef<L.Canvas | null>(null);
   const overlayRendererRef = useRef<L.SVG | null>(null);
   const isFirstMountRef = useRef<boolean>(true);
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
+  const onViewportChangeRef = useRef<typeof onViewportChange>(onViewportChange);
 
   useEffect(() => {
     onSceneCompleteRef.current = onSceneComplete;
   }, [onSceneComplete]);
 
+  useEffect(() => {
+    onViewportChangeRef.current = onViewportChange;
+  }, [onViewportChange]);
+
   const [worldGeoJsonData, setWorldGeoJsonData] = useState<any>(null);
   const [geoJsonData, setGeoJsonData] = useState<any>(null);
+  const [class20GeoJsonData, setClass20GeoJsonData] = useState<any>(
+    cachedClass20GeoJson
+  );
+  const [class10GeoJsonData, setClass10GeoJsonData] = useState<any>(
+    cachedClass10GeoJson
+  );
   const [radarFrameIndex, setRadarFrameIndex] = useState<number>(0);
+  // radarPass: 0 = 1st loop (Rain Radar only), 1 = 2nd loop (Rain Radar + Lightning Radar & LIDEN)
+  const [radarPass, setRadarPass] = useState<0 | 1>(0);
   const [mapZoomVersion, setMapZoomVersion] = useState<number>(0);
 
   const effectiveScene: SceneId =
@@ -218,7 +321,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             ? 'typhoon'
             : activeScene;
 
-  // Load both World Countries GeoJSON and 47-prefecture Japan GeoJSON once
+  // Load World Countries GeoJSON, 47-prefecture Japan GeoJSON, and JMA Municipality (`class20s`) + Region (`class10s`) GeoJSON once
   useEffect(() => {
     let cancelled = false;
     fetch(`${import.meta.env.BASE_URL}world-countries.geojson`)
@@ -239,19 +342,31 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       })
       .catch(() => {});
 
+    loadJmaMunicipalityGeoJson()
+      .then(({ class20, class10 }) => {
+        if (!cancelled) {
+          if (class20) setClass20GeoJsonData(class20);
+          if (class10) setClass10GeoJsonData(class10);
+        }
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Reset radar frame index to 0 whenever entering 'radar' scene
+  // Reset radar frame index and pass to 0 whenever entering 'radar' scene
   useEffect(() => {
     if (effectiveScene === 'radar') {
       setRadarFrameIndex(0);
+      setRadarPass(0);
     }
   }, [effectiveScene]);
 
-  // Step through all radar timeframes from 0 to last frame, then advance scene
+  // Step through all radar timeframes twice per loop:
+  // Pass 0 (1周目): Rain Radar (hrpns) only
+  // Pass 1 (2周目): Rain Radar (hrpns) + Lightning Radar (thns + LIDEN strikes on top)
   useEffect(() => {
     if (effectiveScene !== 'radar') return;
     const totalFrames = Math.max(1, data.nowcastTimes.length);
@@ -259,40 +374,113 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     const timer = setTimeout(() => {
       if (radarFrameIndex < totalFrames - 1) {
         setRadarFrameIndex((prev) => prev + 1);
+      } else if (radarPass === 0) {
+        setRadarPass(1);
+        setRadarFrameIndex(0);
       } else if (!isLoopPaused && interruptKind === 'none') {
         onSceneCompleteRef.current();
       } else {
+        setRadarPass(0);
         setRadarFrameIndex(0);
       }
-    }, 2200);
+    }, 1800);
 
     return () => clearTimeout(timer);
   }, [
     effectiveScene,
     radarFrameIndex,
+    radarPass,
     data.nowcastTimes.length,
     isLoopPaused,
     interruptKind,
   ]);
 
-  // Initialize Leaflet Map once with large-padding SVG renderers and explicit z-index panes
+  // AMeDAS Camera Choreography:
+  // 全国表示 -> 北海道 -> 東北 -> 関東中部近畿 -> 中国四国九州 -> 沖縄 -> もう一度全国表示
+  // Smoothly moves (`flyTo`) to each regional stop and pauses briefly (`いったん止まる`) at each stop,
+  // then advances to the next AMeDAS metric (`temp` -> `precip` -> `wind` -> `snow`) or next scene!
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || effectiveScene !== 'amedas') return;
+    if (
+      activeRegionConfig.id !== 'national' &&
+      activeRegionConfig.id !== 'world'
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+
+    // 1. Start at Nationwide view (`全国表示`: `[36.8, 137.5], zoom: 5`)
+    map.stop();
+    const initialStop = AMEDAS_PATROL_STOPS[0];
+    map.setView(initialStop.center, initialStop.zoom, {
+      animate: false,
+    });
+
+    // Step through each stop in AMEDAS_PATROL_STOPS[1..] (`北海道 -> 東北 -> 関東中部近畿 -> 中国四国九州 -> 沖縄 -> 全国表示`)
+    // Hold ~5 seconds (5000ms) at each regional stop so viewers can clearly inspect every region!
+    let cumulativeDelayMs = 3500; // Initial hold on 全国表示
+
+    for (let i = 1; i < AMEDAS_PATROL_STOPS.length; i++) {
+      const stop = AMEDAS_PATROL_STOPS[i];
+      const isFinalNational = i === AMEDAS_PATROL_STOPS.length - 1;
+      const flyDurationSec = i === 1 || i >= 5 ? 1.5 : 1.35;
+      const pauseAtStopMs = isFinalNational ? 3500 : 5000;
+
+      const tFly = setTimeout(() => {
+        if (cancelled || isLoopPaused || interruptKind !== 'none') return;
+        map.stop();
+        map.flyTo(stop.center, stop.zoom, {
+          animate: true,
+          duration: flyDurationSec,
+          easeLinearity: 0.15,
+        });
+      }, cumulativeDelayMs);
+      timers.push(tFly);
+
+      cumulativeDelayMs += Math.round(flyDurationSec * 1000) + pauseAtStopMs;
+    }
+
+    // Complete metric / scene after holding on the final Nationwide view
+    const tComplete = setTimeout(() => {
+      if (cancelled || isLoopPaused || interruptKind !== 'none') return;
+      onSceneCompleteRef.current();
+    }, cumulativeDelayMs);
+    timers.push(tComplete);
+
+    return () => {
+      cancelled = true;
+      timers.forEach((t) => clearTimeout(t));
+    };
+  }, [
+    effectiveScene,
+    amedasMetric,
+    activeRegionConfig.id,
+    isLoopPaused,
+    interruptKind,
+  ]);
+
+  // Initialize Leaflet Map once with large-padding SVG/Canvas renderers and explicit z-index panes
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
     const map = L.map(mapContainerRef.current, {
-      center: [38.2, 137.5],
+      center: [36.8, 137.5],
       zoom: 5,
       minZoom: 2,
       maxZoom: 12,
       zoomControl: false,
       attributionControl: false,
-      zoomSnap: 1,
+      zoomSnap: 0.25,
+      zoomDelta: 0.5,
       wheelPxPerZoomLevel: 60,
       worldCopyJump: true,
     });
 
     // 1. Create dedicated panes in strict bottom-to-top z-index order:
-    //    worldPane (210) -> japanPane (350) -> radarPane (450) -> vectorOverlayPane (500) -> markerPane (600)
+    //    worldPane (210) -> japanPane (350) -> muniPane (360) -> muniBorderPane (365) -> radarPane (450) -> vectorOverlayPane (500) -> markerPane (600)
     const worldPane = map.createPane('worldPane');
     worldPane.style.zIndex = '210';
     worldPane.style.pointerEvents = 'none';
@@ -301,6 +489,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     japanPane.style.zIndex = '350';
     japanPane.style.pointerEvents = 'none';
 
+    const muniPane = map.createPane('muniPane');
+    muniPane.style.zIndex = '360';
+    muniPane.style.pointerEvents = 'none';
+
+    const muniBorderPane = map.createPane('muniBorderPane');
+    muniBorderPane.style.zIndex = '365';
+    muniBorderPane.style.pointerEvents = 'none';
+
     const radarPane = map.createPane('radarPane');
     radarPane.style.zIndex = '450';
     radarPane.style.pointerEvents = 'none';
@@ -308,8 +504,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     const vectorOverlayPane = map.createPane('vectorOverlayPane');
     vectorOverlayPane.style.zIndex = '500';
 
-    // 2. Create high-padding SVG renderers (padding: 3.5 = 350% buffer around screen)
-    //    so map polygons and typhoon tracks/cones NEVER clip during camera flight
+    // 2. Create high-padding SVG/Canvas renderers
     worldRendererRef.current = L.svg({
       padding: 3.5,
       pane: 'worldPane',
@@ -317,6 +512,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     japanRendererRef.current = L.svg({
       padding: 3.5,
       pane: 'japanPane',
+    }).addTo(map);
+    muniCanvasRendererRef.current = L.canvas({
+      padding: 0.6,
+      pane: 'muniPane',
+    }).addTo(map);
+    muniBorderRendererRef.current = L.canvas({
+      padding: 0.6,
+      pane: 'muniBorderPane',
     }).addTo(map);
     overlayRendererRef.current = L.svg({
       padding: 3.5,
@@ -326,11 +529,30 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     const overlayGroup = L.layerGroup().addTo(map);
     overlayGroupRef.current = overlayGroup;
 
-    map.on('zoomend', () => {
+    const emitViewport = () => {
       setMapZoomVersion((v) => v + 1);
-    });
+      if (onViewportChangeRef.current) {
+        const c = map.getCenter();
+        const b = map.getBounds();
+        onViewportChangeRef.current({
+          zoom: map.getZoom(),
+          center: [c.lat, c.lng],
+          bounds: {
+            north: b.getNorth(),
+            south: b.getSouth(),
+            east: b.getEast(),
+            west: b.getWest(),
+          },
+          inferredRegionId: inferRegionFromCoords(c.lat, c.lng).regionId,
+        });
+      }
+    };
+
+    map.on('zoomend', emitViewport);
+    map.on('moveend', emitViewport);
 
     mapInstanceRef.current = map;
+    emitViewport();
 
     return () => {
       map.remove();
@@ -364,7 +586,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     worldGeoJsonLayerRef.current = worldLayer;
   }, [worldGeoJsonData]);
 
-  // Render / Update 47-prefecture Japan GeoJSON Choropleth Layer
+  // Render / Update 47-prefecture Japan GeoJSON Base Layer
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || !geoJsonData || !japanRendererRef.current) return;
@@ -374,10 +596,23 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       geoJsonLayerRef.current = null;
     }
 
+    const hasMuniPolygons =
+      effectiveScene === 'warnings' && Boolean(class20GeoJsonData);
+
     const layer = L.geoJSON(geoJsonData, {
       pane: 'japanPane',
       style: (feature) => {
         const prefId = Number(feature?.properties?.id || 0);
+        if (hasMuniPolygons) {
+          return {
+            fillColor: '#374151',
+            fillOpacity: 0.92,
+            color: '#1E293B',
+            weight: 0.8,
+            pane: 'japanPane',
+            renderer: japanRendererRef.current ?? undefined,
+          };
+        }
         return {
           ...getPrefecturePolygonStyle(
             prefId,
@@ -392,7 +627,79 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     }).addTo(map);
 
     geoJsonLayerRef.current = layer;
-  }, [geoJsonData, effectiveScene, data.prefSeverityMap]);
+  }, [geoJsonData, class20GeoJsonData, effectiveScene, data.prefSeverityMap]);
+
+  // Render Municipality-level (`市区町村単位: class20s`) Choropleth Layer + Crisp Municipality & Division Boundaries
+  // in `warnings` scene (both in Nationwide view and Zoomed-in view!)
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !muniCanvasRendererRef.current || !muniBorderRendererRef.current)
+      return;
+
+    if (muniGeoJsonLayerRef.current) {
+      map.removeLayer(muniGeoJsonLayerRef.current);
+      muniGeoJsonLayerRef.current = null;
+    }
+    if (muniBorderLayerRef.current) {
+      map.removeLayer(muniBorderLayerRef.current);
+      muniBorderLayerRef.current = null;
+    }
+
+    if (effectiveScene !== 'warnings' || !class20GeoJsonData) return;
+
+    const muniMap = data.muniSeverityMap || {};
+
+    const muniLayer = L.geoJSON(class20GeoJsonData, {
+      pane: 'muniPane',
+      style: (feature) => {
+        const code = String(feature?.properties?.code || '');
+        const sev: WarningSeverity = muniMap[code] || 'normal';
+        const fillColor =
+          sev === 'special'
+            ? '#9333EA'
+            : sev === 'warning'
+              ? '#EF4444'
+              : sev === 'advisory'
+                ? '#FACC15'
+                : '#374151';
+        return {
+          pane: 'muniPane',
+          renderer: muniCanvasRendererRef.current ?? undefined,
+          fillColor,
+          fillOpacity: 0.95,
+          // Crisp municipality boundary lines (`市区町村の境目には境界線がわかるようにする`)
+          color: '#1E293B',
+          weight: 0.65,
+          opacity: 0.95,
+        };
+      },
+      interactive: false,
+    }).addTo(map);
+    muniGeoJsonLayerRef.current = muniLayer;
+
+    const borderSource = class10GeoJsonData || geoJsonData;
+    if (borderSource) {
+      const borderLayer = L.geoJSON(borderSource, {
+        pane: 'muniBorderPane',
+        style: () => ({
+          pane: 'muniBorderPane',
+          renderer: muniBorderRendererRef.current ?? undefined,
+          fillOpacity: 0,
+          color: '#0F172A',
+          weight: 1.35,
+          opacity: 0.95,
+        }),
+        interactive: false,
+      }).addTo(map);
+      muniBorderLayerRef.current = borderLayer;
+    }
+  }, [
+    effectiveScene,
+    class20GeoJsonData,
+    class10GeoJsonData,
+    geoJsonData,
+    data.muniSeverityMap,
+  ]);
 
   // Compute target camera center & zoom for the active scene
   const getSceneCameraTarget = (): {
@@ -451,23 +758,41 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       };
     }
     if (effectiveScene === 'typhoon') {
-      const pts = selectedTyphoon.points;
-      if (pts.length > 0) {
-        const lats = pts.map((p) => p.lat);
-        const lons = pts.map((p) => p.lon);
-        const minLat = Math.min(...lats, 30.0);
-        const maxLat = Math.max(...lats, 45.5);
-        const minLon = Math.min(...lons, 132.0);
-        const maxLon = Math.max(...lons);
+      const targetList =
+        data.typhoons.length > 0 ? data.typhoons : [selectedTyphoon];
+      const allLats: number[] = [];
+      const allLons: number[] = [];
+      for (const tc of targetList) {
+        for (const p of tc.points) {
+          allLats.push(p.lat);
+          allLons.push(p.lon);
+        }
+        if (Array.isArray(tc.pastTrack)) {
+          for (const [lat, lon] of tc.pastTrack) {
+            allLats.push(lat);
+            allLons.push(lon);
+          }
+        }
+      }
+      if (allLats.length > 0) {
+        const minLat = Math.min(...allLats, 30.0);
+        const maxLat = Math.max(...allLats, 45.5);
+        const minLon = Math.min(...allLons, 132.0);
+        const maxLon = Math.max(...allLons);
         const latSpan = maxLat - minLat;
         const lonSpan = maxLon - minLon;
-        // Zoom 4 ensures the entire Typhoon track, forecast circles, and Japan fit cleanly without cutoff
         const targetZoom = latSpan > 11 || lonSpan > 18 ? 4 : 5;
         return {
           center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2 + 2.0],
           zoom: targetZoom,
         };
       }
+    }
+    if (effectiveScene === 'warnings' && activeWarningDivision) {
+      return {
+        center: [activeWarningDivision.lat, activeWarningDivision.lon],
+        zoom: activeWarningDivision.zoom || 7,
+      };
     }
     if (activeRegionConfig.id === 'world') {
       return {
@@ -487,7 +812,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     };
   };
 
-  // High-acceleration camera flight (`flyTo`) on scene, region, typhoon, or interrupt change
+  // High-acceleration camera flight (`flyTo`) on scene, warning division patrol, region, typhoon, or interrupt change
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
@@ -500,6 +825,25 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       return;
     }
 
+    // In 'amedas' national mode, the dedicated AMeDAS sweep effect controls the camera
+    if (
+      effectiveScene === 'amedas' &&
+      (activeRegionConfig.id === 'national' ||
+        activeRegionConfig.id === 'world')
+    ) {
+      return;
+    }
+
+    const curCenter = map.getCenter();
+    const curZoom = map.getZoom();
+    if (
+      Math.abs(curCenter.lat - targetCenter[0]) < 0.005 &&
+      Math.abs(curCenter.lng - targetCenter[1]) < 0.005 &&
+      curZoom === targetZoom
+    ) {
+      return;
+    }
+
     map.stop();
     map.flyTo(targetCenter, targetZoom, {
       animate: true,
@@ -509,6 +853,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   }, [
     effectiveScene,
     activeRegionConfig,
+    activeWarningDivision?.id,
+    activeWarningDivision?.lat,
+    activeWarningDivision?.lon,
     selectedEarthquake.id,
     selectedEarthquake.lat,
     selectedEarthquake.lon,
@@ -550,7 +897,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         hrpnsLayer.addTo(map);
         hrpnsLayerRef.current = hrpnsLayer;
 
-        if (entry.thnsBasetime && entry.thnsValidtime) {
+        // Overlay Lightning Nowcast (`thns`) on top ONLY during Pass 1 (2周目: 雨雲＋雷レーダー)
+        if (radarPass === 1 && entry.thnsBasetime && entry.thnsValidtime) {
           const thnsLayer = createJmaSeamlessNowcastLayer(
             entry.thnsBasetime,
             entry.thnsValidtime,
@@ -563,7 +911,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         }
       }
     }
-  }, [effectiveScene, radarFrameIndex, data.nowcastTimes]);
+  }, [effectiveScene, radarFrameIndex, radarPass, data.nowcastTimes]);
 
   // Render scene-specific markers & Typhoon Track / Forecast Cone in `vectorOverlayPane` (padding: 3.5)
   useEffect(() => {
@@ -574,23 +922,248 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     group.clearLayers();
 
     if (effectiveScene === 'radar') {
-      for (const pt of data.lightningPoints) {
-        L.circleMarker([pt.lat, pt.lon], {
-          pane: 'vectorOverlayPane',
-          renderer: overlayRenderer,
-          radius: 4.5,
-          color: '#FEF08A',
-          fillColor: '#FACC15',
-          fillOpacity: 0.95,
-          weight: 1.5,
-          interactive: false,
-        }).addTo(group);
+      const safeIdx = Math.min(radarFrameIndex, data.nowcastTimes.length - 1);
+      const currentEntry = data.nowcastTimes[safeIdx];
+      // Show LIDEN lightning strikes ONLY during Pass 1 (2周目) AND ONLY for past observation frames (!isForecast)
+      // matched to the current frame's validtime. Never show LIDEN on high-resolution forecast frames!
+      if (radarPass === 1 && currentEntry && !currentEntry.isForecast) {
+        const frameLightning = data.lightningPoints.filter((pt) =>
+          pt.validtime ? pt.validtime === currentEntry.validtime : true
+        );
+        for (const pt of frameLightning) {
+          L.circleMarker([pt.lat, pt.lon], {
+            pane: 'vectorOverlayPane',
+            renderer: overlayRenderer,
+            radius: 4.5,
+            color: '#FEF08A',
+            fillColor: '#FACC15',
+            fillOpacity: 0.95,
+            weight: 1.5,
+            interactive: false,
+          }).addTo(group);
+        }
       }
     } else if (effectiveScene === 'warnings') {
-      // Choropleth polygons color the map directly
+      // Choropleth polygons color the map directly.
+      // When zoomed in (`currentZoom >= 6`), render municipality-level (`市区町村名のみ`) labels on the map!
+      const currentZoom = map.getZoom();
+      const muniList = data.municipalityWarnings || [];
+      if (currentZoom >= 6 && muniList.length > 0) {
+        const bounds = map.getBounds();
+        const visibleMunis = muniList
+          .map((m) => {
+            const exactCoord = m.muniCode
+              ? cachedClass20LabelPoints[m.muniCode]
+              : undefined;
+            return exactCoord
+              ? { ...m, lat: exactCoord[0], lon: exactCoord[1] }
+              : m;
+          })
+          .filter(
+            (m) =>
+              m.lat >= bounds.getSouth() - 0.8 &&
+              m.lat <= bounds.getNorth() + 0.8 &&
+              m.lon >= bounds.getWest() - 0.8 &&
+              m.lon <= bounds.getEast() + 0.8
+          )
+          .sort((a, b) => {
+            const rank: Record<WarningSeverity, number> = {
+              special: 3,
+              warning: 2,
+              advisory: 1,
+              normal: 0,
+            };
+            return rank[b.severity] - rank[a.severity];
+          });
+
+        const placedMuniBoxes: Array<{
+          x: number;
+          y: number;
+          w: number;
+          h: number;
+        }> = [];
+        for (const muni of visibleMunis) {
+          const ptScreen = map.project([muni.lat, muni.lon], currentZoom);
+          // Strictly show ONLY the municipality name in white text without a surrounding rectangular box
+          // (`地名表示は四角に囲まず文字だけを白文字で表示するように`)
+          const labelText = formatMunicipalityMapLabel(muni);
+          if (!labelText) continue;
+          const boxW = Math.max(38, labelText.length * 11 + 4);
+          const boxH = 16;
+
+          let overlaps = false;
+          for (let i = 0; i < placedMuniBoxes.length; i++) {
+            const b = placedMuniBoxes[i];
+            if (
+              Math.abs(ptScreen.x - b.x) < (boxW + b.w) / 2 + 3 &&
+              Math.abs(ptScreen.y - b.y) < (boxH + b.h) / 2 + 3
+            ) {
+              overlaps = true;
+              break;
+            }
+          }
+          if (overlaps) continue;
+          placedMuniBoxes.push({
+            x: ptScreen.x,
+            y: ptScreen.y,
+            w: boxW,
+            h: boxH,
+          });
+
+          const muniIcon = L.divIcon({
+            className: 'custom-muni-warning-badge',
+            html: `
+              <div data-testid="muni-warning-map-badge" style="display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;font-family:'Noto Sans JP','Hiragino Kaku Gothic ProN',sans-serif;pointer-events:none;">
+                <span style="color:#FFFFFF;font-size:11px;font-weight:800;letter-spacing:0.02em;text-shadow:-1.5px -1.5px 0 #0B0D12,1.5px -1.5px 0 #0B0D12,-1.5px 1.5px 0 #0B0D12,1.5px 1.5px 0 #0B0D12,0 0 4px rgba(0,0,0,0.95);">${labelText}</span>
+              </div>
+            `,
+            iconSize: [boxW, boxH],
+            iconAnchor: [Math.round(boxW / 2), Math.round(boxH / 2)],
+          });
+          L.marker([muni.lat, muni.lon], {
+            icon: muniIcon,
+            interactive: false,
+          }).addTo(group);
+        }
+      }
     } else if (effectiveScene === 'typhoon') {
-      const pts = selectedTyphoon.points;
-      if (pts.length > 0) {
+      const targetZoom = getSceneCameraTarget().zoom;
+      const currentZoom = map.getZoom();
+      const projectionZoom =
+        Math.abs(currentZoom - targetZoom) <= 1 ? currentZoom : targetZoom;
+
+      // Track placed screen-space bounding boxes so typhoon labels and forecast time badges never overlap
+      const placedBoxes: Array<{
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+      }> = [];
+
+      const collidesWithPlaced = (
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        gap = 4
+      ): boolean => {
+        for (let i = 0; i < placedBoxes.length; i++) {
+          const b = placedBoxes[i];
+          if (
+            Math.abs(x - b.x) < (w + b.w) / 2 + gap &&
+            Math.abs(y - b.y) < (h + b.h) / 2 + gap
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const typhoonsToRender =
+        data.typhoons.length > 0 ? data.typhoons : [selectedTyphoon];
+
+      for (const tc of typhoonsToRender) {
+        const pts = tc.points;
+        if (pts.length === 0) continue;
+        const extratropical = isExtratropicalCyclone(tc);
+
+        // Reserve all track point dots in placedBoxes so labels don't cover track dots
+        for (const p of pts) {
+          const dotScreen = map.project([p.lat, p.lon], projectionZoom);
+          placedBoxes.push({ x: dotScreen.x, y: dotScreen.y, w: 16, h: 16 });
+        }
+
+        // Special Case: Already converted to Extratropical Cyclone (`温帯低気圧`)
+        // -> Single solid gray line (`#9CA3AF`) with NO intermediate circle dots!
+        if (extratropical) {
+          const grayTrackCoords: Array<[number, number]> = [];
+          if (Array.isArray(tc.pastTrack)) {
+            for (const c of tc.pastTrack) {
+              grayTrackCoords.push([c[0], c[1]]);
+            }
+          }
+          for (const p of pts) {
+            const last = grayTrackCoords[grayTrackCoords.length - 1];
+            if (
+              !last ||
+              Math.abs(last[0] - p.lat) > 0.001 ||
+              Math.abs(last[1] - p.lon) > 0.001
+            ) {
+              grayTrackCoords.push([p.lat, p.lon]);
+            }
+          }
+          if (grayTrackCoords.length >= 2) {
+            L.polyline(grayTrackCoords, {
+              pane: 'vectorOverlayPane',
+              renderer: overlayRenderer,
+              color: '#9CA3AF',
+              weight: 2.8,
+              opacity: 0.92,
+              interactive: false,
+            }).addTo(group);
+          }
+
+          const pt0 = pts[0];
+          const centerLabel = formatCompactTyphoonCenterLabel(tc, pt0);
+          const ptScreen = map.project([pt0.lat, pt0.lon], projectionZoom);
+          const badgeW = Math.max(72, centerLabel.length * 13 + 16);
+          const badgeH = 22;
+          placedBoxes.push({
+            x: ptScreen.x,
+            y: ptScreen.y + 24,
+            w: badgeW,
+            h: badgeH,
+          });
+
+          const centerCrossIcon = L.divIcon({
+            className: 'custom-typhoon-center-cross',
+            html: `
+              <div style="position:relative;display:flex;align-items:center;justify-content:center;width:28px;height:28px;">
+                <svg data-testid="typhoon-center-cross" width="24" height="24" viewBox="0 0 24 24" fill="none">
+                  <path d="M5 5L19 19M19 5L5 19" stroke="#0B0D12" stroke-width="5.5" stroke-linecap="square"/>
+                  <path d="M5 5L19 19M19 5L5 19" stroke="#D1D5DB" stroke-width="3" stroke-linecap="square"/>
+                </svg>
+                <div data-testid="typhoon-center-label" style="position:absolute;top:24px;left:50%;transform:translateX(-50%);background:rgba(17,19,24,0.95);border:1.5px solid #9CA3AF;padding:1px 7px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 2px 8px rgba(0,0,0,0.75);">
+                  <span style="color:#E5E7EB;font-size:11px;font-weight:800;">${centerLabel}</span>
+                </div>
+              </div>
+            `,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14],
+          });
+          L.marker([pt0.lat, pt0.lon], {
+            icon: centerCrossIcon,
+            zIndexOffset: 950,
+          }).addTo(group);
+          continue;
+        }
+
+        // 0. Historical Past Track (過去の移動軌跡 — 実線＋小ドット)
+        if (Array.isArray(tc.pastTrack) && tc.pastTrack.length >= 2) {
+          L.polyline(tc.pastTrack, {
+            pane: 'vectorOverlayPane',
+            renderer: overlayRenderer,
+            color: '#38BDF8',
+            weight: 2.5,
+            opacity: 0.9,
+            interactive: false,
+          }).addTo(group);
+
+          for (let i = 0; i < tc.pastTrack.length - 1; i++) {
+            const [pLat, pLon] = tc.pastTrack[i];
+            L.circleMarker([pLat, pLon], {
+              pane: 'vectorOverlayPane',
+              renderer: overlayRenderer,
+              radius: 2.6,
+              color: '#0B0D12',
+              fillColor: '#38BDF8',
+              fillOpacity: 0.9,
+              weight: 1,
+              interactive: false,
+            }).addTo(group);
+          }
+        }
+
         // 1. Forecast Cone Envelope (進路予報円の包絡線・扇形)
         const cone = computeTyphoonConeEnvelope(pts);
         if (cone.polygon.length >= 4) {
@@ -649,7 +1222,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
           }).addTo(group);
         }
 
-        // 3. Center Track Polyline (中心進路予想線)
+        // 3. Forecast Center Track Polyline (中心進路予想線 — 破線)
         const trackCoords: Array<[number, number]> = pts.map((p) => [
           p.lat,
           p.lon,
@@ -693,9 +1266,19 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             }).addTo(group);
           }
 
-          // 5. Point Markers & Broadcast Callout Badges
+          // 5. Point Markers & Compact Non-Overlapping Labels
           if (idx === 0) {
-            // Current Typhoon Center '×' Symbol + Primary Badge
+            const centerLabel = formatCompactTyphoonCenterLabel(tc, pt);
+            const ptScreen = map.project([pt.lat, pt.lon], projectionZoom);
+            const badgeW = Math.max(72, centerLabel.length * 13 + 16);
+            const badgeH = 22;
+            placedBoxes.push({
+              x: ptScreen.x,
+              y: ptScreen.y + 24,
+              w: badgeW,
+              h: badgeH,
+            });
+
             const centerCrossIcon = L.divIcon({
               className: 'custom-typhoon-center-cross',
               html: `
@@ -704,13 +1287,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
                     <path d="M5 5L19 19M19 5L5 19" stroke="#0B0D12" stroke-width="5.5" stroke-linecap="square"/>
                     <path d="M5 5L19 19M19 5L5 19" stroke="#FFFFFF" stroke-width="3" stroke-linecap="square"/>
                   </svg>
-                  <div style="position:absolute;top:28px;left:50%;transform:translateX(-50%);background:rgba(17,19,24,0.96);border:2px solid #EF4444;padding:3px 9px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 4px 12px rgba(0,0,0,0.7);">
-                    <div style="color:#FFFFFF;font-size:12px;font-weight:800;">
-                      ${selectedTyphoon.displayNumber}（${selectedTyphoon.nameJp}）実況
-                    </div>
-                    <div style="color:#FDE047;font-size:11px;font-weight:700;">
-                      中心気圧 ${pt.pressureHpa}hPa / 最大風速 ${pt.maxWindMs}m/s (${pt.course} ${pt.speedKmh}km/h)
-                    </div>
+                  <div data-testid="typhoon-center-label" style="position:absolute;top:24px;left:50%;transform:translateX(-50%);background:rgba(17,19,24,0.95);border:1.5px solid #EF4444;padding:1px 7px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 2px 8px rgba(0,0,0,0.75);">
+                    <span style="color:#FFFFFF;font-size:11px;font-weight:800;">${centerLabel}</span>
                   </div>
                 </div>
               `,
@@ -733,54 +1311,115 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
               interactive: false,
             }).addTo(group);
 
-            const anchorX = idx % 2 === 1 ? -12 : 175;
-            const fcIcon = L.divIcon({
-              className: 'custom-typhoon-fc-label',
-              html: `
-                <div style="display:inline-block;background:rgba(17,19,24,0.93);border:1px solid #94A3B8;padding:2px 7px;white-space:nowrap;font-family:'JetBrains Mono',monospace;">
-                  <div style="color:#38BDF8;font-size:11px;font-weight:800;">${pt.timeLabel}</div>
-                  <div style="color:#F8FAFC;font-size:10px;">
-                    ${pt.categoryJp} · ${pt.pressureHpa}hPa${pt.maxWindMs > 0 ? ` · ${pt.maxWindMs}m/s` : ''}
+            const compactTime = formatCompactTyphoonTime(pt.timeLabel);
+            const ptScreen = map.project([pt.lat, pt.lon], projectionZoom);
+            const boxW = 68;
+            const boxH = 20;
+
+            // Try 4 candidate offsets around the forecast point so labels never overlap
+            const candidates: Array<{
+              dx: number;
+              dy: number;
+              anchorX: number;
+              anchorY: number;
+            }> =
+              idx % 2 === 1
+                ? [
+                    { dx: 44, dy: 0, anchorX: -10, anchorY: 10 },
+                    { dx: -44, dy: 0, anchorX: 78, anchorY: 10 },
+                    { dx: 0, dy: -22, anchorX: 34, anchorY: 32 },
+                    { dx: 0, dy: 22, anchorX: 34, anchorY: -12 },
+                  ]
+                : [
+                    { dx: -44, dy: 0, anchorX: 78, anchorY: 10 },
+                    { dx: 44, dy: 0, anchorX: -10, anchorY: 10 },
+                    { dx: 0, dy: -22, anchorX: 34, anchorY: 32 },
+                    { dx: 0, dy: 22, anchorX: 34, anchorY: -12 },
+                  ];
+
+            const chosen = candidates.find(
+              (c) =>
+                !collidesWithPlaced(
+                  ptScreen.x + c.dx,
+                  ptScreen.y + c.dy,
+                  boxW,
+                  boxH,
+                  4
+                )
+            );
+
+            if (chosen) {
+              placedBoxes.push({
+                x: ptScreen.x + chosen.dx,
+                y: ptScreen.y + chosen.dy,
+                w: boxW,
+                h: boxH,
+              });
+
+              const fcIcon = L.divIcon({
+                className: 'custom-typhoon-fc-label',
+                html: `
+                  <div data-testid="typhoon-fc-compact-label" style="display:inline-flex;align-items:center;justify-content:center;width:${boxW}px;height:${boxH}px;background:rgba(17,19,24,0.92);border:1px solid #94A3B8;padding:1px 5px;white-space:nowrap;font-family:'JetBrains Mono',monospace;">
+                    <span style="color:#38BDF8;font-size:11px;font-weight:800;">${compactTime}</span>
                   </div>
-                </div>
-              `,
-              iconSize: [165, 34],
-              iconAnchor: [anchorX, 17],
-            });
-            L.marker([pt.lat, pt.lon], { icon: fcIcon }).addTo(group);
+                `,
+                iconSize: [boxW, boxH],
+                iconAnchor: [chosen.anchorX, chosen.anchorY],
+              });
+              L.marker([pt.lat, pt.lon], { icon: fcIcon }).addTo(group);
+            }
           }
         });
       }
     } else if (effectiveScene === 'amedas') {
-      // Filter AMeDAS stations at target zoom using Mercator pixel projection (`map.project`)
-      // Circle radius 3.3px (diameter 6.6px), minimum center distance 7.6px -> slightly larger and zero overlap!
-      const targetZoom = getSceneCameraTarget().zoom;
       const currentZoom = map.getZoom();
-      const projectionZoom =
-        Math.abs(currentZoom - targetZoom) <= 1 ? currentZoom : targetZoom;
+      const pointRadius = getAmedasPointRadiusForZoom(currentZoom);
 
-      const nonOverlappingStations = filterNonOverlappingPoints(
-        data.amedas,
-        (lat, lon) => {
-          const pt = map.project([lat, lon], projectionZoom);
-          return { x: pt.x, y: pt.y };
-        },
-        7.6
-      );
+      // Display ALL observing AMeDAS stations on the map (`アメダスは地図上に今まで通り、全地点の点を表示する。ランキングとは異なる。`)
+      // ('precip' and 'snow' hide stations with 0mm / 0cm)
+      const stationsToRender = data.amedas.filter((st) => {
+        if (amedasMetric === 'precip') return st.precip1h > 0;
+        if (amedasMetric === 'snow') return (st.snowCm ?? 0) > 0;
+        if (amedasMetric === 'wind') return st.windSpeed > 0;
+        return st.hasTemp !== false && !Number.isNaN(st.temp);
+      });
 
-      for (const st of nonOverlappingStations) {
-        const dotColor = getAmedasTempGradientColor(st.temp);
-        L.circleMarker([st.lat, st.lon], {
-          pane: 'vectorOverlayPane',
-          renderer: overlayRenderer,
-          className: 'amedas-station-circle',
-          radius: 3.3,
-          color: '#0B0D12',
-          fillColor: dotColor,
-          fillOpacity: 0.96,
-          weight: 0.5,
-          interactive: false,
-        }).addTo(group);
+      for (const st of stationsToRender) {
+        const dotColor = getAmedasMetricColor(st, amedasMetric);
+
+        if (amedasMetric === 'wind') {
+          const rotDeg = getWindDirectionRotationDeg(st.windDirection);
+          const arrowPx = getAmedasWindArrowSizeForZoom(currentZoom);
+          const halfPx = Math.round(arrowPx / 2);
+          const windArrowIcon = L.divIcon({
+            className: 'custom-amedas-wind-arrow',
+            html: `
+              <div data-testid="amedas-wind-arrow" title="${st.stationName}: ${st.windDirection} ${st.windSpeed.toFixed(1)}m/s" style="display:flex;align-items:center;justify-content:center;width:${arrowPx}px;height:${arrowPx}px;transform:rotate(${rotDeg}deg);pointer-events:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.85));">
+                <svg width="${arrowPx}" height="${arrowPx}" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 1L21 21L12 16.2L3 21L12 1Z" fill="${dotColor}" stroke="#0B0D12" stroke-width="1.8" stroke-linejoin="round"/>
+                </svg>
+              </div>
+            `,
+            iconSize: [arrowPx, arrowPx],
+            iconAnchor: [halfPx, halfPx],
+          });
+          L.marker([st.lat, st.lon], {
+            icon: windArrowIcon,
+            interactive: false,
+          }).addTo(group);
+        } else {
+          L.circleMarker([st.lat, st.lon], {
+            pane: 'vectorOverlayPane',
+            renderer: overlayRenderer,
+            className: 'amedas-station-circle',
+            radius: pointRadius,
+            color: '#0B0D12',
+            fillColor: dotColor,
+            fillOpacity: 0.96,
+            weight: currentZoom >= 6 ? 1.0 : 0.6,
+            interactive: false,
+          }).addTo(group);
+        }
       }
     } else if (effectiveScene === 'forecast') {
       // Dedicated ocean-side callout positions + leader lines so no two city labels ever overlap
@@ -994,6 +1633,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   }, [
     effectiveScene,
     data,
+    radarFrameIndex,
+    radarPass,
+    amedasMetric,
     selectedEarthquake,
     selectedTyphoon,
     activeVolcano,
@@ -1082,12 +1724,24 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         </button>
       </div>
 
-      {/* Compact Radar Scrubber */}
+      {/* Compact Radar Scrubber (2-Pass: 1周目 雨雲レーダー -> 2周目 雨雲＋雷レーダー) */}
       {effectiveScene === 'radar' && (
         <div
           data-testid="radar-scrubber-bar"
           className="absolute bottom-3 left-64 z-[400] bg-[#111318]/92 border border-neutral-700/80 px-2.5 py-1 flex items-center gap-1.5"
         >
+          <button
+            type="button"
+            data-testid="radar-pass-toggle-btn"
+            onClick={() => setRadarPass((p) => (p === 0 ? 1 : 0))}
+            className={`px-2 py-0.5 text-[10px] font-mono font-bold border transition-colors cursor-pointer ${
+              radarPass === 1
+                ? 'bg-yellow-500/25 border-yellow-400 text-yellow-200'
+                : 'bg-cyan-500/20 border-cyan-500/70 text-cyan-200'
+            }`}
+          >
+            {radarPass === 0 ? '1周目: 雨雲レーダー' : '2周目: 雨雲＋雷レーダー'}
+          </button>
           <span
             data-testid="radar-current-frame-label"
             className="text-[11px] font-mono text-cyan-300 font-bold mr-1"
@@ -1110,6 +1764,43 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
               {entry.label.split(' ')[0]}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* Compact AMeDAS Metric Switcher Bar (気温 / 降水 / 風速 / 積雪) */}
+      {effectiveScene === 'amedas' && (
+        <div
+          data-testid="amedas-metric-bar"
+          className="absolute bottom-3 left-64 z-[400] bg-[#111318]/92 border border-neutral-700/80 px-2.5 py-1 flex items-center gap-1.5"
+        >
+          <span className="text-[11px] font-mono text-neutral-300 font-bold mr-1">
+            表示要素:
+          </span>
+          {(
+            [
+              { id: 'temp', label: '気温 (℃)' },
+              { id: 'precip', label: '降水 (mm/h)' },
+              { id: 'wind', label: '風速 (m/s)' },
+              { id: 'snow', label: '積雪 (cm)' },
+            ] as Array<{ id: AmedasMetric; label: string }>
+          ).map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              data-testid={`amedas-metric-btn-${m.id}`}
+              onClick={() => onChangeAmedasMetric(m.id)}
+              className={`px-2 py-0.5 text-[11px] font-mono font-bold transition-colors border cursor-pointer ${
+                amedasMetric === m.id
+                  ? 'bg-amber-500/25 border-amber-400 text-white'
+                  : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+          <span className="text-[10px] font-mono text-neutral-400 ml-1">
+            (拡大時は全観測地点を表示)
+          </span>
         </div>
       )}
     </div>

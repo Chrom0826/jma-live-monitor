@@ -3,6 +3,8 @@ import {
   INITIAL_EARTHQUAKES,
   INITIAL_FORECASTS,
   INITIAL_LIGHTNING_POINTS,
+  INITIAL_MUNI_SEVERITY_MAP,
+  INITIAL_MUNICIPALITY_WARNINGS,
   INITIAL_NOWCAST_TIMES,
   INITIAL_PREF_SEVERITY_MAP,
   INITIAL_TSUNAMI_STATIONS,
@@ -49,7 +51,13 @@ const NOWCAST_N2_URL =
 const NOWCAST_N3_URL =
   'https://www.jma.go.jp/bosai/jmatile/data/nowc/targetTimes_N3.json';
 const JMA_WARNING_MAP_URL =
+  'https://www.jma.go.jp/bosai/warning/data/r8/map.json';
+const JMA_WARNING_MAP_LEGACY_URL =
   'https://www.jma.go.jp/bosai/warning/data/warning/map.json';
+const JMA_AREA_CONST_URL =
+  'https://www.jma.go.jp/bosai/common/const/area.json';
+const JMA_XY_CONST_URL =
+  'https://www.jma.go.jp/bosai/common/const/xy.json';
 const JMA_TYPHOON_TARGET_URL =
   'https://www.jma.go.jp/bosai/typhoon/data/targetTc.json';
 const JMA_AMEDAS_TABLE_URL =
@@ -62,7 +70,13 @@ const P2P_QUAKE_HISTORY_URL =
   'https://api.p2pquake.net/v2/history?codes=551&limit=20';
 
 let cachedAmedasTable: Record<string, any> | null = null;
+let cachedJmaAreaConst: Record<string, any> | null = null;
+let cachedJmaXyConst: Record<string, any> | null = null;
+let cachedHourlySnowTs = '';
+let cachedHourlySnowMap: Record<string, any> | null = null;
 const cachedJmaQuakeDetails = new Map<string, EarthquakeReport>();
+const TYPHOON_24H_CACHE_KEY = 'jma_typhoons_24h_cache_v1';
+const TYPHOON_RETENTION_MS = 24 * 3600 * 1000; // 24 hours (1 day)
 
 async function fetchWithTimeout(url: string, timeoutMs = 4500): Promise<Response> {
   const controller = new AbortController();
@@ -143,44 +157,65 @@ async function fetchNowcastAndLightning(): Promise<{
           }>)
         : [];
 
-    // Find latest thns and liden timestamps from N3
+    // Find thns entries from N3 so each timeframe gets its matching thns layer
     const thnsEntries = dataN3
       .filter((item) => Array.isArray(item.elements) && item.elements.includes('thns'))
       .sort((a, b) => a.validtime.localeCompare(b.validtime));
     const latestThns = thnsEntries[thnsEntries.length - 1];
 
+    const findMatchingThns = (vt: string) => {
+      for (let i = thnsEntries.length - 1; i >= 0; i--) {
+        if (thnsEntries[i].validtime <= vt) {
+          return thnsEntries[i];
+        }
+      }
+      return thnsEntries[0] || latestThns;
+    };
+
     const sortedPast = [...dataN1]
       .sort((a, b) => a.validtime.localeCompare(b.validtime))
       .slice(-5)
-      .map((item, idx, arr) => ({
-        basetime: item.basetime,
-        validtime: item.validtime,
-        label:
-          idx === arr.length - 1
-            ? `${formatUtcTimestampToJst(item.validtime)} (最新実況)`
-            : `${formatUtcTimestampToJst(item.validtime)} (実況)`,
-        isForecast: false,
-        thnsBasetime: latestThns?.basetime,
-        thnsValidtime: latestThns?.validtime,
-      }));
+      .map((item, idx, arr) => {
+        const matchedThns = findMatchingThns(item.validtime);
+        return {
+          basetime: item.basetime,
+          validtime: item.validtime,
+          label:
+            idx === arr.length - 1
+              ? `${formatUtcTimestampToJst(item.validtime)} (最新実況)`
+              : `${formatUtcTimestampToJst(item.validtime)} (実況)`,
+          isForecast: false,
+          thnsBasetime: matchedThns?.basetime,
+          thnsValidtime: matchedThns?.validtime,
+        };
+      });
 
     const sortedForecast = [...dataN2]
       .sort((a, b) => a.validtime.localeCompare(b.validtime))
       .slice(0, 3)
-      .map((item) => ({
-        basetime: item.basetime,
-        validtime: item.validtime,
-        label: `${formatUtcTimestampToJst(item.validtime)} (高解像度予測)`,
-        isForecast: true,
-        thnsBasetime: latestThns?.basetime,
-        thnsValidtime: latestThns?.validtime,
-      }));
+      .map((item) => {
+        const matchedThns = findMatchingThns(item.validtime);
+        return {
+          basetime: item.basetime,
+          validtime: item.validtime,
+          label: `${formatUtcTimestampToJst(item.validtime)} (高解像度予測)`,
+          isForecast: true,
+          thnsBasetime: matchedThns?.basetime,
+          thnsValidtime: matchedThns?.validtime,
+        };
+      });
 
-    // Fetch latest liden GeoJSON points if available
+    // Fetch liden GeoJSON points for each past observation timeframe (`sortedPast`)
+    const pastValidtimeSet = new Set(sortedPast.map((p) => p.validtime));
     const lidenEntries = dataN3
-      .filter((item) => Array.isArray(item.elements) && item.elements.includes('liden'))
+      .filter(
+        (item) =>
+          Array.isArray(item.elements) &&
+          item.elements.includes('liden') &&
+          (pastValidtimeSet.size === 0 || pastValidtimeSet.has(item.validtime))
+      )
       .sort((a, b) => b.validtime.localeCompare(a.validtime))
-      .slice(0, 3);
+      .slice(0, 5);
 
     let lightningPoints: LightningPoint[] = [];
     if (lidenEntries.length > 0) {
@@ -202,15 +237,17 @@ async function fetchNowcastAndLightning(): Promise<{
                   lat: Number(coords[1]),
                   timeJst: formatUtcTimestampToJst(entry.validtime),
                   type: Number(f?.properties?.type ?? 4),
+                  validtime: entry.validtime,
                 };
               })
-              .filter((p: LightningPoint | null): p is LightningPoint => p !== null);
+              .filter((p: LightningPoint | null): p is LightningPoint => p !== null)
+              .slice(0, 120);
           } catch {
             return [];
           }
         })
       );
-      lightningPoints = lidenResults.flat().slice(0, 80);
+      lightningPoints = lidenResults.flat();
     }
 
     const combined = [...sortedPast, ...sortedForecast];
@@ -230,40 +267,79 @@ async function fetchNowcastAndLightning(): Promise<{
 }
 
 /**
- * Fetches live JMA nationwide warnings/advisories from `warning/data/warning/map.json`
- * so all 47 prefectures are accurately colored and listed in the NERV right strip.
+ * Fetches live JMA nationwide warnings/advisories from `warning/data/r8/map.json`
+ * (with fallback to `warning/data/warning/map.json`) along with `area.json` and `xy.json`
+ * so both 57-division warnings AND municipality-level (`市区町村単位`) polygons are accurately colored and listed.
  */
 async function fetchLiveJmaWarnings(): Promise<{
   warnings: RegionalWarningItem[];
+  municipalityWarnings: RegionalWarningItem[];
+  muniSeverityMap: Record<string, WarningSeverity>;
   prefSeverityMap: Record<number, WarningSeverity>;
   live: boolean;
 }> {
   try {
-    const res = await fetchWithTimeout(JMA_WARNING_MAP_URL, 4500);
-    if (!res.ok) {
+    const [resR8, areaData, xyData] = await Promise.all([
+      fetchWithTimeout(JMA_WARNING_MAP_URL, 4500).catch(() => null),
+      cachedJmaAreaConst
+        ? Promise.resolve(cachedJmaAreaConst)
+        : fetchWithTimeout(JMA_AREA_CONST_URL, 4500)
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null),
+      cachedJmaXyConst
+        ? Promise.resolve(cachedJmaXyConst)
+        : fetchWithTimeout(JMA_XY_CONST_URL, 4500)
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null),
+    ]);
+    if (areaData) cachedJmaAreaConst = areaData;
+    if (xyData) cachedJmaXyConst = xyData;
+
+    const res =
+      resR8 && resR8.ok
+        ? resR8
+        : await fetchWithTimeout(JMA_WARNING_MAP_LEGACY_URL, 4500).catch(
+            () => null
+          );
+
+    if (!res || !res.ok) {
       return {
         warnings: INITIAL_WARNINGS,
+        municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
+        muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
         prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
         live: false,
       };
     }
     const rawJson = await res.json();
-    const parsed = parseJmaWarningMapData(rawJson);
+    const parsed = parseJmaWarningMapData(rawJson, areaData, xyData);
     if (parsed.warnings.length > 0) {
       return {
         warnings: parsed.warnings,
+        municipalityWarnings:
+          parsed.municipalityWarnings.length > 0
+            ? parsed.municipalityWarnings
+            : INITIAL_MUNICIPALITY_WARNINGS,
+        muniSeverityMap:
+          Object.keys(parsed.muniSeverityMap).length > 0
+            ? parsed.muniSeverityMap
+            : INITIAL_MUNI_SEVERITY_MAP,
         prefSeverityMap: parsed.prefSeverityMap,
         live: true,
       };
     }
     return {
       warnings: INITIAL_WARNINGS,
+      municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
+      muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
       prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
       live: false,
     };
   } catch {
     return {
       warnings: INITIAL_WARNINGS,
+      municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
+      muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
       prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
       live: false,
     };
@@ -296,18 +372,44 @@ async function fetchLiveAmedasData(): Promise<{
     const latestIso = (await latestTimeRes.text()).trim();
     // Convert "2026-11-06T01:10:00+09:00" -> "20261106011000"
     const ts14 = latestIso.replace(/[-T:]/g, '').slice(0, 14);
+    const hourlyTs14 = `${ts14.slice(0, 10)}0000`;
     const timeLabel =
       latestIso.length >= 16 ? `${latestIso.slice(11, 16)} 実況` : '最新実況';
 
-    const mapRes = await fetchWithTimeout(
-      `https://www.jma.go.jp/bosai/amedas/data/map/${ts14}.json`,
-      4500
-    );
+    const [mapRes, hourlySnowData] = await Promise.all([
+      fetchWithTimeout(
+        `https://www.jma.go.jp/bosai/amedas/data/map/${ts14}.json`,
+        4500
+      ),
+      ts14 === hourlyTs14
+        ? Promise.resolve(null)
+        : cachedHourlySnowTs === hourlyTs14 && cachedHourlySnowMap
+          ? Promise.resolve(cachedHourlySnowMap)
+          : fetchWithTimeout(
+              `https://www.jma.go.jp/bosai/amedas/data/map/${hourlyTs14}.json`,
+              4000
+            )
+              .then((r) => (r.ok ? r.json() : null))
+              .catch(() => null),
+    ]);
     if (!mapRes.ok) {
       return { amedas: INITIAL_AMEDAS_STATIONS, live: false };
     }
     const mapJson = await mapRes.json();
-    const stations = parseJmaAmedasNationwide(tableData, mapJson, timeLabel);
+    if (ts14 === hourlyTs14) {
+      cachedHourlySnowTs = hourlyTs14;
+      cachedHourlySnowMap = mapJson;
+    } else if (hourlySnowData) {
+      cachedHourlySnowTs = hourlyTs14;
+      cachedHourlySnowMap = hourlySnowData;
+    }
+
+    const stations = parseJmaAmedasNationwide(
+      tableData,
+      mapJson,
+      timeLabel,
+      hourlySnowData || cachedHourlySnowMap
+    );
     if (stations.length > 50) {
       return { amedas: stations, live: true };
     }
@@ -549,9 +651,13 @@ async function fetchRecentEarthquakes(): Promise<{
           })
         );
 
-        const validReports = detailReports.filter(
-          (r): r is EarthquakeReport => r !== null
-        );
+        const validReports = detailReports
+          .filter((r): r is EarthquakeReport => r !== null)
+          .sort(
+            (a, b) =>
+              b.maxScaleCode - a.maxScaleCode ||
+              b.occurrenceTime.localeCompare(a.occurrenceTime)
+          );
         if (validReports.length > 0) {
           return { earthquakes: validReports, live: true };
         }
@@ -570,7 +676,12 @@ async function fetchRecentEarthquakes(): Promise<{
     const json = (await res.json()) as Array<Record<string, any>>;
     const parsed = json
       .map(convertP2PQuakeItem)
-      .filter((x): x is EarthquakeReport => x !== null);
+      .filter((x): x is EarthquakeReport => x !== null)
+      .sort(
+        (a, b) =>
+          b.maxScaleCode - a.maxScaleCode ||
+          b.occurrenceTime.localeCompare(a.occurrenceTime)
+      );
     if (parsed.length > 0) {
       return { earthquakes: parsed, live: true };
     }
@@ -603,52 +714,111 @@ async function fetchJmaOverviewForecast(): Promise<{
   }
 }
 
+function loadCachedTyphoons24h(): TyphoonReport[] {
+  try {
+    if (typeof localStorage === 'undefined') return [];
+    const raw = localStorage.getItem(TYPHOON_24H_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const now = Date.now();
+    return parsed.filter(
+      (tc: any) =>
+        tc &&
+        typeof tc.id === 'string' &&
+        Array.isArray(tc.points) &&
+        tc.points.length > 0 &&
+        now - Number(tc.lastSeenMs || 0) <= TYPHOON_RETENTION_MS
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveCachedTyphoons24h(reports: TyphoonReport[]): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(TYPHOON_24H_CACHE_KEY, JSON.stringify(reports));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 async function fetchLiveJmaTyphoons(): Promise<{
   typhoons: TyphoonReport[];
   live: boolean;
 }> {
+  const recentCached = loadCachedTyphoons24h();
   try {
     const res = await fetchWithTimeout(JMA_TYPHOON_TARGET_URL, 3500);
     if (!res.ok) {
-      return { typhoons: INITIAL_TYPHOONS, live: false };
+      return {
+        typhoons: recentCached.length > 0 ? recentCached : INITIAL_TYPHOONS,
+        live: recentCached.length > 0,
+      };
     }
     const targetList = (await res.json()) as Array<{
       tropicalCyclone?: string;
     }>;
-    if (!Array.isArray(targetList) || targetList.length === 0) {
-      return { typhoons: INITIAL_TYPHOONS, live: false };
-    }
 
-    const parsedReports = await Promise.all(
-      targetList.map(async (item) => {
-        const tcId = item.tropicalCyclone;
-        if (!tcId) return null;
-        try {
-          const specRes = await fetchWithTimeout(
-            `https://www.jma.go.jp/bosai/typhoon/data/${tcId}/specifications.json`,
-            3500
-          );
-          if (!specRes.ok) return null;
-          const rawSpecs = await specRes.json();
-          return parseJmaTyphoonSpecifications(rawSpecs, tcId);
-        } catch {
-          return null;
-        }
-      })
-    );
+    const parsedReports = Array.isArray(targetList)
+      ? await Promise.all(
+          targetList.map(async (item) => {
+            const tcId = item.tropicalCyclone;
+            if (!tcId) return null;
+            try {
+              const [specRes, fcRes] = await Promise.all([
+                fetchWithTimeout(
+                  `https://www.jma.go.jp/bosai/typhoon/data/${tcId}/specifications.json`,
+                  3500
+                ),
+                fetchWithTimeout(
+                  `https://www.jma.go.jp/bosai/typhoon/data/${tcId}/forecast.json`,
+                  3500
+                ).catch(() => null),
+              ]);
+              if (!specRes.ok) return null;
+              const rawSpecs = await specRes.json();
+              const rawForecast =
+                fcRes && fcRes.ok ? await fcRes.json().catch(() => undefined) : undefined;
+              return parseJmaTyphoonSpecifications(rawSpecs, tcId, rawForecast);
+            } catch {
+              return null;
+            }
+          })
+        )
+      : [];
 
     const validReports = parsedReports.filter(
       (r): r is TyphoonReport => r !== null
     );
-    if (validReports.length > 0) {
+
+    // Merge live reports with any typhoon/tropical depression seen within the last 24 hours
+    // so that weakened tropical/extratropical cyclones keep their trajectory visible for ~1 day.
+    const mergedMap = new Map<string, TyphoonReport>();
+    for (const liveTc of validReports) {
+      mergedMap.set(liveTc.id, { ...liveTc, lastSeenMs: Date.now() });
+    }
+    for (const cachedTc of recentCached) {
+      if (!mergedMap.has(cachedTc.id)) {
+        mergedMap.set(cachedTc.id, cachedTc);
+      }
+    }
+
+    const mergedList = Array.from(mergedMap.values());
+    if (mergedList.length > 0) {
+      saveCachedTyphoons24h(mergedList);
       return {
-        typhoons: validReports,
+        typhoons: mergedList,
         live: true,
       };
     }
     return { typhoons: INITIAL_TYPHOONS, live: false };
   } catch {
-    return { typhoons: INITIAL_TYPHOONS, live: false };
+    return {
+      typhoons: recentCached.length > 0 ? recentCached : INITIAL_TYPHOONS,
+      live: recentCached.length > 0,
+    };
   }
 }
 
@@ -707,6 +877,8 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     nowcastTimes: nowcastRes.times,
     lightningPoints: nowcastRes.lightningPoints,
     warnings: liveWarningsRes.warnings,
+    municipalityWarnings: liveWarningsRes.municipalityWarnings,
+    muniSeverityMap: liveWarningsRes.muniSeverityMap,
     prefSeverityMap: liveWarningsRes.prefSeverityMap,
     typhoons: liveTyphoonsRes.typhoons,
     bulletins: INITIAL_WEATHER_BULLETINS,
