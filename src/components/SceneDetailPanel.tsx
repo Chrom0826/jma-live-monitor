@@ -851,15 +851,22 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
 
         {/* ==================== TSUNAMI ==================== */}
         {effectiveScene === 'tsunami' && (() => {
-          const activeEq =
-            data.earthquakes.find(
-              (eq) =>
-                (activeTsunamiForecast?.hypocenterName &&
-                  eq.hypocenterName.includes(activeTsunamiForecast.hypocenterName)) ||
-                eq.domesticTsunami.includes('津波')
-            ) ||
-            selectedEarthquake ||
-            data.earthquakes[0];
+          const hasActiveTsunami = Boolean(
+            activeTsunamiForecast &&
+              !activeTsunamiForecast.cancelled &&
+              activeTsunamiForecast.areas.length > 0
+          );
+
+          const activeEq = hasActiveTsunami
+            ? data.earthquakes.find(
+                (eq) =>
+                  (activeTsunamiForecast?.hypocenterName &&
+                    eq.hypocenterName.includes(
+                      activeTsunamiForecast.hypocenterName
+                    )) ||
+                  eq.domesticTsunami.includes('津波')
+              )
+            : undefined;
 
           const occurrenceTimeStr =
             activeTsunamiForecast?.occurrenceTime ||
@@ -898,143 +905,143 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
             <div className="pb-2">
               <div className="bg-amber-600 px-2.5 py-1 text-[13px] font-bold text-slate-950 flex items-center justify-between">
                 <span>津波警報・注意報・予報</span>
-                {activeTsunamiForecast &&
-                  activeTsunamiForecast.areas.length > 0 && (
-                    <span className="font-mono text-xs bg-slate-950/60 text-white px-1.5 py-0.2 rounded-xs">
-                      {activeTsunamiForecast.areas.length}沿岸発表中
-                    </span>
-                  )}
-              </div>
-
-              {/* JMA Official Style Earthquake Card (地震の発生日時・震央地名・深さ・マグニチュード・最大震度) */}
-              <div className="mx-2.5 mt-2 bg-neutral-900 border border-neutral-700/80 rounded-xs overflow-hidden shadow-md">
-                <div className="bg-neutral-800/95 px-2.5 py-1 flex items-center justify-between border-b border-neutral-700/60">
-                  <span className="text-[11px] font-mono font-bold text-neutral-300">
-                    震源・地震情報
+                {hasActiveTsunami && activeTsunamiForecast && (
+                  <span className="font-mono text-xs bg-slate-950/60 text-white px-1.5 py-0.2 rounded-xs">
+                    {activeTsunamiForecast.areas.length}沿岸発表中
                   </span>
-                  {activeTsunamiForecast?.source === 'demo' && (
-                    <span className="bg-purple-600 text-white px-1.5 py-0.2 rounded-xs font-bold text-[10px]">
-                      デモデータ
-                    </span>
-                  )}
-                </div>
-                <div className="p-2 space-y-2">
-                  <div>
-                    <div className="text-[10px] text-neutral-400 font-mono">地震の発生日時</div>
-                    <div className="text-sm font-bold text-white tracking-wide">
-                      {formatOccurrenceTimeJa(occurrenceTimeStr)}
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-1.5 text-xs">
-                    <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                      <div className="text-[10px] text-neutral-400 font-mono">震央地名</div>
-                      <div className="font-bold text-neutral-100 truncate text-[12px]" title={hypocenterName}>
-                        {hypocenterName}
-                      </div>
-                    </div>
-                    <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                      <div className="text-[10px] text-neutral-400 font-mono">最大震度</div>
-                      <div className="flex items-center gap-1 mt-0.5">
-                        <span
-                          className="px-1.5 py-0.2 rounded-xs font-bold text-xs"
-                          style={{
-                            backgroundColor: scaleBadgeStyle.bg,
-                            color: scaleBadgeStyle.text,
-                          }}
-                        >
-                          {maxScaleLabel !== '-' ? `震度 ${maxScaleLabel}` : '不明'}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                      <div className="text-[10px] text-neutral-400 font-mono">深さ</div>
-                      <div className="font-bold font-mono text-neutral-100 text-[12px]">
-                        {depthText}
-                      </div>
-                    </div>
-                    <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                      <div className="text-[10px] text-neutral-400 font-mono">規模</div>
-                      <div className="font-bold font-mono text-amber-400 text-[12px]">
-                        {magText}
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                )}
               </div>
 
-              {activeTsunamiForecast &&
-              activeTsunamiForecast.areas.length > 0 ? (
-                <div className="px-2.5 pt-2 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-mono text-neutral-300">
-                    <span>
-                      発表: {activeTsunamiForecast.issueTime || '随時'}
-                    </span>
-                  </div>
+              {hasActiveTsunami && activeTsunamiForecast ? (
+                <>
+                  {/* JMA Official Style Earthquake Card (only displayed when a tsunami forecast is actively issued) */}
+                  <div className="mx-2.5 mt-2 bg-neutral-900 border border-neutral-700/80 rounded-xs overflow-hidden shadow-md">
+                    <div className="bg-neutral-800/95 px-2.5 py-1 flex items-center justify-between border-b border-neutral-700/60">
+                      <span className="text-[11px] font-mono font-bold text-neutral-300">
+                        震源・地震情報
+                      </span>
+                      {activeTsunamiForecast.source === 'demo' && (
+                        <span className="bg-purple-600 text-white px-1.5 py-0.2 rounded-xs font-bold text-[10px]">
+                          デモデータ
+                        </span>
+                      )}
+                    </div>
+                    <div className="p-2 space-y-2">
+                      <div>
+                        <div className="text-[10px] text-neutral-400 font-mono">地震の発生日時</div>
+                        <div className="text-sm font-bold text-white tracking-wide">
+                          {formatOccurrenceTimeJa(occurrenceTimeStr)}
+                        </div>
+                      </div>
 
-                  {activeTsunamiForecast.headline && (
-                    <p className="text-xs text-yellow-200 leading-snug bg-yellow-950/40 border-l-2 border-yellow-400 px-2 py-1">
-                      {activeTsunamiForecast.headline}
-                    </p>
-                  )}
-
-                  {/* Group areas by grade: MajorWarning -> Warning -> Watch -> Forecast */}
-                  {(['MajorWarning', 'Warning', 'Watch', 'Forecast'] as const).map(
-                    (targetGrade) => {
-                      const matchedAreas = activeTsunamiForecast.areas.filter(
-                        (a) => a.grade === targetGrade
-                      );
-                      if (matchedAreas.length === 0) return null;
-                      const style = getTsunamiGradeStyle(targetGrade);
-                      return (
-                        <div
-                          key={targetGrade}
-                          className="border border-neutral-700 bg-neutral-900/60 rounded-xs overflow-hidden"
-                        >
-                          <div
-                            className="px-2 py-0.5 text-xs font-bold flex items-center justify-between"
-                            style={{
-                              backgroundColor: style.hex,
-                              color: style.textHex,
-                            }}
-                          >
-                            <span>{style.label}</span>
-                            <span className="font-mono text-[11px]">
-                              {matchedAreas.length}沿岸
-                            </span>
-                          </div>
-                          <div className="p-1.5 space-y-1">
-                            {matchedAreas.map((area) => (
-                              <div
-                                key={area.code || area.name}
-                                className="flex items-center justify-between text-xs px-1 py-0.5 border-b border-neutral-800/80 last:border-none"
-                              >
-                                <span className="font-bold text-white">
-                                  {area.name}
-                                </span>
-                                <div className="text-right font-mono text-[11px] space-x-2">
-                                  <span className="text-amber-300 font-bold">
-                                    {area.maxHeightText}
-                                  </span>
-                                  <span className="text-neutral-400">
-                                    {area.firstHeightText}
-                                  </span>
-                                </div>
-                              </div>
-                            ))}
+                      <div className="grid grid-cols-2 gap-1.5 text-xs">
+                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
+                          <div className="text-[10px] text-neutral-400 font-mono">震央地名</div>
+                          <div className="font-bold text-neutral-100 truncate text-[12px]" title={hypocenterName}>
+                            {hypocenterName}
                           </div>
                         </div>
-                      );
-                    }
-                  )}
-                </div>
+                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
+                          <div className="text-[10px] text-neutral-400 font-mono">最大震度</div>
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <span
+                              className="px-1.5 py-0.2 rounded-xs font-bold text-xs"
+                              style={{
+                                backgroundColor: scaleBadgeStyle.bg,
+                                color: scaleBadgeStyle.text,
+                              }}
+                            >
+                              {maxScaleLabel !== '-' ? `震度 ${maxScaleLabel}` : '不明'}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
+                          <div className="text-[10px] text-neutral-400 font-mono">深さ</div>
+                          <div className="font-bold font-mono text-neutral-100 text-[12px]">
+                            {depthText}
+                          </div>
+                        </div>
+                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
+                          <div className="text-[10px] text-neutral-400 font-mono">規模</div>
+                          <div className="font-bold font-mono text-amber-400 text-[12px]">
+                            {magText}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="px-2.5 pt-2 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-mono text-neutral-300">
+                      <span>
+                        発表: {activeTsunamiForecast.issueTime || '随時'}
+                      </span>
+                    </div>
+
+                    {activeTsunamiForecast.headline && (
+                      <p className="text-xs text-yellow-200 leading-snug bg-yellow-950/40 border-l-2 border-yellow-400 px-2 py-1">
+                        {activeTsunamiForecast.headline}
+                      </p>
+                    )}
+
+                    {/* Group areas by grade: MajorWarning -> Warning -> Watch -> Forecast */}
+                    {(['MajorWarning', 'Warning', 'Watch', 'Forecast'] as const).map(
+                      (targetGrade) => {
+                        const matchedAreas = activeTsunamiForecast.areas.filter(
+                          (a) => a.grade === targetGrade
+                        );
+                        if (matchedAreas.length === 0) return null;
+                        const style = getTsunamiGradeStyle(targetGrade);
+                        return (
+                          <div
+                            key={targetGrade}
+                            className="border border-neutral-700 bg-neutral-900/60 rounded-xs overflow-hidden"
+                          >
+                            <div
+                              className="px-2 py-0.5 text-xs font-bold flex items-center justify-between"
+                              style={{
+                                backgroundColor: style.hex,
+                                color: style.textHex,
+                              }}
+                            >
+                              <span>{style.label}</span>
+                              <span className="font-mono text-[11px]">
+                                {matchedAreas.length}沿岸
+                              </span>
+                            </div>
+                            <div className="p-1.5 space-y-1">
+                              {matchedAreas.map((area) => (
+                                <div
+                                  key={area.code || area.name}
+                                  className="flex items-center justify-between text-xs px-1 py-0.5 border-b border-neutral-800/80 last:border-none"
+                                >
+                                  <span className="font-bold text-white">
+                                    {area.name}
+                                  </span>
+                                  <div className="text-right font-mono text-[11px] space-x-2">
+                                    <span className="text-amber-300 font-bold">
+                                      {area.maxHeightText}
+                                    </span>
+                                    <span className="text-neutral-400">
+                                      {area.firstHeightText}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      }
+                    )}
+                  </div>
+                </>
               ) : (
                 <div className="px-2.5 py-3 text-xs text-neutral-300 space-y-2">
-                  <div className="p-2 bg-neutral-900/80 border border-neutral-700 text-neutral-300">
+                  <div
+                    data-testid="tsunami-none-message"
+                    className="p-2.5 bg-neutral-900/80 border border-neutral-700 text-neutral-200 font-medium"
+                  >
                     現在、津波警報・注意報・予報は発表されていません。
-                  </div>
-                  <div className="text-[11px] text-neutral-400">
-                    ※左下の「⚙ 設定」から津波警報デモを発火すると、大津波警報・津波警報時の全国海岸線表示を確認できます。
                   </div>
                 </div>
               )}

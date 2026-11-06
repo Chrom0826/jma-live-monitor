@@ -49,8 +49,17 @@
 
 /* Leaflet Dark Broadcast Customizations */
 .leaflet-container {
-  background-color: #0E1014 !important;
+  background-color: transparent !important;
   font-family: var(--font-sans) !important;
+}
+
+/* Keep SVG overlay paths razor-sharp at constant pixel width */
+.leaflet-world-pane svg path,
+.leaflet-japan-pane svg path,
+.leaflet-muni-pane svg path,
+.leaflet-muniBorder-pane svg path,
+.leaflet-vectorOverlay-pane svg path {
+  vector-effect: non-scaling-stroke;
 }
 
 /* Global Dark Tile Silhouette Filter */

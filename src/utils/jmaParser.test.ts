@@ -25,6 +25,7 @@ import {
   formatCompactTyphoonTime,
   formatMunicipalityMapLabel,
   formatSeismicScale,
+  formatWarningDivisionMapLabel,
   getActiveSevereWarningDivisions,
   getAmedasMetricColor,
   getAmedasPointRadiusForZoom,
@@ -34,6 +35,7 @@ import {
   getNextPatrolStep,
   getNextSceneId,
   getNextSubRegion,
+  getWarningMapZoomTier,
   getWindDirectionRotationDeg,
   interpolateArchipelagoSweepPosition,
   isExtratropicalCyclone,
@@ -45,6 +47,7 @@ import {
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
   resolveLabelBoxCollisions,
+  selectNonOverlappingAmedasStations,
   WARNING_DIVISIONS,
 } from './jmaParser';
 
@@ -493,8 +496,9 @@ test('AUTO_PATROL_SEQUENCE, getNextPatrolStep, municipalityWarnings, isExtratrop
   assert.equal(formatCompactTyphoonCenterLabel(extraTc), '温帯低気圧');
 
   // 4. Wind arrow size scaling & Top-5 rankings
-  assert.ok(getAmedasWindArrowSizeForZoom(5) >= 22);
-  assert.ok(getAmedasWindArrowSizeForZoom(7) > getAmedasWindArrowSizeForZoom(5));
+  assert.ok(getAmedasWindArrowSizeForZoom(5) >= 11 && getAmedasWindArrowSizeForZoom(5) <= 13);
+  assert.ok(getAmedasWindArrowSizeForZoom(6) > getAmedasWindArrowSizeForZoom(5));
+  assert.ok(getAmedasWindArrowSizeForZoom(7) > getAmedasWindArrowSizeForZoom(6));
 
   const mockStations = Array.from({ length: 8 }, (_, idx) => ({
     id: `st-${idx}`,
@@ -895,6 +899,167 @@ test('P2PQuake EEW (code 556) & Tsunami (code 552) parsing, wave radii propagati
   assert.equal(parsedJmaTsunami.occurrenceTime, '2026-11-06T19:39:00+09:00');
   assert.equal(parsedJmaTsunami.areas[0].grade, 'Forecast');
   assert.equal(parsedJmaTsunami.areas[0].name, '千葉県九十九里・外房');
+});
+
+test('3-stage Warning zoom hierarchy (prefecture -> division -> municipality) and non-overlapping AMeDAS station filtering work accurately', () => {
+  // 1. 3-Stage Warning Map Zoom Tiers
+  assert.equal(getWarningMapZoomTier(4.5), 'prefecture');
+  assert.equal(getWarningMapZoomTier(5.0), 'prefecture');
+  assert.equal(getWarningMapZoomTier(5.49), 'prefecture');
+  assert.equal(getWarningMapZoomTier(5.5), 'division');
+  assert.equal(getWarningMapZoomTier(6.0), 'division');
+  assert.equal(getWarningMapZoomTier(6.79), 'division');
+  assert.equal(getWarningMapZoomTier(6.8), 'municipality');
+  assert.equal(getWarningMapZoomTier(7.0), 'municipality');
+  assert.equal(getWarningMapZoomTier(9.0), 'municipality');
+
+  // 2. Division label formatting matches JMA official regional warning map labels
+  assert.equal(formatWarningDivisionMapLabel(WARNING_DIVISIONS['011000']), '宗谷地方');
+  assert.equal(formatWarningDivisionMapLabel(WARNING_DIVISIONS['014100']), '釧路・根室・十勝地方');
+  assert.equal(formatWarningDivisionMapLabel(WARNING_DIVISIONS['020000']), '青森県');
+  assert.equal(formatWarningDivisionMapLabel(WARNING_DIVISIONS['130000']), '東京都');
+  assert.equal(formatWarningDivisionMapLabel(WARNING_DIVISIONS['460100']), '鹿児島県');
+  assert.equal(formatWarningDivisionMapLabel(WARNING_DIVISIONS['460040']), '奄美地方');
+  assert.equal(formatWarningDivisionMapLabel(WARNING_DIVISIONS['471000']), '沖縄本島地方');
+
+  // 3. Non-overlapping AMeDAS stations at overview zoom vs zoomed-in view
+  const denseCluster = Array.from({ length: 20 }, (_, i) => ({
+    id: `cluster-${i}`,
+    stationName: `密集点${i}`,
+    prefecture: '東京都',
+    regionId: 'kanto' as const,
+    lat: 35.68 + (i % 5) * 0.01,
+    lon: 139.76 + Math.floor(i / 5) * 0.01,
+    temp: 15 + i * 0.5,
+    hasTemp: true,
+    precip1h: 2 + i * 0.5,
+    windSpeed: 3 + i * 1.2,
+    windDirection: '北北東',
+    humidity: 60,
+    snowCm: 0,
+    observedAt: '12:00',
+  }));
+
+  const projectAtZoom = (z: number) => (lat: number, lon: number) => {
+    const scale = 256 * Math.pow(2, z);
+    return {
+      x: (lon / 360 + 0.5) * scale,
+      y: (0.5 - lat / 180) * scale,
+    };
+  };
+
+  // At nationwide zoom (z=5), tightly clustered stations within ~0.04 deg (~3px apart) should be culled so none overlap,
+  // and the strongest wind station (`cluster-19`) must be prioritized first!
+  const windAtZ5 = selectNonOverlappingAmedasStations(
+    denseCluster,
+    'wind',
+    5,
+    projectAtZoom(5)
+  );
+  assert.equal(windAtZ5.length, 1);
+  assert.equal(windAtZ5[0].id, 'cluster-19');
+
+  const tempAtZ5 = selectNonOverlappingAmedasStations(
+    denseCluster,
+    'temp',
+    5,
+    projectAtZoom(5)
+  );
+  assert.equal(tempAtZ5.length, 1);
+
+  // At high zoom (z=10), all 20 stations are well separated in screen pixels and all 20 are displayed
+  const windAtZ10 = selectNonOverlappingAmedasStations(
+    denseCluster,
+    'wind',
+    10,
+    projectAtZoom(10)
+  );
+  assert.equal(windAtZ10.length, 20);
+});
+
+test('getEffectiveMunicipalitySeverity suppresses colors outside activeWarningDivision and dissolveGeoJsonByGroup topologically merges adjacent polygons into a single clean boundary', async () => {
+  const { getEffectiveMunicipalitySeverity, dissolveGeoJsonByGroup } = await import('./jmaParser');
+
+  const muniSeverityMap = {
+    '0121400': 'warning' as const, // 宗谷 稚内市
+    '0120400': 'advisory' as const, // 上川 旭川市
+    '0220100': 'warning' as const, // 青森県 青森市
+  };
+
+  // In nationwide view (activeWarningDivisionCode = null), all municipalities keep their warning/advisory colors
+  assert.equal(
+    getEffectiveMunicipalitySeverity('0121400', '011000', muniSeverityMap, null),
+    'warning'
+  );
+  assert.equal(
+    getEffectiveMunicipalitySeverity('0120400', '012000', muniSeverityMap, null),
+    'advisory'
+  );
+  assert.equal(
+    getEffectiveMunicipalitySeverity('0220100', '020000', muniSeverityMap, null),
+    'warning'
+  );
+
+  // When zoomed into 宗谷 ('011000'), ONLY municipalities in '011000' are colored; all other divisions return 'normal'
+  assert.equal(
+    getEffectiveMunicipalitySeverity('0121400', '011000', muniSeverityMap, '011000'),
+    'warning'
+  );
+  assert.equal(
+    getEffectiveMunicipalitySeverity('0120400', '012000', muniSeverityMap, '011000'),
+    'normal'
+  );
+  assert.equal(
+    getEffectiveMunicipalitySeverity('0220100', '020000', muniSeverityMap, '011000'),
+    'normal'
+  );
+
+  // Verify topological edge cancellation dissolves two adjacent squares sharing edge (1,0)->(1,1) into 1 unified rectangle
+  const twoAdjacentSquares = [
+    {
+      type: 'Feature',
+      properties: { code: '012010', name: '上川地方' },
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [0, 0],
+            [1, 0],
+            [1, 1],
+            [0, 1],
+            [0, 0],
+          ],
+        ],
+      },
+    },
+    {
+      type: 'Feature',
+      properties: { code: '012020', name: '留萌地方' },
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [1, 0],
+            [2, 0],
+            [2, 1],
+            [1, 1],
+            [1, 0],
+          ],
+        ],
+      },
+    },
+  ];
+
+  const dissolved = dissolveGeoJsonByGroup(
+    twoAdjacentSquares,
+    () => '012000'
+  );
+
+  assert.equal(dissolved.features.length, 1);
+  assert.equal(dissolved.features[0].properties.groupKey, '012000');
+  // The shared vertical edge at x=1 is cancelled out, leaving 1 outer ring of 7 vertices (start+end + 6 perimeter steps)
+  assert.equal(dissolved.features[0].geometry.coordinates.length, 1);
+  assert.equal(dissolved.features[0].geometry.coordinates[0][0].length, 7);
 });
 
 

@@ -20,17 +20,25 @@ import {
 import {
   AMEDAS_PATROL_STOPS,
   computeTyphoonConeEnvelope,
+  dissolveGeoJsonByGroup,
   formatCompactTyphoonCenterLabel,
   formatCompactTyphoonTime,
   formatMunicipalityMapLabel,
+  formatWarningDivisionMapLabel,
   getAmedasMetricColor,
   getAmedasPointRadiusForZoom,
   getAmedasWindArrowSizeForZoom,
+  getEffectiveMunicipalitySeverity,
   getSeismicScaleStyle,
+  getWarningMapZoomTier,
   getWindDirectionRotationDeg,
   inferRegionFromCoords,
   isExtratropicalCyclone,
   PREFECTURE_NAMES,
+  resolveWarningDivision,
+  selectNonOverlappingAmedasStations,
+  WARNING_DIVISIONS,
+  WarningMapZoomTier,
 } from '../utils/jmaParser';
 import {
   computeEewWaveRadiiKm,
@@ -42,9 +50,14 @@ import {
 
 let cachedClass20GeoJson: any = null;
 let cachedClass10GeoJson: any = null;
+let cachedDissolvedDivisionsGeoJson: any = null;
 let cachedTsunamiGeoJson: any = null;
 const cachedClass20LabelPoints: Record<string, [number, number]> = {};
-let class20FetchPromise: Promise<{ class20: any; class10: any }> | null = null;
+let class20FetchPromise: Promise<{
+  class20: any;
+  class10: any;
+  dissolvedDivisions: any;
+}> | null = null;
 let tsunamiFetchPromise: Promise<any> | null = null;
 
 function loadJmaTsunamiGeoJson(): Promise<any> {
@@ -64,11 +77,20 @@ function loadJmaTsunamiGeoJson(): Promise<any> {
   return tsunamiFetchPromise;
 }
 
-function loadJmaMunicipalityGeoJson(): Promise<{ class20: any; class10: any }> {
-  if (cachedClass20GeoJson && cachedClass10GeoJson) {
+function loadJmaMunicipalityGeoJson(): Promise<{
+  class20: any;
+  class10: any;
+  dissolvedDivisions: any;
+}> {
+  if (
+    cachedClass20GeoJson &&
+    cachedClass10GeoJson &&
+    cachedDissolvedDivisionsGeoJson
+  ) {
     return Promise.resolve({
       class20: cachedClass20GeoJson,
       class10: cachedClass10GeoJson,
+      dissolvedDivisions: cachedDissolvedDivisionsGeoJson,
     });
   }
   if (class20FetchPromise) return class20FetchPromise;
@@ -86,7 +108,10 @@ function loadJmaMunicipalityGeoJson(): Promise<{ class20: any; class10: any }> {
     fetch('https://www.jma.go.jp/bosai/common/const/geojson/class10s.json')
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null),
-  ]).then(([c20Parts, c10Json]) => {
+    fetch('https://www.jma.go.jp/bosai/common/const/area.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+  ]).then(([c20Parts, c10Json, areaJson]) => {
     const validParts = c20Parts.filter(
       (p) => p && Array.isArray(p.features)
     );
@@ -94,6 +119,14 @@ function loadJmaMunicipalityGeoJson(): Promise<{ class20: any; class10: any }> {
       const allFeatures = validParts.flatMap((p) => p.features);
       for (const f of allFeatures) {
         const code = String(f?.properties?.code || '');
+        const divMeta =
+          code && code !== 'hoppo'
+            ? resolveWarningDivision(code, areaJson)
+            : null;
+        if (f.properties) {
+          f.properties.divisionCode = divMeta?.code || (code === 'hoppo' ? 'hoppo' : '');
+          f.properties.prefId = divMeta?.prefId || Number(code.slice(0, 2)) || 0;
+        }
         const lp = f?.properties?.labelPoints?.[0];
         if (code && Array.isArray(lp) && lp.length >= 2) {
           const lon = Number(lp[0]);
@@ -110,14 +143,163 @@ function loadJmaMunicipalityGeoJson(): Promise<{ class20: any; class10: any }> {
     }
     if (c10Json && Array.isArray(c10Json.features)) {
       cachedClass10GeoJson = c10Json;
+      // Topologically dissolve the 153 `class10s` sub-regions into the 57 JMA Warning Divisions
+      // (`宗谷`, `上川・留萌`, `網走・北見・紋別`, `石狩・空知・後志`, `胆振・日高`, `釧路・根室・十勝`, `渡島・檜山`, `[各都府県]`, `奄美`, `沖縄4地方`)
+      // so every prefecture and Hokkaido division is 100% unified with zero internal sub-boundaries!
+      cachedDissolvedDivisionsGeoJson = dissolveGeoJsonByGroup(
+        c10Json.features,
+        (f: any) => {
+          const code = String(f?.properties?.code || '');
+          if (!code) return null;
+          if (code === 'hoppo') return 'hoppo';
+          const divMeta = resolveWarningDivision(code, areaJson);
+          return divMeta?.code || code;
+        }
+      );
     }
     return {
       class20: cachedClass20GeoJson,
       class10: cachedClass10GeoJson,
+      dissolvedDivisions: cachedDissolvedDivisionsGeoJson,
     };
   });
 
   return class20FetchPromise;
+}
+
+/**
+ * Fast Web Mercator projection from (lat, lon) at fractional zoom level.
+ * Matches `L.CRS.EPSG3857.latLngToPoint(L.latLng(lat, lon), zoom)` without object allocation.
+ */
+const DEG_TO_RAD = Math.PI / 180;
+const MAX_MERCATOR_LAT = 85.0511287798;
+
+function latLonToNormMercator(
+  lat: number,
+  lon: number
+): { normX: number; normY: number } {
+  const clampedLat = Math.max(
+    -MAX_MERCATOR_LAT,
+    Math.min(MAX_MERCATOR_LAT, lat)
+  );
+  const sin = Math.sin(clampedLat * DEG_TO_RAD);
+  const normX = lon / 360 + 0.5;
+  const normY = 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
+  return { normX, normY };
+}
+
+function projectLatLonToWorldPx(
+  lat: number,
+  lon: number,
+  scale: number
+): { x: number; y: number } {
+  const { normX, normY } = latLonToNormMercator(lat, lon);
+  return { x: normX * scale, y: normY * scale };
+}
+
+interface CompiledGeoRing {
+  normCoords: Float64Array; // [normX0, normY0, normX1, normY1, ...]
+}
+
+interface CompiledGeoShape {
+  id: string;
+  divisionCode: string;
+  prefId: number;
+  severity: WarningSeverity;
+  minNormX: number;
+  minNormY: number;
+  maxNormX: number;
+  maxNormY: number;
+  rings: CompiledGeoRing[];
+}
+
+function compileGeoJsonShapes(
+  geoJson: any,
+  extractMeta: (feature: any) => {
+    id: string;
+    divisionCode?: string;
+    prefId?: number;
+    severity?: WarningSeverity;
+  },
+  exteriorRingsOnly = false
+): CompiledGeoShape[] {
+  if (!geoJson || !Array.isArray(geoJson.features)) return [];
+  const shapes: CompiledGeoShape[] = [];
+
+  for (const f of geoJson.features) {
+    const geom = f?.geometry;
+    if (!geom) continue;
+    const polys: number[][][][] =
+      geom.type === 'Polygon'
+        ? [geom.coordinates]
+        : geom.type === 'MultiPolygon'
+          ? geom.coordinates
+          : [];
+    if (polys.length === 0) continue;
+
+    let minNormX = Infinity;
+    let minNormY = Infinity;
+    let maxNormX = -Infinity;
+    let maxNormY = -Infinity;
+    const rings: CompiledGeoRing[] = [];
+
+    for (const poly of polys) {
+      if (!Array.isArray(poly) || poly.length === 0) continue;
+      const ringLimit = exteriorRingsOnly ? 1 : poly.length;
+      for (let rIdx = 0; rIdx < ringLimit; rIdx++) {
+        const rawRing = poly[rIdx];
+        if (!Array.isArray(rawRing) || rawRing.length < 3) continue;
+        const normCoords = new Float64Array(rawRing.length * 2);
+        let ptr = 0;
+        for (let i = 0; i < rawRing.length; i++) {
+          const pt = rawRing[i];
+          if (!Array.isArray(pt) || pt.length < 2) continue;
+          const lon = Number(pt[0]);
+          const lat = Number(pt[1]);
+          if (Number.isNaN(lat) || Number.isNaN(lon)) continue;
+          const { normX, normY } = latLonToNormMercator(lat, lon);
+          normCoords[ptr++] = normX;
+          normCoords[ptr++] = normY;
+          if (normX < minNormX) minNormX = normX;
+          if (normX > maxNormX) maxNormX = normX;
+          if (normY < minNormY) minNormY = normY;
+          if (normY > maxNormY) maxNormY = normY;
+        }
+        if (ptr >= 6) {
+          rings.push({
+            normCoords:
+              ptr === normCoords.length
+                ? normCoords
+                : normCoords.subarray(0, ptr),
+          });
+        }
+      }
+    }
+
+    if (rings.length > 0) {
+      const meta = extractMeta(f);
+      shapes.push({
+        id: meta.id,
+        divisionCode: meta.divisionCode || '',
+        prefId: meta.prefId || 0,
+        severity: meta.severity || 'normal',
+        minNormX,
+        minNormY,
+        maxNormX,
+        maxNormY,
+        rings,
+      });
+    }
+  }
+
+  return shapes;
+}
+
+function severityToFillColor(sev: WarningSeverity): string {
+  if (sev === 'special') return '#9333EA';
+  if (sev === 'warning') return '#EF4444';
+  if (sev === 'advisory') return '#FACC15';
+  return '#374151';
 }
 
 interface MonitorMapProps {
@@ -235,57 +417,9 @@ const SCENE_CAMERA_TARGETS: Record<
   amedas: NATIONAL_CAMERA_VIEW,
   forecast: NATIONAL_CAMERA_VIEW,
   volcano: { center: [31.585, 130.657], zoom: 9 },
-  tsunami: { center: [33.095, 139.772], zoom: 8 },
+  tsunami: { center: [36.8, 137.5], zoom: 5.2 },
   earthquake: { center: [36.4, 140.8], zoom: 7 },
 };
-
-function getPrefecturePolygonStyle(
-  prefId: number,
-  effectiveScene: SceneId,
-  prefSeverityMap: Record<number, WarningSeverity>
-): L.PathOptions {
-  if (effectiveScene === 'warnings') {
-    const severity = prefSeverityMap[prefId] || 'normal';
-    if (severity === 'special') {
-      return {
-        fillColor: '#9333EA',
-        fillOpacity: 0.95,
-        color: '#E9D5FF',
-        weight: 1.3,
-      };
-    }
-    if (severity === 'warning') {
-      return {
-        fillColor: '#DC2626',
-        fillOpacity: 0.94,
-        color: '#FCA5A5',
-        weight: 1.1,
-      };
-    }
-    if (severity === 'advisory') {
-      // Vivid broadcast yellow for advisories
-      return {
-        fillColor: '#FACC15',
-        fillOpacity: 0.93,
-        color: '#FEF08A',
-        weight: 0.9,
-      };
-    }
-    return {
-      fillColor: '#262B36',
-      fillOpacity: 0.92,
-      color: '#434C5E',
-      weight: 0.8,
-    };
-  }
-
-  return {
-    fillColor: '#232731',
-    fillOpacity: 0.9,
-    color: '#4B5563',
-    weight: 0.9,
-  };
-}
 
 export const MonitorMap: React.FC<MonitorMapProps> = ({
   activeScene,
@@ -297,7 +431,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   selectedEarthquake,
   selectedTyphoon,
   activeVolcano,
-  activeTsunamiStation,
   amedasMetric,
   onChangeAmedasMetric,
   onViewportChange,
@@ -305,25 +438,30 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   isLoopPaused,
   onSceneComplete,
 }) => {
+  const baseMapCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const interactiveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const renderInteractiveCanvasRef = useRef<
+    (overrideCenter?: { lat: number; lng: number }, overrideZoom?: number) => void
+  >(() => {});
   const mapInstanceRef = useRef<L.Map | null>(null);
-  const worldGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
-  const geoJsonLayerRef = useRef<L.GeoJSON | null>(null);
-  const muniGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
-  const muniBorderLayerRef = useRef<L.GeoJSON | null>(null);
   const tsunamiCasingLayerRef = useRef<L.GeoJSON | null>(null);
   const tsunamiGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
   const hrpnsLayerRef = useRef<L.GridLayer | null>(null);
   const thnsLayerRef = useRef<L.GridLayer | null>(null);
-  const worldRendererRef = useRef<L.SVG | null>(null);
-  const japanRendererRef = useRef<L.SVG | null>(null);
-  const muniCanvasRendererRef = useRef<L.Canvas | null>(null);
-  const muniBorderRendererRef = useRef<L.Canvas | null>(null);
   const overlayRendererRef = useRef<L.SVG | null>(null);
   const isFirstMountRef = useRef<boolean>(true);
+  const warningZoomTierRef = useRef<WarningMapZoomTier>('prefecture');
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
   const onViewportChangeRef = useRef<typeof onViewportChange>(onViewportChange);
+
+  // Pre-compiled normalized Web Mercator geometry refs for 60fps razor-sharp Canvas rendering
+  const worldCompiledRef = useRef<CompiledGeoShape[]>([]);
+  const japanPrefCompiledRef = useRef<CompiledGeoShape[]>([]);
+  const dissolvedDivisionsCompiledRef = useRef<CompiledGeoShape[]>([]);
+  const class20CompiledRef = useRef<CompiledGeoShape[]>([]);
+  const dissolvedWarningFillCompiledRef = useRef<CompiledGeoShape[]>([]);
 
   useEffect(() => {
     onSceneCompleteRef.current = onSceneComplete;
@@ -338,16 +476,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   const [class20GeoJsonData, setClass20GeoJsonData] = useState<any>(
     cachedClass20GeoJson
   );
-  const [class10GeoJsonData, setClass10GeoJsonData] = useState<any>(
-    cachedClass10GeoJson
-  );
+  const [dissolvedDivisionsGeoJson, setDissolvedDivisionsGeoJson] =
+    useState<any>(cachedDissolvedDivisionsGeoJson);
   const [tsunamiGeoJsonData, setTsunamiGeoJsonData] = useState<any>(
     cachedTsunamiGeoJson
   );
+  const [compiledVersion, setCompiledVersion] = useState<number>(0);
   const [radarFrameIndex, setRadarFrameIndex] = useState<number>(0);
   // radarPass: 0 = 1st loop (Rain Radar only), 1 = 2nd loop (Rain Radar + Lightning Radar & LIDEN)
   const [radarPass, setRadarPass] = useState<0 | 1>(0);
   const [mapZoomVersion, setMapZoomVersion] = useState<number>(0);
+  const [warningZoomTier, setWarningZoomTier] =
+    useState<WarningMapZoomTier>('prefecture');
   const [eewAnimNow, setEewAnimNow] = useState<number>(Date.now());
 
   const effectiveScene: SceneId =
@@ -361,6 +501,707 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             ? 'typhoon'
             : activeScene;
 
+  // Compile World GeoJSON into normalized Web Mercator coordinates once
+  useEffect(() => {
+    if (!worldGeoJsonData) return;
+    worldCompiledRef.current = compileGeoJsonShapes(worldGeoJsonData, (f) => ({
+      id: String(f?.properties?.ISO_A3 || f?.properties?.ADMIN || 'country'),
+    }));
+    setCompiledVersion((v) => v + 1);
+  }, [worldGeoJsonData]);
+
+  // Compile 47-prefecture fallback GeoJSON once
+  useEffect(() => {
+    if (!geoJsonData) return;
+    japanPrefCompiledRef.current = compileGeoJsonShapes(
+      geoJsonData,
+      (f) => {
+        const prefId = Number(f?.properties?.id || 0);
+        const divCode =
+          prefId >= 2 && prefId <= 45
+            ? `${String(prefId).padStart(2, '0')}0000`
+            : prefId === 46
+              ? '460100'
+              : prefId === 47
+                ? '471000'
+                : '016000';
+        return {
+          id: String(prefId),
+          divisionCode: divCode,
+          prefId,
+        };
+      },
+      true
+    );
+    setCompiledVersion((v) => v + 1);
+  }, [geoJsonData]);
+
+  // Compile dissolved 57-division JMA GeoJSON once
+  useEffect(() => {
+    if (!dissolvedDivisionsGeoJson) return;
+    dissolvedDivisionsCompiledRef.current = compileGeoJsonShapes(
+      dissolvedDivisionsGeoJson,
+      (f) => {
+        const divCode = String(f?.properties?.groupKey || '');
+        const prefId =
+          WARNING_DIVISIONS[divCode]?.prefId ||
+          Number(divCode.slice(0, 2)) ||
+          0;
+        return {
+          id: divCode,
+          divisionCode: divCode,
+          prefId,
+        };
+      },
+      true
+    );
+    setCompiledVersion((v) => v + 1);
+  }, [dissolvedDivisionsGeoJson]);
+
+  // Compile class20 municipality shapes once when class20GeoJsonData loads
+  useEffect(() => {
+    if (!class20GeoJsonData || !Array.isArray(class20GeoJsonData.features)) {
+      return;
+    }
+    class20CompiledRef.current = compileGeoJsonShapes(
+      class20GeoJsonData,
+      (f) => {
+        const code = String(f?.properties?.code || '');
+        const divCode = String(f?.properties?.divisionCode || '');
+        const prefId = Number(f?.properties?.prefId || 0);
+        return {
+          id: code,
+          divisionCode: divCode,
+          prefId,
+        };
+      },
+      true
+    );
+    setCompiledVersion((v) => v + 1);
+  }, [class20GeoJsonData]);
+
+  // Compile topologically dissolved warning fill shapes when class20GeoJsonData or muniSeverityMap updates
+  useEffect(() => {
+    if (!class20GeoJsonData || !Array.isArray(class20GeoJsonData.features)) {
+      return;
+    }
+    const muniMap = data.muniSeverityMap || {};
+
+    // Topologically dissolve adjacent municipalities with the same `(divisionCode, severity)`
+    // so nationwide (`zoom < 5.5`) and regional (`5.5 <= zoom < 6.8`) views have ZERO internal seams or black noise (`黒いノイズ`)!
+    const dissolvedFillGeoJson = dissolveGeoJsonByGroup(
+      class20GeoJsonData.features,
+      (f: any) => {
+        const code = String(f?.properties?.code || '');
+        const divCode = String(f?.properties?.divisionCode || '');
+        if (!divCode) return null;
+        const sev = muniMap[code] || 'normal';
+        return `${divCode}:${sev}`;
+      }
+    );
+
+    dissolvedWarningFillCompiledRef.current = compileGeoJsonShapes(
+      dissolvedFillGeoJson,
+      (f) => {
+        const groupKey = String(f?.properties?.groupKey || '');
+        const [divCode, sevStr] = groupKey.split(':');
+        return {
+          id: groupKey,
+          divisionCode: divCode || '',
+          severity: (sevStr as WarningSeverity) || 'normal',
+        };
+      },
+      true
+    );
+
+    setCompiledVersion((v) => v + 1);
+  }, [class20GeoJsonData, data.muniSeverityMap]);
+
+  // Keep 60fps High-DPI Base-Map Canvas & Interactive Overlay Canvas renderer function up to date
+  // Draws both:
+  // 1) `baseMapCanvasRef` (`z-[5]`): World Map, Japan Base Map (`白地図`), Warning Choropleth, 3-Stage Borders, and Blue Focus Border at native HiDPI resolution (never blurs during or after zoom!)
+  // 2) `interactiveCanvasRef` (`z-[20]`): AMeDAS dots/wind arrows & Warning 3-Stage Hierarchy Labels
+  useEffect(() => {
+    renderInteractiveCanvasRef.current = (overrideCenter, overrideZoom) => {
+      const baseCanvas = baseMapCanvasRef.current;
+      const canvas = interactiveCanvasRef.current;
+      const map = mapInstanceRef.current;
+      if (!canvas || !map) return;
+
+      const container = map.getContainer();
+      const width = container.clientWidth || 1280;
+      const height = container.clientHeight || 720;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+      const currentZoom =
+        typeof overrideZoom === 'number' ? overrideZoom : map.getZoom();
+      const center = overrideCenter ?? map.getCenter();
+      const worldScale = 256 * Math.pow(2, currentZoom);
+      const centerWorld = projectLatLonToWorldPx(
+        center.lat,
+        center.lng,
+        worldScale
+      );
+      const halfW = width / 2;
+      const halfH = height / 2;
+      const originX = centerWorld.x - halfW;
+      const originY = centerWorld.y - halfH;
+
+      // Normalized Web Mercator viewport bounds for fast frustum culling
+      const padPx = 48;
+      const viewMinNormX = (originX - padPx) / worldScale;
+      const viewMaxNormX = (originX + width + padPx) / worldScale;
+      const viewMinNormY = (originY - padPx) / worldScale;
+      const viewMaxNormY = (originY + height + padPx) / worldScale;
+
+      const projectToScreen = (
+        lat: number,
+        lon: number
+      ): { x: number; y: number } => {
+        const pt = projectLatLonToWorldPx(lat, lon, worldScale);
+        return {
+          x: pt.x - originX,
+          y: pt.y - originY,
+        };
+      };
+
+      // ==================== A. RENDER 60FPS HIGH-DPI BASE MAP (`baseMapCanvasRef`) ====================
+      if (baseCanvas) {
+        if (
+          baseCanvas.width !== Math.round(width * dpr) ||
+          baseCanvas.height !== Math.round(height * dpr)
+        ) {
+          baseCanvas.width = Math.round(width * dpr);
+          baseCanvas.height = Math.round(height * dpr);
+        }
+        const bCtx = baseCanvas.getContext('2d');
+        if (bCtx) {
+          bCtx.save();
+          bCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          bCtx.fillStyle = '#0E1014';
+          bCtx.fillRect(0, 0, width, height);
+          bCtx.lineJoin = 'round';
+          bCtx.lineCap = 'round';
+
+          const traceShapePath = (
+            ctx2d: CanvasRenderingContext2D,
+            shape: CompiledGeoShape,
+            worldWrapOffsetNormX = 0
+          ) => {
+            for (let r = 0; r < shape.rings.length; r++) {
+              const coords = shape.rings[r].normCoords;
+              if (coords.length < 6) continue;
+              ctx2d.moveTo(
+                (coords[0] + worldWrapOffsetNormX) * worldScale - originX,
+                coords[1] * worldScale - originY
+              );
+              for (let i = 2; i < coords.length; i += 2) {
+                ctx2d.lineTo(
+                  (coords[i] + worldWrapOffsetNormX) * worldScale - originX,
+                  coords[i + 1] * worldScale - originY
+                );
+              }
+              ctx2d.closePath();
+            }
+          };
+
+          const isShapeVisible = (
+            shape: CompiledGeoShape,
+            wrapX = 0
+          ): boolean => {
+            return !(
+              shape.maxNormX + wrapX < viewMinNormX ||
+              shape.minNormX + wrapX > viewMaxNormX ||
+              shape.maxNormY < viewMinNormY ||
+              shape.minNormY > viewMaxNormY
+            );
+          };
+
+          // 1. World Countries Silhouette (`#1B1F28` fill, `#384152` crisp outline)
+          const worldShapes = worldCompiledRef.current;
+          if (worldShapes.length > 0) {
+            bCtx.fillStyle = '#1B1F28';
+            bCtx.strokeStyle = '#384152';
+            bCtx.lineWidth = currentZoom >= 6 ? 1.0 : 0.75;
+            for (const wrapX of [0, -1, 1]) {
+              if (
+                wrapX !== 0 &&
+                1 + wrapX < viewMinNormX &&
+                wrapX > viewMaxNormX
+              ) {
+                continue;
+              }
+              bCtx.beginPath();
+              let anyWorld = false;
+              for (let i = 0; i < worldShapes.length; i++) {
+                const sh = worldShapes[i];
+                if (!isShapeVisible(sh, wrapX)) continue;
+                traceShapePath(bCtx, sh, wrapX);
+                anyWorld = true;
+              }
+              if (anyWorld) {
+                bCtx.fill();
+                bCtx.stroke();
+              }
+            }
+          }
+
+          const divShapes =
+            dissolvedDivisionsCompiledRef.current.length > 0
+              ? dissolvedDivisionsCompiledRef.current
+              : japanPrefCompiledRef.current;
+
+          // 2. Japan Map: Warning Choropleth vs Crisp Blank Map (`白地図`)
+          if (effectiveScene === 'warnings') {
+            const tier = getWarningMapZoomTier(currentZoom);
+            const focusedDivCode = activeWarningDivision?.divisionCode || null;
+            const muniMap = data.muniSeverityMap || {};
+
+            // Map each divisionCode to whether it has any warning/advisory for solid lake-hole underfill
+            const divHasActiveWarning = new Map<string, WarningSeverity>();
+            for (const w of data.warnings) {
+              if (w.divisionCode) {
+                divHasActiveWarning.set(w.divisionCode, w.severity);
+              }
+            }
+
+            // 2a. Solid 57-Division Underfill (guarantees interior lakes like 洞爺湖 / 支笏湖 / 十和田湖 have ZERO black holes!)
+            for (let i = 0; i < divShapes.length; i++) {
+              const sh = divShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              let baseColor = '#374151';
+              if (!focusedDivCode || sh.divisionCode === focusedDivCode) {
+                const divSev =
+                  divHasActiveWarning.get(sh.divisionCode) ||
+                  data.prefSeverityMap[sh.prefId] ||
+                  'normal';
+                // Use yellow `#FACC15` underfill for divisions with warnings/advisories so inland lakes blend seamlessly
+                baseColor =
+                  divSev === 'special' ||
+                  divSev === 'warning' ||
+                  divSev === 'advisory'
+                    ? '#FACC15'
+                    : '#374151';
+              }
+              bCtx.beginPath();
+              traceShapePath(bCtx, sh);
+              bCtx.fillStyle = baseColor;
+              bCtx.fill();
+              bCtx.strokeStyle = baseColor;
+              bCtx.lineWidth = 0.8;
+              bCtx.stroke();
+            }
+
+            // 2b. Warning Choropleth Fill
+            // In 'prefecture' (< 5.5) and 'division' (5.5..6.8) tiers (when not focused on a single division),
+            // draw topologically dissolved shapes (`dissolvedWarningFillCompiledRef`) so there are ZERO internal seams or black noise (`黒いノイズ`)!
+            let coloredMuniCount = 0;
+            let uncoloredOtherDivMuniCount = 0;
+
+            if (
+              tier !== 'municipality' &&
+              !focusedDivCode &&
+              dissolvedWarningFillCompiledRef.current.length > 0
+            ) {
+              const dissolvedShapes = dissolvedWarningFillCompiledRef.current;
+              for (let i = 0; i < dissolvedShapes.length; i++) {
+                const sh = dissolvedShapes[i];
+                if (sh.severity !== 'normal') coloredMuniCount++;
+                if (!isShapeVisible(sh)) continue;
+                const fillColor = severityToFillColor(sh.severity);
+                bCtx.beginPath();
+                traceShapePath(bCtx, sh);
+                bCtx.fillStyle = fillColor;
+                bCtx.fill();
+                bCtx.strokeStyle = fillColor;
+                bCtx.lineWidth = 0.75;
+                bCtx.stroke();
+              }
+            } else if (class20CompiledRef.current.length > 0) {
+              const c20Shapes = class20CompiledRef.current;
+              for (let i = 0; i < c20Shapes.length; i++) {
+                const sh = c20Shapes[i];
+                if (focusedDivCode && sh.divisionCode !== focusedDivCode) {
+                  if ((muniMap[sh.id] || 'normal') !== 'normal') {
+                    uncoloredOtherDivMuniCount++;
+                  }
+                  continue;
+                }
+                const effSev = getEffectiveMunicipalitySeverity(
+                  sh.id,
+                  sh.divisionCode,
+                  muniMap,
+                  focusedDivCode
+                );
+                if (effSev !== 'normal') {
+                  coloredMuniCount++;
+                }
+                if (!isShapeVisible(sh)) continue;
+                const fillColor = severityToFillColor(effSev);
+                const showInnerMuniBorder =
+                  tier === 'municipality' &&
+                  (!focusedDivCode || sh.divisionCode === focusedDivCode);
+
+                bCtx.beginPath();
+                traceShapePath(bCtx, sh);
+                bCtx.fillStyle = fillColor;
+                bCtx.fill();
+                bCtx.strokeStyle = showInnerMuniBorder ? '#1E293B' : fillColor;
+                bCtx.lineWidth = showInnerMuniBorder ? 0.85 : 0.65;
+                bCtx.stroke();
+              }
+            }
+
+            // 2c. Crisp Outer 57-Division / Prefecture Borders (`#0B0F19`)
+            bCtx.beginPath();
+            for (let i = 0; i < divShapes.length; i++) {
+              const sh = divShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              traceShapePath(bCtx, sh);
+            }
+            bCtx.strokeStyle = '#0B0F19';
+            bCtx.lineWidth =
+              tier === 'municipality'
+                ? 1.75
+                : tier === 'division'
+                  ? 1.45
+                  : 1.25;
+            bCtx.stroke();
+
+            // 2d. Vivid Blue Border Highlight around Focused Division (`その地方・都府県を青で囲む`)
+            if (focusedDivCode) {
+              bCtx.beginPath();
+              let foundFocused = false;
+              for (let i = 0; i < divShapes.length; i++) {
+                const sh = divShapes[i];
+                if (sh.divisionCode === focusedDivCode) {
+                  traceShapePath(bCtx, sh);
+                  foundFocused = true;
+                }
+              }
+              if (foundFocused) {
+                bCtx.strokeStyle = '#050810';
+                bCtx.lineWidth = 5.2;
+                bCtx.stroke();
+                bCtx.strokeStyle = '#38BDF8';
+                bCtx.lineWidth = 2.8;
+                bCtx.stroke();
+              }
+              baseCanvas.dataset.focusedDivisionCode = focusedDivCode;
+              baseCanvas.dataset.focusedDivisionBlueBorder = String(foundFocused);
+              baseCanvas.dataset.uncoloredOtherDivMuniCount = String(
+                uncoloredOtherDivMuniCount
+              );
+            } else {
+              delete baseCanvas.dataset.focusedDivisionCode;
+              delete baseCanvas.dataset.focusedDivisionBlueBorder;
+              delete baseCanvas.dataset.uncoloredOtherDivMuniCount;
+            }
+            baseCanvas.dataset.coloredWarningCount = String(coloredMuniCount);
+            baseCanvas.dataset.warningZoomTier = tier;
+          } else {
+            // Crisp Blank Map (`白地図`) for `radar`, `amedas`, `typhoon`, `forecast`, `earthquake`, `volcano`, `tsunami`
+            // Re-projected at native Retina/HiDPI pixel resolution on every frame so outlines NEVER blur when zooming in!
+            const isTsunami = effectiveScene === 'tsunami';
+            const fillCol = isTsunami ? '#28303D' : '#232731';
+            const borderCol = isTsunami ? '#151922' : '#4B5563';
+            const borderW = currentZoom >= 7 ? 1.3 : 1.0;
+
+            bCtx.beginPath();
+            for (let i = 0; i < divShapes.length; i++) {
+              const sh = divShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              traceShapePath(bCtx, sh);
+            }
+            bCtx.fillStyle = fillCol;
+            bCtx.fill();
+            bCtx.strokeStyle = borderCol;
+            bCtx.lineWidth = borderW;
+            bCtx.stroke();
+
+            delete baseCanvas.dataset.focusedDivisionCode;
+            delete baseCanvas.dataset.focusedDivisionBlueBorder;
+          }
+
+          baseCanvas.dataset.currentZoom = currentZoom.toFixed(2);
+          baseCanvas.dataset.dpr = String(dpr);
+          bCtx.restore();
+        }
+      }
+
+      // ==================== B. RENDER 60FPS HIGH-DPI INTERACTIVE OVERLAY (`interactiveCanvasRef`) ====================
+      if (
+        canvas.width !== Math.round(width * dpr) ||
+        canvas.height !== Math.round(height * dpr)
+      ) {
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+      }
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+
+      canvas.dataset.currentZoom = currentZoom.toFixed(2);
+      canvas.dataset.effectiveScene = effectiveScene;
+
+      // 1. AMeDAS Interactive High-Density Non-Overlapping Rendering
+      if (effectiveScene === 'amedas') {
+        const visibleStations = selectNonOverlappingAmedasStations(
+          data.amedas,
+          amedasMetric,
+          currentZoom,
+          projectToScreen
+        );
+
+        let drawnCount = 0;
+
+        if (amedasMetric === 'wind') {
+          const arrowSize = getAmedasWindArrowSizeForZoom(currentZoom);
+
+          for (const st of visibleStations) {
+            const pos = projectToScreen(st.lat, st.lon);
+            if (
+              pos.x < -arrowSize ||
+              pos.x > width + arrowSize ||
+              pos.y < -arrowSize ||
+              pos.y > height + arrowSize
+            ) {
+              continue;
+            }
+            drawnCount++;
+            const dotColor = getAmedasMetricColor(st, amedasMetric);
+            const rotRad =
+              (getWindDirectionRotationDeg(st.windDirection) * Math.PI) / 180;
+
+            ctx.save();
+            ctx.translate(pos.x, pos.y);
+            ctx.rotate(rotRad);
+            const s = arrowSize / 24;
+            ctx.scale(s, s);
+
+            ctx.beginPath();
+            ctx.moveTo(0, -11);
+            ctx.lineTo(8.5, 9);
+            ctx.lineTo(0, 4.2);
+            ctx.lineTo(-8.5, 9);
+            ctx.closePath();
+
+            ctx.fillStyle = dotColor;
+            ctx.fill();
+            ctx.lineWidth = Math.max(1.5, 1.8 / Math.max(0.55, s));
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = '#0B0D12';
+            ctx.stroke();
+            ctx.restore();
+          }
+        } else {
+          const radius = getAmedasPointRadiusForZoom(currentZoom);
+          const strokeWidth = currentZoom >= 6 ? 1.0 : 0.7;
+
+          for (const st of visibleStations) {
+            const pos = projectToScreen(st.lat, st.lon);
+            if (
+              pos.x < -radius * 2 ||
+              pos.x > width + radius * 2 ||
+              pos.y < -radius * 2 ||
+              pos.y > height + radius * 2
+            ) {
+              continue;
+            }
+            drawnCount++;
+            const dotColor = getAmedasMetricColor(st, amedasMetric);
+
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = dotColor;
+            ctx.fill();
+            ctx.lineWidth = strokeWidth;
+            ctx.strokeStyle = '#0B0D12';
+            ctx.stroke();
+          }
+        }
+
+        canvas.dataset.amedasMetric = amedasMetric;
+        canvas.dataset.renderedStationCount = String(drawnCount);
+        canvas.dataset.selectedStationCount = String(visibleStations.length);
+      } else {
+        delete canvas.dataset.renderedStationCount;
+        delete canvas.dataset.selectedStationCount;
+      }
+
+      // 2. Warnings 3-Stage Hierarchy Labels:
+      //    - tier === 'prefecture' (`zoom < 5.5`): 0 labels (clean nationwide map like JMA)
+      //    - tier === 'division' (`5.5 <= zoom < 6.8`): 地方・都府県名ラベル (`宗谷地方`, `上川・留萌地方`, `青森県`, etc.)
+      //    - tier === 'municipality' (`zoom >= 6.8`): 市区町村名ラベル (`稚内市`, `札幌市`, etc.)
+      if (effectiveScene === 'warnings') {
+        const tier = getWarningMapZoomTier(currentZoom);
+        const focusedDivCode = activeWarningDivision?.divisionCode || null;
+        canvas.dataset.warningZoomTier = tier;
+        const drawnLabels: string[] = [];
+
+        const minSafeX = 28;
+        const maxSafeX = width - 28;
+        const minSafeY = 92;
+        const maxSafeY = height - 42;
+
+        if (tier === 'division') {
+          ctx.font =
+            '800 12px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+
+          const placedBoxes: Array<{
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+          }> = [];
+
+          for (const div of Object.values(WARNING_DIVISIONS)) {
+            if (focusedDivCode && div.code !== focusedDivCode) continue;
+            const pos = projectToScreen(div.lat, div.lon);
+            const labelText = formatWarningDivisionMapLabel(div);
+            if (!labelText) continue;
+            const boxW = Math.max(44, labelText.length * 12 + 6);
+            const boxH = 18;
+
+            if (
+              pos.x - boxW / 2 < minSafeX ||
+              pos.x + boxW / 2 > maxSafeX ||
+              pos.y - boxH / 2 < minSafeY ||
+              pos.y + boxH / 2 > maxSafeY
+            ) {
+              continue;
+            }
+
+            let overlaps = false;
+            for (let i = 0; i < placedBoxes.length; i++) {
+              const b = placedBoxes[i];
+              if (
+                Math.abs(pos.x - b.x) < (boxW + b.w) / 2 + 2 &&
+                Math.abs(pos.y - b.y) < (boxH + b.h) / 2 + 2
+              ) {
+                overlaps = true;
+                break;
+              }
+            }
+            if (overlaps) continue;
+            placedBoxes.push({ x: pos.x, y: pos.y, w: boxW, h: boxH });
+            drawnLabels.push(labelText);
+
+            ctx.lineWidth = 3.4;
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = '#0B0D12';
+            ctx.strokeText(labelText, pos.x, pos.y);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText(labelText, pos.x, pos.y);
+          }
+        } else if (tier === 'municipality') {
+          ctx.font =
+            '800 11px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+
+          const muniList = data.municipalityWarnings || [];
+          const sortedMunis = [...muniList]
+            .filter(
+              (m) => !focusedDivCode || m.divisionCode === focusedDivCode
+            )
+            .map((m) => {
+              const exactCoord = m.muniCode
+                ? cachedClass20LabelPoints[m.muniCode]
+                : undefined;
+              return exactCoord
+                ? { ...m, lat: exactCoord[0], lon: exactCoord[1] }
+                : m;
+            })
+            .sort((a, b) => {
+              const rank: Record<WarningSeverity, number> = {
+                special: 3,
+                warning: 2,
+                advisory: 1,
+                normal: 0,
+              };
+              return rank[b.severity] - rank[a.severity];
+            });
+
+          const placedMuniBoxes: Array<{
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+          }> = [];
+
+          for (const muni of sortedMunis) {
+            const pos = projectToScreen(muni.lat, muni.lon);
+            const labelText = formatMunicipalityMapLabel(muni);
+            if (!labelText) continue;
+            const boxW = Math.max(38, labelText.length * 11 + 4);
+            const boxH = 16;
+
+            if (
+              pos.x - boxW / 2 < minSafeX ||
+              pos.x + boxW / 2 > maxSafeX ||
+              pos.y - boxH / 2 < minSafeY ||
+              pos.y + boxH / 2 > maxSafeY
+            ) {
+              continue;
+            }
+
+            let overlaps = false;
+            for (let i = 0; i < placedMuniBoxes.length; i++) {
+              const b = placedMuniBoxes[i];
+              if (
+                Math.abs(pos.x - b.x) < (boxW + b.w) / 2 + 3 &&
+                Math.abs(pos.y - b.y) < (boxH + b.h) / 2 + 3
+              ) {
+                overlaps = true;
+                break;
+              }
+            }
+            if (overlaps) continue;
+            placedMuniBoxes.push({ x: pos.x, y: pos.y, w: boxW, h: boxH });
+            drawnLabels.push(labelText);
+
+            ctx.lineWidth = 3.2;
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = '#0B0D12';
+            ctx.strokeText(labelText, pos.x, pos.y);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText(labelText, pos.x, pos.y);
+          }
+        }
+
+        canvas.dataset.renderedWarningLabelCount = String(drawnLabels.length);
+        canvas.dataset.renderedWarningLabelsSample = drawnLabels
+          .slice(0, 10)
+          .join(',');
+      } else {
+        delete canvas.dataset.warningZoomTier;
+        delete canvas.dataset.renderedWarningLabelCount;
+        delete canvas.dataset.renderedWarningLabelsSample;
+      }
+
+      ctx.restore();
+    };
+
+    renderInteractiveCanvasRef.current();
+  }, [
+    effectiveScene,
+    data.amedas,
+    data.warnings,
+    data.municipalityWarnings,
+    data.muniSeverityMap,
+    data.prefSeverityMap,
+    amedasMetric,
+    warningZoomTier,
+    activeWarningDivision?.divisionCode,
+    compiledVersion,
+  ]);
+
   // Real-time animation clock for EEW wave front propagation (P-wave & S-wave expansion)
   useEffect(() => {
     if (!activeEew || !isEewStillActive(activeEew)) return;
@@ -370,7 +1211,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     return () => clearInterval(timer);
   }, [activeEew]);
 
-  // Load World Countries GeoJSON, 47-prefecture Japan GeoJSON, JMA Municipality (`class20s`) + Region (`class10s`), and Tsunami coastline GeoJSON
+  // Load World Countries GeoJSON, 47-prefecture Japan GeoJSON, JMA Municipality (`class20s`) + Dissolved 57 Divisions (`class10s`), and Tsunami coastline GeoJSON
   useEffect(() => {
     let cancelled = false;
     fetch(`${import.meta.env.BASE_URL}world-countries.geojson`)
@@ -392,10 +1233,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       .catch(() => {});
 
     loadJmaMunicipalityGeoJson()
-      .then(({ class20, class10 }) => {
+      .then(({ class20, dissolvedDivisions }) => {
         if (!cancelled) {
           if (class20) setClass20GeoJsonData(class20);
-          if (class10) setClass10GeoJsonData(class10);
+          if (dissolvedDivisions) {
+            setDissolvedDivisionsGeoJson(dissolvedDivisions);
+          }
         }
       })
       .catch(() => {});
@@ -454,8 +1297,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
 
   // AMeDAS Camera Choreography:
   // 全国表示 -> 北海道 -> 東北 -> 関東中部近畿 -> 中国四国九州 -> 沖縄 -> もう一度全国表示
-  // Smoothly moves (`flyTo`) to each regional stop and pauses briefly (`いったん止まる`) at each stop,
-  // then advances to the next AMeDAS metric (`temp` -> `precip` -> `wind` -> `snow`) or next scene!
+  // Smoothly moves (`flyTo`) to each regional stop (including smooth transition when entering AMeDAS from another zoomed-in tab!)
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || effectiveScene !== 'amedas') return;
@@ -469,16 +1311,27 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     let cancelled = false;
     const timers: Array<ReturnType<typeof setTimeout>> = [];
 
-    // 1. Start at Nationwide view (`全国表示`: `[36.8, 137.5], zoom: 5`)
+    // 1. Smoothly transition (`flyTo`) to Nationwide view (`全国表示`: `[36.8, 137.5], zoom: 5`) if not already there
     map.stop();
     const initialStop = AMEDAS_PATROL_STOPS[0];
-    map.setView(initialStop.center, initialStop.zoom, {
-      animate: false,
-    });
+    const curCenter = map.getCenter();
+    const curZoom = map.getZoom();
+    const needsInitialFly =
+      Math.abs(curCenter.lat - initialStop.center[0]) > 0.02 ||
+      Math.abs(curCenter.lng - initialStop.center[1]) > 0.02 ||
+      Math.abs(curZoom - initialStop.zoom) > 0.02;
+
+    if (needsInitialFly) {
+      map.flyTo(initialStop.center, initialStop.zoom, {
+        animate: true,
+        duration: 1.5,
+        easeLinearity: 0.1,
+      });
+    }
 
     // Step through each stop in AMEDAS_PATROL_STOPS[1..] (`北海道 -> 東北 -> 関東中部近畿 -> 中国四国九州 -> 沖縄 -> 全国表示`)
     // Hold ~5 seconds (5000ms) at each regional stop so viewers can clearly inspect every region!
-    let cumulativeDelayMs = 3500; // Initial hold on 全国表示
+    let cumulativeDelayMs = (needsInitialFly ? 1500 : 0) + 3500;
 
     for (let i = 1; i < AMEDAS_PATROL_STOPS.length; i++) {
       const stop = AMEDAS_PATROL_STOPS[i];
@@ -519,7 +1372,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     interruptKind,
   ]);
 
-  // Initialize Leaflet Map once with large-padding SVG/Canvas renderers and explicit z-index panes
+  // Initialize Leaflet Map once with compact SVG overlay renderer and explicit z-index panes
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
@@ -536,24 +1389,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       worldCopyJump: true,
     });
 
-    // 1. Create dedicated panes in strict bottom-to-top z-index order:
-    //    worldPane (210) -> japanPane (350) -> muniPane (360) -> muniBorderPane (365) -> radarPane (450) -> vectorOverlayPane (500) -> markerPane (600)
-    const worldPane = map.createPane('worldPane');
-    worldPane.style.zIndex = '210';
-    worldPane.style.pointerEvents = 'none';
-
-    const japanPane = map.createPane('japanPane');
-    japanPane.style.zIndex = '350';
-    japanPane.style.pointerEvents = 'none';
-
-    const muniPane = map.createPane('muniPane');
-    muniPane.style.zIndex = '360';
-    muniPane.style.pointerEvents = 'none';
-
-    const muniBorderPane = map.createPane('muniBorderPane');
-    muniBorderPane.style.zIndex = '365';
-    muniBorderPane.style.pointerEvents = 'none';
-
     const radarPane = map.createPane('radarPane');
     radarPane.style.zIndex = '450';
     radarPane.style.pointerEvents = 'none';
@@ -561,32 +1396,70 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     const vectorOverlayPane = map.createPane('vectorOverlayPane');
     vectorOverlayPane.style.zIndex = '500';
 
-    // 2. Create high-padding SVG/Canvas renderers
-    worldRendererRef.current = L.svg({
-      padding: 3.5,
-      pane: 'worldPane',
-    }).addTo(map);
-    japanRendererRef.current = L.svg({
-      padding: 3.5,
-      pane: 'japanPane',
-    }).addTo(map);
-    muniCanvasRendererRef.current = L.canvas({
-      padding: 0.6,
-      pane: 'muniPane',
-    }).addTo(map);
-    muniBorderRendererRef.current = L.canvas({
-      padding: 0.6,
-      pane: 'muniBorderPane',
-    }).addTo(map);
+    // Use compact padding (0.4) on overlay SVG renderer so it never exceeds Chromium's GPU texture limit
     overlayRendererRef.current = L.svg({
-      padding: 3.5,
+      padding: 0.4,
       pane: 'vectorOverlayPane',
     }).addTo(map);
 
     const overlayGroup = L.layerGroup().addTo(map);
     overlayGroupRef.current = overlayGroup;
 
+    let zoomAnimRaf = 0;
+
+    const handleFrameUpdate = () => {
+      const z = map.getZoom();
+      const nextTier = getWarningMapZoomTier(z);
+      if (nextTier !== warningZoomTierRef.current) {
+        warningZoomTierRef.current = nextTier;
+        setWarningZoomTier(nextTier);
+      }
+      renderInteractiveCanvasRef.current();
+    };
+
+    const handleZoomAnim = (e: L.ZoomAnimEvent) => {
+      cancelAnimationFrame(zoomAnimRaf);
+      if ((e as any).noUpdate) {
+        return;
+      }
+      const startCenter = map.getCenter();
+      const startZoom = map.getZoom();
+      const targetCenter = e.center;
+      const targetZoom = e.zoom;
+      const startTime = performance.now();
+      const durationMs = 250;
+
+      const step = (now: number) => {
+        const rawT = Math.min(1, (now - startTime) / durationMs);
+        const easeT = 1 - Math.pow(1 - rawT, 3);
+        const curZoom = startZoom + (targetZoom - startZoom) * easeT;
+        const curLat =
+          startCenter.lat + (targetCenter.lat - startCenter.lat) * easeT;
+        const curLng =
+          startCenter.lng + (targetCenter.lng - startCenter.lng) * easeT;
+
+        const nextTier = getWarningMapZoomTier(curZoom);
+        if (nextTier !== warningZoomTierRef.current) {
+          warningZoomTierRef.current = nextTier;
+          setWarningZoomTier(nextTier);
+        }
+        renderInteractiveCanvasRef.current(
+          { lat: curLat, lng: curLng },
+          curZoom
+        );
+
+        if (rawT < 1) {
+          zoomAnimRaf = requestAnimationFrame(step);
+        }
+      };
+
+      zoomAnimRaf = requestAnimationFrame(step);
+    };
+
     const emitViewport = () => {
+      cancelAnimationFrame(zoomAnimRaf);
+      (overlayRendererRef.current as any)?._reset?.();
+      handleFrameUpdate();
       setMapZoomVersion((v) => v + 1);
       if (onViewportChangeRef.current) {
         const c = map.getCenter();
@@ -605,6 +1478,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       }
     };
 
+    map.on('move', handleFrameUpdate);
+    map.on('zoom', handleFrameUpdate);
+    map.on('zoomanim', handleZoomAnim);
+    map.on('viewreset', handleFrameUpdate);
+    map.on('resize', handleFrameUpdate);
     map.on('zoomend', emitViewport);
     map.on('moveend', emitViewport);
 
@@ -612,167 +1490,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     emitViewport();
 
     return () => {
+      cancelAnimationFrame(zoomAnimRaf);
       map.remove();
       mapInstanceRef.current = null;
     };
   }, []);
 
-  // Render World Countries Vector Layer (seamless global map with zero tile-load delay)
-  useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || !worldGeoJsonData || !worldRendererRef.current) return;
-
-    if (worldGeoJsonLayerRef.current) {
-      map.removeLayer(worldGeoJsonLayerRef.current);
-      worldGeoJsonLayerRef.current = null;
-    }
-
-    const worldLayer = L.geoJSON(worldGeoJsonData, {
-      pane: 'worldPane',
-      style: () => ({
-        pane: 'worldPane',
-        renderer: worldRendererRef.current ?? undefined,
-        fillColor: '#1B1F28',
-        fillOpacity: 0.9,
-        color: '#384152',
-        weight: 0.7,
-      }),
-      interactive: false,
-    }).addTo(map);
-
-    worldGeoJsonLayerRef.current = worldLayer;
-  }, [worldGeoJsonData]);
-
-  // Render / Update 47-prefecture Japan GeoJSON Base Layer
-  useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || !geoJsonData || !japanRendererRef.current) return;
-
-    if (geoJsonLayerRef.current) {
-      map.removeLayer(geoJsonLayerRef.current);
-      geoJsonLayerRef.current = null;
-    }
-
-    const hasMuniPolygons =
-      (effectiveScene === 'warnings' || effectiveScene === 'tsunami') &&
-      Boolean(class20GeoJsonData);
-
-    const layer = L.geoJSON(geoJsonData, {
-      pane: 'japanPane',
-      style: (feature) => {
-        const prefId = Number(feature?.properties?.id || 0);
-        if (hasMuniPolygons) {
-          return {
-            fillColor: '#374151',
-            fillOpacity: 0.92,
-            color: '#1E293B',
-            weight: 0.8,
-            pane: 'japanPane',
-            renderer: japanRendererRef.current ?? undefined,
-          };
-        }
-        return {
-          ...getPrefecturePolygonStyle(
-            prefId,
-            effectiveScene,
-            data.prefSeverityMap
-          ),
-          pane: 'japanPane',
-          renderer: japanRendererRef.current ?? undefined,
-        };
-      },
-      interactive: false,
-    }).addTo(map);
-
-    geoJsonLayerRef.current = layer;
-  }, [geoJsonData, class20GeoJsonData, effectiveScene, data.prefSeverityMap]);
-
-  // Render Municipality-level (`市区町村単位: class20s`) Choropleth Layer + Crisp Municipality & Division Boundaries
-  // in `warnings` scene (both in Nationwide view and Zoomed-in view!)
-  useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || !muniCanvasRendererRef.current || !muniBorderRendererRef.current)
-      return;
-
-    if (muniGeoJsonLayerRef.current) {
-      map.removeLayer(muniGeoJsonLayerRef.current);
-      muniGeoJsonLayerRef.current = null;
-    }
-    if (muniBorderLayerRef.current) {
-      map.removeLayer(muniBorderLayerRef.current);
-      muniBorderLayerRef.current = null;
-    }
-
-    if (
-      (effectiveScene !== 'warnings' && effectiveScene !== 'tsunami') ||
-      !class20GeoJsonData
-    )
-      return;
-
-    const muniMap = data.muniSeverityMap || {};
-
-    const muniLayer = L.geoJSON(class20GeoJsonData, {
-      pane: 'muniPane',
-      style: (feature) => {
-        if (effectiveScene === 'tsunami') {
-          return {
-            pane: 'muniPane',
-            renderer: muniCanvasRendererRef.current ?? undefined,
-            fillColor: '#28303D',
-            fillOpacity: 0.98,
-            color: '#151922',
-            weight: 0.65,
-            opacity: 0.9,
-          };
-        }
-        const code = String(feature?.properties?.code || '');
-        const sev: WarningSeverity = muniMap[code] || 'normal';
-        const fillColor =
-          sev === 'special'
-            ? '#9333EA'
-            : sev === 'warning'
-              ? '#EF4444'
-              : sev === 'advisory'
-                ? '#FACC15'
-                : '#374151';
-        return {
-          pane: 'muniPane',
-          renderer: muniCanvasRendererRef.current ?? undefined,
-          fillColor,
-          fillOpacity: 0.95,
-          // Crisp municipality boundary lines (`市区町村の境目には境界線がわかるようにする`)
-          color: '#1E293B',
-          weight: 0.65,
-          opacity: 0.95,
-        };
-      },
-      interactive: false,
-    }).addTo(map);
-    muniGeoJsonLayerRef.current = muniLayer;
-
-    const borderSource = class10GeoJsonData || geoJsonData;
-    if (borderSource) {
-      const borderLayer = L.geoJSON(borderSource, {
-        pane: 'muniBorderPane',
-        style: () => ({
-          pane: 'muniBorderPane',
-          renderer: muniBorderRendererRef.current ?? undefined,
-          fillOpacity: 0,
-          color: '#0F172A',
-          weight: 1.35,
-          opacity: 0.95,
-        }),
-        interactive: false,
-      }).addTo(map);
-      muniBorderLayerRef.current = borderLayer;
-    }
-  }, [
-    effectiveScene,
-    class20GeoJsonData,
-    class10GeoJsonData,
-    geoJsonData,
-    data.muniSeverityMap,
-  ]);
 
   // Render JMA Tsunami Coastline Vector Layer (`tsunami.json`) in `tsunami` scene
   // Rendered with dual-pass (underlay dark casing + bold colored warning stroke)
@@ -791,7 +1514,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
 
     if (effectiveScene !== 'tsunami' || !tsunamiGeoJsonData) return;
 
-    const areaForecasts = activeTsunamiForecast?.areas || [];
+    const areaForecasts =
+      activeTsunamiForecast && !activeTsunamiForecast.cancelled
+        ? activeTsunamiForecast.areas
+        : [];
     const areaMapByCode: Record<string, TsunamiForecastArea> = {};
     const areaMapByName: Record<string, TsunamiForecastArea> = {};
     for (const a of areaForecasts) {
@@ -973,22 +1699,28 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       };
     }
     if (effectiveScene === 'tsunami') {
+      const hasActiveTsunami = Boolean(
+        activeTsunamiForecast &&
+          !activeTsunamiForecast.cancelled &&
+          activeTsunamiForecast.areas.length > 0
+      );
+      if (!hasActiveTsunami) {
+        return {
+          center: [36.8, 137.5],
+          zoom: 5.2,
+        };
+      }
+
       const hypoLat =
         typeof activeTsunamiForecast?.lat === 'number' &&
         !Number.isNaN(activeTsunamiForecast.lat)
           ? activeTsunamiForecast.lat
-          : typeof selectedEarthquake?.lat === 'number' &&
-              !Number.isNaN(selectedEarthquake.lat)
-            ? selectedEarthquake.lat
-            : null;
+          : null;
       const hypoLon =
         typeof activeTsunamiForecast?.lon === 'number' &&
         !Number.isNaN(activeTsunamiForecast.lon)
           ? activeTsunamiForecast.lon
-          : typeof selectedEarthquake?.lon === 'number' &&
-              !Number.isNaN(selectedEarthquake.lon)
-            ? selectedEarthquake.lon
-            : null;
+          : null;
 
       const areaForecasts = activeTsunamiForecast?.areas || [];
       const activeAreaCodes = new Set<string>();
@@ -1081,7 +1813,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       }
 
       return {
-        center: [37.2, 137.5],
+        center: [36.8, 137.5],
         zoom: 5.2,
       };
     }
@@ -1175,7 +1907,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     map.stop();
     map.flyTo(targetCenter, targetZoom, {
       animate: true,
-      duration: 1.8,
+      duration: 1.35,
       easeLinearity: 0.08,
     });
   }, [
@@ -1246,6 +1978,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   }, [effectiveScene, radarFrameIndex, radarPass, data.nowcastTimes]);
 
   // Render scene-specific markers & Typhoon Track / Forecast Cone in `vectorOverlayPane` (padding: 3.5)
+  // Note: `amedas` and `warnings` labels are rendered on the 60fps `interactiveCanvasRef` so they never blur or snap during zoom!
   useEffect(() => {
     const map = mapInstanceRef.current;
     const group = overlayGroupRef.current;
@@ -1271,89 +2004,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             fillColor: '#FACC15',
             fillOpacity: 0.95,
             weight: 1.5,
-            interactive: false,
-          }).addTo(group);
-        }
-      }
-    } else if (effectiveScene === 'warnings') {
-      // Choropleth polygons color the map directly.
-      // When zoomed in (`currentZoom >= 6`), render municipality-level (`市区町村名のみ`) labels on the map!
-      const currentZoom = map.getZoom();
-      const muniList = data.municipalityWarnings || [];
-      if (currentZoom >= 6 && muniList.length > 0) {
-        const bounds = map.getBounds();
-        const visibleMunis = muniList
-          .map((m) => {
-            const exactCoord = m.muniCode
-              ? cachedClass20LabelPoints[m.muniCode]
-              : undefined;
-            return exactCoord
-              ? { ...m, lat: exactCoord[0], lon: exactCoord[1] }
-              : m;
-          })
-          .filter(
-            (m) =>
-              m.lat >= bounds.getSouth() - 0.8 &&
-              m.lat <= bounds.getNorth() + 0.8 &&
-              m.lon >= bounds.getWest() - 0.8 &&
-              m.lon <= bounds.getEast() + 0.8
-          )
-          .sort((a, b) => {
-            const rank: Record<WarningSeverity, number> = {
-              special: 3,
-              warning: 2,
-              advisory: 1,
-              normal: 0,
-            };
-            return rank[b.severity] - rank[a.severity];
-          });
-
-        const placedMuniBoxes: Array<{
-          x: number;
-          y: number;
-          w: number;
-          h: number;
-        }> = [];
-        for (const muni of visibleMunis) {
-          const ptScreen = map.project([muni.lat, muni.lon], currentZoom);
-          // Strictly show ONLY the municipality name in white text without a surrounding rectangular box
-          // (`地名表示は四角に囲まず文字だけを白文字で表示するように`)
-          const labelText = formatMunicipalityMapLabel(muni);
-          if (!labelText) continue;
-          const boxW = Math.max(38, labelText.length * 11 + 4);
-          const boxH = 16;
-
-          let overlaps = false;
-          for (let i = 0; i < placedMuniBoxes.length; i++) {
-            const b = placedMuniBoxes[i];
-            if (
-              Math.abs(ptScreen.x - b.x) < (boxW + b.w) / 2 + 3 &&
-              Math.abs(ptScreen.y - b.y) < (boxH + b.h) / 2 + 3
-            ) {
-              overlaps = true;
-              break;
-            }
-          }
-          if (overlaps) continue;
-          placedMuniBoxes.push({
-            x: ptScreen.x,
-            y: ptScreen.y,
-            w: boxW,
-            h: boxH,
-          });
-
-          const muniIcon = L.divIcon({
-            className: 'custom-muni-warning-badge',
-            html: `
-              <div data-testid="muni-warning-map-badge" style="display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;font-family:'Noto Sans JP','Hiragino Kaku Gothic ProN',sans-serif;pointer-events:none;">
-                <span style="color:#FFFFFF;font-size:11px;font-weight:800;letter-spacing:0.02em;text-shadow:-1.5px -1.5px 0 #0B0D12,1.5px -1.5px 0 #0B0D12,-1.5px 1.5px 0 #0B0D12,1.5px 1.5px 0 #0B0D12,0 0 4px rgba(0,0,0,0.95);">${labelText}</span>
-              </div>
-            `,
-            iconSize: [boxW, boxH],
-            iconAnchor: [Math.round(boxW / 2), Math.round(boxH / 2)],
-          });
-          L.marker([muni.lat, muni.lon], {
-            icon: muniIcon,
             interactive: false,
           }).addTo(group);
         }
@@ -1703,56 +2353,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
           }
         });
       }
-    } else if (effectiveScene === 'amedas') {
-      const currentZoom = map.getZoom();
-      const pointRadius = getAmedasPointRadiusForZoom(currentZoom);
-
-      // Display ALL observing AMeDAS stations on the map (`アメダスは地図上に今まで通り、全地点の点を表示する。ランキングとは異なる。`)
-      // ('precip' and 'snow' hide stations with 0mm / 0cm)
-      const stationsToRender = data.amedas.filter((st) => {
-        if (amedasMetric === 'precip') return st.precip1h > 0;
-        if (amedasMetric === 'snow') return (st.snowCm ?? 0) > 0;
-        if (amedasMetric === 'wind') return st.windSpeed > 0;
-        return st.hasTemp !== false && !Number.isNaN(st.temp);
-      });
-
-      for (const st of stationsToRender) {
-        const dotColor = getAmedasMetricColor(st, amedasMetric);
-
-        if (amedasMetric === 'wind') {
-          const rotDeg = getWindDirectionRotationDeg(st.windDirection);
-          const arrowPx = getAmedasWindArrowSizeForZoom(currentZoom);
-          const halfPx = Math.round(arrowPx / 2);
-          const windArrowIcon = L.divIcon({
-            className: 'custom-amedas-wind-arrow',
-            html: `
-              <div data-testid="amedas-wind-arrow" title="${st.stationName}: ${st.windDirection} ${st.windSpeed.toFixed(1)}m/s" style="display:flex;align-items:center;justify-content:center;width:${arrowPx}px;height:${arrowPx}px;transform:rotate(${rotDeg}deg);pointer-events:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.85));">
-                <svg width="${arrowPx}" height="${arrowPx}" viewBox="0 0 24 24" fill="none">
-                  <path d="M12 1L21 21L12 16.2L3 21L12 1Z" fill="${dotColor}" stroke="#0B0D12" stroke-width="1.8" stroke-linejoin="round"/>
-                </svg>
-              </div>
-            `,
-            iconSize: [arrowPx, arrowPx],
-            iconAnchor: [halfPx, halfPx],
-          });
-          L.marker([st.lat, st.lon], {
-            icon: windArrowIcon,
-            interactive: false,
-          }).addTo(group);
-        } else {
-          L.circleMarker([st.lat, st.lon], {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            className: 'amedas-station-circle',
-            radius: pointRadius,
-            color: '#0B0D12',
-            fillColor: dotColor,
-            fillOpacity: 0.96,
-            weight: currentZoom >= 6 ? 1.0 : 0.6,
-            interactive: false,
-          }).addTo(group);
-        }
-      }
     } else if (effectiveScene === 'forecast') {
       // Dedicated ocean-side callout positions + leader lines so no two city labels ever overlap
       const FORECAST_LABEL_COORDS: Record<string, [number, number]> = {
@@ -2076,22 +2676,24 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     }
 
     if (effectiveScene === 'tsunami') {
+      const hasActiveTsunami = Boolean(
+        activeTsunamiForecast &&
+          !activeTsunamiForecast.cancelled &&
+          activeTsunamiForecast.areas.length > 0
+      );
+
       const hypoLat =
+        hasActiveTsunami &&
         typeof activeTsunamiForecast?.lat === 'number' &&
         !Number.isNaN(activeTsunamiForecast.lat)
           ? activeTsunamiForecast.lat
-          : typeof selectedEarthquake?.lat === 'number' &&
-              !Number.isNaN(selectedEarthquake.lat)
-            ? selectedEarthquake.lat
-            : null;
+          : null;
       const hypoLon =
+        hasActiveTsunami &&
         typeof activeTsunamiForecast?.lon === 'number' &&
         !Number.isNaN(activeTsunamiForecast.lon)
           ? activeTsunamiForecast.lon
-          : typeof selectedEarthquake?.lon === 'number' &&
-              !Number.isNaN(selectedEarthquake.lon)
-            ? selectedEarthquake.lon
-            : null;
+          : null;
 
       if (hypoLat !== null && hypoLon !== null) {
         const epiIcon = L.divIcon({
@@ -2137,11 +2739,25 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
 
   return (
     <div className="relative w-full h-full bg-[#0E1014] overflow-hidden select-none">
-      {/* Main Full-Screen Leaflet Map Canvas */}
+      {/* Crisp 60fps High-DPI Base Map & Warning Choropleth Canvas (Never Blurs During or After Zoom) */}
+      <canvas
+        ref={baseMapCanvasRef}
+        data-testid="crisp-basemap-canvas"
+        className="absolute inset-0 w-full h-full pointer-events-none z-[5]"
+      />
+
+      {/* Main Full-Screen Leaflet Map Container (Radar Tiles & Vector Overlays) */}
       <div
         ref={mapContainerRef}
         data-testid="monitor-map-canvas"
-        className="w-full h-full z-0 cursor-crosshair"
+        className="w-full h-full z-[10] cursor-crosshair"
+      />
+
+      {/* Interactive 60fps High-DPI Overlay Canvas for Smooth AMeDAS & Warning Hierarchy Labels */}
+      <canvas
+        ref={interactiveCanvasRef}
+        data-testid="interactive-map-overlay-canvas"
+        className="absolute inset-0 w-full h-full pointer-events-none z-[390]"
       />
 
       {/* Subtle Map Zoom & World/Japan View Controls (Bottom-Left of Map Canvas) */}
@@ -2153,8 +2769,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             if (!map) return;
             map.flyTo(map.getCenter(), Math.min(12, map.getZoom() + 1), {
               animate: true,
-              duration: 1.0,
-              easeLinearity: 0.1,
+              duration: 0.75,
+              easeLinearity: 0.15,
             });
           }}
           aria-label="地図を拡大"
@@ -2169,8 +2785,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             if (!map) return;
             map.flyTo(map.getCenter(), Math.max(2, map.getZoom() - 1), {
               animate: true,
-              duration: 1.0,
-              easeLinearity: 0.1,
+              duration: 0.75,
+              easeLinearity: 0.15,
             });
           }}
           aria-label="地図を縮小"
@@ -2185,8 +2801,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             if (!map) return;
             map.flyTo([36.8, 137.5], 5, {
               animate: true,
-              duration: 1.5,
-              easeLinearity: 0.08,
+              duration: 1.3,
+              easeLinearity: 0.1,
             });
           }}
           aria-label="日本全体を表示"
@@ -2202,8 +2818,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             if (!map) return;
             map.flyTo([30.0, 140.0], 3, {
               animate: true,
-              duration: 1.6,
-              easeLinearity: 0.08,
+              duration: 1.4,
+              easeLinearity: 0.1,
             });
           }}
           aria-label="世界全体を表示"
@@ -2288,39 +2904,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             </button>
           ))}
           <span className="text-[10px] font-mono text-neutral-400 ml-1">
-            (拡大時は全観測地点を表示)
+            (ズーム連動・重なり防止高密度表示)
           </span>
-        </div>
-      )}
-
-      {/* JMA-style Tsunami Map Legend (Matches JMA official broadcast) */}
-      {effectiveScene === 'tsunami' && (
-        <div
-          data-testid="tsunami-map-legend"
-          className="absolute bottom-3 right-3 z-[400] bg-[#111318]/94 border border-neutral-700/80 px-3 py-2 text-xs space-y-1 font-mono shadow-xl pointer-events-none select-none"
-        >
-          <div className="flex items-center gap-2">
-            <span className="text-red-500 font-bold text-sm leading-none">✕</span>
-            <span className="text-neutral-200">震央</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-3.5 h-1.5 bg-[#C026D3] rounded-xs" />
-            <span className="text-neutral-200">大津波警報</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-3.5 h-1.5 bg-[#EF4444] rounded-xs" />
-            <span className="text-neutral-200">津波警報</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-3.5 h-1.5 bg-[#FACC15] rounded-xs" />
-            <span className="text-neutral-200">津波注意報</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-3.5 h-1.5 bg-[#38BDF8] rounded-xs" />
-            <span className="text-neutral-200">津波予報（若干の海面変動）</span>
-          </div>
         </div>
       )}
     </div>
   );
 };
+

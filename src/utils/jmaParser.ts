@@ -1667,32 +1667,316 @@ export function getAmedasMetricColor(
 
 /**
  * Returns the visual radius (px) for AMeDAS station markers based on map zoom level.
- * Zooming in progressively enlarges the markers so stations are easy to see.
+ * Uses continuous linear interpolation across fractional zoom levels so markers scale
+ * smoothly during camera `flyTo` transitions without snapping at `zoomend`.
  */
 export function getAmedasPointRadiusForZoom(zoom: number): number {
-  if (zoom <= 3) return 2.5;
-  if (zoom <= 4) return 3.0;
-  if (zoom <= 5) return 3.6;
-  if (zoom <= 6) return 4.8;
-  if (zoom <= 7) return 6.2;
-  if (zoom <= 8) return 8.0;
-  if (zoom <= 9) return 10.0;
-  if (zoom <= 10) return 12.0;
-  return 14.0;
+  const stops: Array<[number, number]> = [
+    [3, 2.2],
+    [4, 2.7],
+    [5, 3.3],
+    [6, 4.5],
+    [7, 5.9],
+    [8, 7.5],
+    [9, 9.2],
+    [10, 11.0],
+    [12, 13.5],
+  ];
+  if (zoom <= stops[0][0]) return stops[0][1];
+  const last = stops[stops.length - 1];
+  if (zoom >= last[0]) return last[1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [z0, r0] = stops[i];
+    const [z1, r1] = stops[i + 1];
+    if (zoom >= z0 && zoom <= z1) {
+      const t = (zoom - z0) / (z1 - z0);
+      return Number((r0 + (r1 - r0) * t).toFixed(2));
+    }
+  }
+  return 3.3;
 }
 
 /**
  * Returns the pixel size (`width` & `height`) for AMeDAS wind direction arrows based on map zoom level.
- * Designed so wind direction arrows are prominently visible even at nationwide/regional zoom (`zoom = 5..6`).
+ * Continuously interpolated across fractional zoom levels and sized so nationwide overview (`zoom = 5`)
+ * displays many non-overlapping directional arrows without clutter or lag.
  */
 export function getAmedasWindArrowSizeForZoom(zoom: number): number {
-  if (zoom <= 3) return 15;
-  if (zoom <= 4) return 18;
-  if (zoom <= 5) return 22;
-  if (zoom <= 6) return 26;
-  if (zoom <= 7) return 30;
-  if (zoom <= 8) return 34;
-  return 38;
+  const stops: Array<[number, number]> = [
+    [3, 8.0],
+    [4, 9.5],
+    [5, 11.5],
+    [6, 14.5],
+    [7, 18.0],
+    [8, 21.0],
+    [9, 24.0],
+    [11, 28.0],
+  ];
+  if (zoom <= stops[0][0]) return stops[0][1];
+  const last = stops[stops.length - 1];
+  if (zoom >= last[0]) return last[1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [z0, s0] = stops[i];
+    const [z1, s1] = stops[i + 1];
+    if (zoom >= z0 && zoom <= z1) {
+      const t = (zoom - z0) / (z1 - z0);
+      return Number((s0 + (s1 - s0) * t).toFixed(2));
+    }
+  }
+  return 11.5;
+}
+
+/**
+ * Selects non-overlapping AMeDAS stations in screen space for any metric (`temp`, `precip`, `wind`, `snow`)
+ * and fractional zoom level.
+ * Guarantees that in nationwide overview (`zoom = 5`), neither circles nor wind arrows overlap each other,
+ * while preserving a dense nationwide distribution and smoothly revealing more stations as zoom increases.
+ */
+export function selectNonOverlappingAmedasStations(
+  stations: AmedasStationData[],
+  metric: AmedasMetric,
+  zoom: number,
+  projectFn: (lat: number, lon: number) => { x: number; y: number }
+): AmedasStationData[] {
+  const candidates = stations.filter((st) => {
+    if (metric === 'precip') return st.precip1h > 0;
+    if (metric === 'snow') return (st.snowCm ?? 0) > 0;
+    if (metric === 'wind') return st.windSpeed > 0;
+    return st.hasTemp !== false && !Number.isNaN(st.temp);
+  });
+
+  // Deterministic ordering so the selected subset remains stable across continuous zoom frames:
+  // For wind/precip/snow, prioritize higher observed values first so significant weather is always visible.
+  const ordered = [...candidates].sort((a, b) => {
+    if (metric === 'wind') {
+      if (b.windSpeed !== a.windSpeed) return b.windSpeed - a.windSpeed;
+    } else if (metric === 'precip') {
+      if (b.precip1h !== a.precip1h) return b.precip1h - a.precip1h;
+    } else if (metric === 'snow') {
+      const snowA = a.snowCm ?? 0;
+      const snowB = b.snowCm ?? 0;
+      if (snowB !== snowA) return snowB - snowA;
+    }
+    return a.id.localeCompare(b.id);
+  });
+
+  if (zoom >= 8.2) {
+    return ordered;
+  }
+
+  if (metric === 'wind') {
+    const arrowSize = getAmedasWindArrowSizeForZoom(zoom);
+    // At nationwide zoom (zoom <= 5.5), keep arrows cleanly separated (minDist = arrowSize * 0.75);
+    // smoothly relax spacing between zoom 5.5 and 8.2 so regional stations progressively appear.
+    const t = Math.max(0, Math.min(1, (zoom - 5.5) / (8.2 - 5.5)));
+    const spacingFactor = 0.75 - t * 0.23;
+    const minDistPx = arrowSize * spacingFactor;
+    return filterNonOverlappingPoints(ordered, projectFn, minDistPx);
+  }
+
+  const radius = getAmedasPointRadiusForZoom(zoom);
+  // Circle diameter is `radius * 2`. Keep center-to-center distance >= diameter * 0.96 at overview zoom
+  // so circles never pile on top of each other while showing high station density across Japan.
+  const t = Math.max(0, Math.min(1, (zoom - 5.5) / (8.2 - 5.5)));
+  const minDistPx = radius * (1.92 - t * 0.55);
+  return filterNonOverlappingPoints(ordered, projectFn, minDistPx);
+}
+
+export type WarningMapZoomTier = 'prefecture' | 'division' | 'municipality';
+
+/**
+ * Determines the JMA warning map display tier from the current zoom level:
+ * - `'prefecture'` (`zoom < 5.5`): 全国表示 — 都道府県単位の境界表示（市区町村境界・ラベルなし）
+ * - `'division'` (`5.5 <= zoom < 6.8`): 地方拡大表示 — 地方・府県予報区（57区分）の境界＋地方名ラベル表示
+ * - `'municipality'` (`zoom >= 6.8`): 市区町村拡大表示 — 市区町村の境界線＋市区町村名ラベル表示
+ */
+export function getWarningMapZoomTier(zoom: number): WarningMapZoomTier {
+  if (zoom < 5.5) return 'prefecture';
+  if (zoom < 6.8) return 'division';
+  return 'municipality';
+}
+
+/**
+ * Formats a JMA 57-division (`WARNING_DIVISIONS`) entry into the on-map regional label
+ * shown at intermediate zoom (`'division'` tier, `5.5 <= zoom < 6.8`), matching JMA's official map:
+ * e.g., `'宗谷地方'`, `'上川・留萌地方'`, `'石狩・空知・後志地方'`, `'釧路・根室・十勝地方'`, `'青森県'`, `'秋田県'`, `'岩手県'`.
+ */
+export function formatWarningDivisionMapLabel(
+  div: Pick<WarningDivisionMeta, 'code' | 'name' | 'prefId'>
+): string {
+  if (div.code === '014100') {
+    return '釧路・根室・十勝地方';
+  }
+  if (div.prefId === 1 && !div.name.endsWith('地方')) {
+    return `${div.name}地方`;
+  }
+  if (div.code === '460100') {
+    return '鹿児島県';
+  }
+  return div.name;
+}
+
+/**
+ * Computes the effective warning severity to display on the map for a municipality (`class20s`).
+ * When zooming into a specific division that has 警報/特別警報 (`activeWarningDivisionCode`),
+ * suppresses warning/advisory colors (`'normal'`) for all municipalities outside that division.
+ */
+export function getEffectiveMunicipalitySeverity(
+  muniCode: string,
+  muniDivisionCode: string | undefined | null,
+  muniSeverityMap: Record<string, WarningSeverity>,
+  activeWarningDivisionCode?: string | null
+): WarningSeverity {
+  if (activeWarningDivisionCode) {
+    if (!muniDivisionCode || muniDivisionCode !== activeWarningDivisionCode) {
+      return 'normal';
+    }
+  }
+  return muniSeverityMap[muniCode] || 'normal';
+}
+
+/**
+ * Topologically dissolves (merges) adjacent GeoJSON Polygon/MultiPolygon features
+ * that share the same group key by cancelling shared interior directed edges (`A -> B` and `B -> A`)
+ * and stitching remaining outer boundary edges into clean closed rings.
+ * Eliminates all internal sub-division borders and black noise (`黒いノイズ`) inside prefectures and divisions.
+ */
+export function dissolveGeoJsonByGroup(
+  features: Array<Record<string, any>>,
+  getGroupKey: (feature: Record<string, any>) => string | null | undefined
+): {
+  type: 'FeatureCollection';
+  features: Array<{
+    type: 'Feature';
+    properties: { groupKey: string };
+    geometry: {
+      type: 'MultiPolygon';
+      coordinates: number[][][][];
+    };
+  }>;
+} {
+  const groups = new Map<string, Array<Record<string, any>>>();
+  for (const f of features) {
+    const key = getGroupKey(f);
+    if (!key) continue;
+    let list = groups.get(key);
+    if (!list) {
+      list = [];
+      groups.set(key, list);
+    }
+    list.push(f);
+  }
+
+  const keyPt = (pt: number[]) =>
+    `${Number(pt[0]).toFixed(6)},${Number(pt[1]).toFixed(6)}`;
+
+  const outFeatures: Array<{
+    type: 'Feature';
+    properties: { groupKey: string };
+    geometry: {
+      type: 'MultiPolygon';
+      coordinates: number[][][][];
+    };
+  }> = [];
+
+  for (const [groupKey, groupFeats] of groups.entries()) {
+    const edgeMap = new Map<
+      string,
+      { fromKey: string; toKey: string; fromPt: number[]; toPt: number[] }
+    >();
+
+    for (const f of groupFeats) {
+      const geom = f.geometry;
+      if (!geom) continue;
+      const polys: number[][][][] =
+        geom.type === 'Polygon'
+          ? [geom.coordinates]
+          : geom.type === 'MultiPolygon'
+            ? geom.coordinates
+            : [];
+
+      for (const poly of polys) {
+        if (!Array.isArray(poly) || poly.length === 0) continue;
+        // Use only exterior ring `poly[0]` to avoid interior lake hole artifacts
+        const ring = poly[0];
+        if (!Array.isArray(ring) || ring.length < 4) continue;
+        for (let i = 0; i < ring.length - 1; i++) {
+          const p0 = ring[i];
+          const p1 = ring[i + 1];
+          if (!Array.isArray(p0) || !Array.isArray(p1)) continue;
+          const a = keyPt(p0);
+          const b = keyPt(p1);
+          if (a === b) continue;
+          const revKey = `${b}->${a}`;
+          const fwdKey = `${a}->${b}`;
+          if (edgeMap.has(revKey)) {
+            edgeMap.delete(revKey);
+          } else {
+            edgeMap.set(fwdKey, {
+              fromKey: a,
+              toKey: b,
+              fromPt: [Number(p0[0]), Number(p0[1])],
+              toPt: [Number(p1[0]), Number(p1[1])],
+            });
+          }
+        }
+      }
+    }
+
+    const outAdj = new Map<
+      string,
+      Array<{ fromKey: string; toKey: string; fromPt: number[]; toPt: number[] }>
+    >();
+    for (const e of edgeMap.values()) {
+      let list = outAdj.get(e.fromKey);
+      if (!list) {
+        list = [];
+        outAdj.set(e.fromKey, list);
+      }
+      list.push(e);
+    }
+
+    const multiPolyCoords: number[][][][] = [];
+    while (outAdj.size > 0) {
+      const firstEntry = outAdj.entries().next().value;
+      if (!firstEntry) break;
+      const [startKey, startList] = firstEntry;
+      const firstEdge = startList.pop()!;
+      if (startList.length === 0) outAdj.delete(startKey);
+
+      const ring: number[][] = [firstEdge.fromPt, firstEdge.toPt];
+      let curKey = firstEdge.toKey;
+      let guard = 0;
+      while (curKey !== startKey && guard < 100000) {
+        guard++;
+        const nextList = outAdj.get(curKey);
+        if (!nextList || nextList.length === 0) break;
+        const nextEdge = nextList.pop()!;
+        if (nextList.length === 0) outAdj.delete(curKey);
+        ring.push(nextEdge.toPt);
+        curKey = nextEdge.toKey;
+      }
+      if (curKey === startKey && ring.length >= 4) {
+        multiPolyCoords.push([ring]);
+      }
+    }
+
+    if (multiPolyCoords.length > 0) {
+      outFeatures.push({
+        type: 'Feature',
+        properties: { groupKey },
+        geometry: {
+          type: 'MultiPolygon',
+          coordinates: multiPolyCoords,
+        },
+      });
+    }
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: outFeatures,
+  };
 }
 
 /**
