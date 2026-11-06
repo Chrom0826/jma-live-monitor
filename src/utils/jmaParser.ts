@@ -586,13 +586,13 @@ export function formatSeismicScale(scaleCode: number): string {
     case 40:
       return '4';
     case 45:
-      return '5弱';
+      return '5-';
     case 50:
-      return '5強';
+      return '5+';
     case 55:
-      return '6弱';
+      return '6-';
     case 60:
-      return '6強';
+      return '6+';
     case 70:
       return '7';
     default:
@@ -702,16 +702,16 @@ export function parseJmaIntensityString(intStr: string): {
       return { scaleCode: 70, scaleLabel: '7' };
     case '6+':
     case '6強':
-      return { scaleCode: 60, scaleLabel: '6強' };
+      return { scaleCode: 60, scaleLabel: '6+' };
     case '6-':
     case '6弱':
-      return { scaleCode: 55, scaleLabel: '6弱' };
+      return { scaleCode: 55, scaleLabel: '6-' };
     case '5+':
     case '5強':
-      return { scaleCode: 50, scaleLabel: '5強' };
+      return { scaleCode: 50, scaleLabel: '5+' };
     case '5-':
     case '5弱':
-      return { scaleCode: 45, scaleLabel: '5弱' };
+      return { scaleCode: 45, scaleLabel: '5-' };
     case '4':
       return { scaleCode: 40, scaleLabel: '4' };
     case '3':

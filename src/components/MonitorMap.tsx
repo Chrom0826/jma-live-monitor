@@ -949,67 +949,42 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       sortedStations.forEach((st) => {
         const pt = map.project([st.lat, st.lon], projectionZoom);
         const style = getSeismicScaleStyle(st.scaleCode);
-        const fullW = st.scaleLabel.length > 1 ? 52 : 44;
-        const fullH = 20;
+        const compactW = st.scaleLabel.length > 1 ? 22 : 18;
+        const compactH = 18;
 
-        if (!collidesWithPlaced(pt.x, pt.y, fullW, fullH, 3)) {
-          placedBoxes.push({ x: pt.x, y: pt.y, w: fullW, h: fullH });
+        if (!collidesWithPlaced(pt.x, pt.y, compactW, compactH, 2)) {
+          placedBoxes.push({ x: pt.x, y: pt.y, w: compactW, h: compactH });
 
-          const stIcon = L.divIcon({
-            className: 'custom-eq-station-marker',
+          const compactIcon = L.divIcon({
+            className: 'custom-eq-station-compact',
             html: `
-              <div data-testid="eq-station-intensity-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:inline-flex;align-items:center;justify-content:center;gap:1px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;padding:1px 5px;font-family:'JetBrains Mono',monospace;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.85);">
-                <span style="font-size:9px;font-weight:800;line-height:1;">震度</span>
-                <span style="font-size:12px;font-weight:900;line-height:1;">${st.scaleLabel}</span>
+              <div data-testid="eq-station-compact-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:flex;align-items:center;justify-content:center;width:${compactW}px;height:${compactH}px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:900;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.8);">
+                ${st.scaleLabel}
               </div>
             `,
-            iconSize: [fullW, fullH],
-            iconAnchor: [Math.round(fullW / 2), Math.round(fullH / 2)],
+            iconSize: [compactW, compactH],
+            iconAnchor: [Math.round(compactW / 2), Math.round(compactH / 2)],
           });
           L.marker([st.lat, st.lon], {
-            icon: stIcon,
-            zIndexOffset: st.scaleCode * 10 + 100,
+            icon: compactIcon,
+            zIndexOffset: st.scaleCode * 10,
           }).addTo(group);
-        } else {
-          const compactW = st.scaleLabel.length > 1 ? 24 : 18;
-          const compactH = 18;
-          if (!collidesWithPlaced(pt.x, pt.y, compactW, compactH, 2)) {
-            placedBoxes.push({ x: pt.x, y: pt.y, w: compactW, h: compactH });
-
-            const compactIcon = L.divIcon({
-              className: 'custom-eq-station-compact',
-              html: `
-                <div data-testid="eq-station-compact-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:flex;align-items:center;justify-content:center;width:${compactW}px;height:${compactH}px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:900;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.8);">
-                  ${st.scaleLabel}
-                </div>
-              `,
-              iconSize: [compactW, compactH],
-              iconAnchor: [Math.round(compactW / 2), Math.round(compactH / 2)],
-            });
-            L.marker([st.lat, st.lon], {
-              icon: compactIcon,
-              zIndexOffset: st.scaleCode * 10,
-            }).addTo(group);
-          }
         }
       });
 
       const epiIcon = L.divIcon({
         className: 'custom-epicenter-marker',
         html: `
-          <div style="position:relative;display:flex;align-items:center;justify-content:center;width:36px;height:36px;">
-            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-              <path d="M6 6L26 26M26 6L6 26" stroke="#0B0D12" stroke-width="6" stroke-linecap="square"/>
-              <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="3.5" stroke-linecap="square"/>
+          <div style="position:relative;display:flex;align-items:center;justify-content:center;width:32px;height:32px;">
+            <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+              <path d="M6 6L26 26M26 6L6 26" stroke="#0B0D12" stroke-width="6.5" stroke-linecap="square"/>
+              <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="3.8" stroke-linecap="square"/>
               <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.2" stroke-linecap="square"/>
             </svg>
-            <div style="position:absolute;top:36px;left:50%;transform:translateX(-50%);background:rgba(127,29,29,0.96);border:1px solid #EF4444;color:#FEE2E2;font-size:11px;font-weight:700;padding:2px 8px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 3px 10px rgba(0,0,0,0.75);">
-              震源: ${selectedEarthquake.hypocenterName} (M${selectedEarthquake.magnitude.toFixed(1)} / ${selectedEarthquake.depthKm}km)
-            </div>
           </div>
         `,
-        iconSize: [36, 36],
-        iconAnchor: [18, 18],
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
       });
       L.marker([selectedEarthquake.lat, selectedEarthquake.lon], {
         icon: epiIcon,

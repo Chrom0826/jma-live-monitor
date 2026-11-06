@@ -23,10 +23,10 @@ import {
 test('formatSeismicScale maps numeric codes to JMA intensity labels', () => {
   assert.equal(formatSeismicScale(10), '1');
   assert.equal(formatSeismicScale(40), '4');
-  assert.equal(formatSeismicScale(45), '5弱');
-  assert.equal(formatSeismicScale(50), '5強');
-  assert.equal(formatSeismicScale(55), '6弱');
-  assert.equal(formatSeismicScale(60), '6強');
+  assert.equal(formatSeismicScale(45), '5-');
+  assert.equal(formatSeismicScale(50), '5+');
+  assert.equal(formatSeismicScale(55), '6-');
+  assert.equal(formatSeismicScale(60), '6+');
   assert.equal(formatSeismicScale(70), '7');
   assert.equal(formatSeismicScale(999), '-');
 });
@@ -256,7 +256,7 @@ test('computeWarningSummary aggregates warning severities accurately', () => {
 
 test('parseJmaQuakeDetailJson extracts hypocenter and individual IntensityStation coordinates', () => {
   assert.deepEqual(parseJmaIntensityString('3'), { scaleCode: 30, scaleLabel: '3' });
-  assert.deepEqual(parseJmaIntensityString('5-'), { scaleCode: 45, scaleLabel: '5弱' });
+  assert.deepEqual(parseJmaIntensityString('5-'), { scaleCode: 45, scaleLabel: '5-' });
   assert.deepEqual(parseJmaIsoCoordinate('+37.8+141.5-80000/'), {
     lat: 37.8,
     lon: 141.5,
