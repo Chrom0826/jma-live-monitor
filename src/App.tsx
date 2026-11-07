@@ -29,6 +29,7 @@ import {
   fetchMonitorDataBundle,
 } from './services/jmaClient';
 import { connectP2PQuakeSocket } from './services/p2pQuakeSocket';
+import { connectWolfxEewSocket } from './services/wolfxEewSocket';
 import {
   AmedasMetric,
   EarthquakeReport,
@@ -59,9 +60,11 @@ import {
 } from './utils/jmaParser';
 import {
   getTsunamiAlertSeverity,
+  mergeEew,
   parseP2PEew,
+  parseJstDateTimeMs,
+  parseWolfxEew,
   parseP2PTsunami,
-  shouldReplaceEew,
 } from './utils/eewTsunami';
 
 const INITIAL_BUNDLE: MonitorDataBundle = {
@@ -367,6 +370,39 @@ export default function App() {
   const refreshJmaDataRef = useRef(refreshJmaData);
   refreshJmaDataRef.current = refreshJmaData;
 
+  // 緊急地震速報（予報・警報）共通の受信処理: P2P (556 = 警報のみ) と Wolfx (予報を含む全報) を
+  // EventID + 第n報 で統合し、新しい報なら即座に地震情報画面へ割り込む。
+  const lastEewRefreshRef = useRef<Record<string, number>>({});
+  const applyIncomingEew = useCallback((eew: EewReport) => {
+    setActiveEew((prev) => mergeEew(prev, eew));
+    setInterruptKind('eew');
+    setActiveScene('earthquake');
+    // Pull JMA data at most once per event every 20 s (Wolfx sends many serials quickly)
+    const last = lastEewRefreshRef.current[eew.eventId] || 0;
+    if (Date.now() - last > 20000) {
+      lastEewRefreshRef.current = { [eew.eventId]: Date.now() };
+      refreshJmaDataRef.current();
+    }
+  }, []);
+  const applyIncomingEewRef = useRef(applyIncomingEew);
+  applyIncomingEewRef.current = applyIncomingEew;
+
+  // Wolfx JMA 緊急地震速報 WebSocket (push): 予報 + 警報。P2P は警報しか配信しないため併用する。
+  useEffect(() => {
+    return connectWolfxEewSocket({
+      onMessage: (payload, via) => {
+        const eew = parseWolfxEew(payload);
+        if (!eew) return;
+        // The catch-up answer / HTTP fallback returns the last EEW even if it is hours old
+        const issued = parseJstDateTimeMs(eew.issueTime);
+        const ageMs = Date.now() - (Number.isNaN(issued) ? 0 : issued);
+        if (via === 'query' && (Number.isNaN(issued) || ageMs > 3 * 60 * 1000)) return;
+        if (via === 'push' && !Number.isNaN(issued) && ageMs > 10 * 60 * 1000) return;
+        applyIncomingEewRef.current(eew);
+      },
+    });
+  }, []);
+
   // P2P地震情報 WebSocket (push): earthquake / EEW / tsunami with auto-reconnect, id de-duplication,
   // history back-fill after reconnects and 15 s polling fallback while disconnected.
   useEffect(() => {
@@ -380,12 +416,7 @@ export default function App() {
             if (!t || Date.now() - t > 3 * 60 * 1000) return;
           }
           const eew = parseP2PEew(payload);
-          if (eew) {
-            setActiveEew((prev) => (shouldReplaceEew(prev, eew) ? eew : prev));
-            setInterruptKind('eew');
-            setActiveScene('earthquake');
-            refreshJmaDataRef.current();
-          }
+          if (eew) applyIncomingEewRef.current(eew);
         }
         // 2. EEW Announcement Detection (NHKチャイム検出 code: 554)
         else if (payload.code === 554) {

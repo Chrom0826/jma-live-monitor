@@ -193,7 +193,165 @@ export function parseP2PEew(
         : `${formatSeismicScaleJa(maxScaleCode)}${maxHasUpper ? '以上' : ''}`,
     areas,
     receivedAtMs,
+    isWarning: true,
+    source: 'p2p',
   };
+}
+
+// ===================== Wolfx 緊急地震速報（予報・警報） =====================
+
+/** Wolfx の震度文字列（"3", "5弱", "5-", "6強", "7", "不明"）→ 10倍値の震度コード。不明は -1 */
+export function parseWolfxShindo(raw: unknown): number {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/^震度/, '');
+  const m = /^([0-7])\s*(弱|強|-|\+|－|＋)?/.exec(s);
+  if (!m) return -1;
+  const n = Number(m[1]);
+  const mod = m[2];
+  if (n === 5 || n === 6) {
+    const strong = mod === '強' || mod === '+' || mod === '＋';
+    return n === 5 ? (strong ? 50 : 45) : strong ? 60 : 55;
+  }
+  return n === 0 ? 0 : n * 10;
+}
+
+/**
+ * Parses a Wolfx `jma_eew` message (https://wolfx.jp/apidoc) into an `EewReport`.
+ * Unlike P2P (code 556 = 警報 only), Wolfx delivers every 緊急地震速報 including 予報.
+ * Returns `null` for heartbeat / pong / invalid payloads and 訓練報.
+ */
+export function parseWolfxEew(
+  item: Record<string, any>,
+  receivedAtMs: number = Date.now()
+): EewReport | null {
+  if (!item || typeof item !== 'object') return null;
+  if (item.type !== undefined && item.type !== 'jma_eew') return null;
+  const eventId = String(item.EventID ?? '').trim();
+  if (!eventId) return null;
+  if (item.isTraining === true) return null;
+
+  const serialNum = Number.parseInt(String(item.Serial ?? '1'), 10);
+  const serial = Number.isNaN(serialNum) ? 1 : serialNum;
+  const isCancelled = item.isCancel === true;
+
+  const rawLat = Number(item.Latitude);
+  const rawLon = Number(item.Longitude);
+  const hasHypo =
+    Number.isFinite(rawLat) &&
+    Number.isFinite(rawLon) &&
+    !(rawLat === 0 && rawLon === 0) &&
+    Math.abs(rawLat) <= 90;
+  const rawDepth = Number(item.Depth);
+  const rawMag = Number(item.Magnitude ?? item.Magunitude);
+
+  const areas: EewForecastArea[] = (Array.isArray(item.WarnArea) ? item.WarnArea : [])
+    .map((a: any) => {
+      const name = String(a?.Chiiki || '');
+      const max = parseWolfxShindo(a?.Shindo1);
+      const min = parseWolfxShindo(a?.Shindo2);
+      const pref = /^(.+?[都道府県])/.exec(name)?.[1] || '';
+      const arrived = a?.Arrive === true || a?.Arrive === 'true';
+      return {
+        pref,
+        name,
+        scaleFrom: min >= 0 ? min : max,
+        scaleTo: max >= 0 && max !== min ? max : min >= 0 ? min : max,
+        kindCode: arrived ? '11' : '10',
+        arrivalTime: null,
+      } as EewForecastArea;
+    })
+    .filter((a: EewForecastArea) => a.name)
+    .sort(
+      (a: EewForecastArea, b: EewForecastArea) =>
+        getEewAreaRepresentativeScale(b) - getEewAreaRepresentativeScale(a)
+    );
+
+  const headMax = parseWolfxShindo(item.MaxIntensity);
+  const areaMax = areas.reduce((m, a) => Math.max(m, getEewAreaRepresentativeScale(a)), -1);
+  const maxScaleCode = Math.max(headMax, areaMax);
+  const isWarning = item.isWarn === true || /警報/.test(String(item.Title || ''));
+
+  return {
+    id: `wolfx-${eventId}-${serial}${isCancelled ? '-c' : ''}`,
+    eventId,
+    serial,
+    issueTime: String(item.AnnouncedTime || ''),
+    originTime: String(item.OriginTime || ''),
+    hypocenterName: String(item.Hypocenter || (isCancelled ? '' : '震源調査中')),
+    lat: hasHypo ? rawLat : Number.NaN,
+    lon: hasHypo ? rawLon : Number.NaN,
+    depthKm: Number.isFinite(rawDepth) && rawDepth >= 0 ? Math.trunc(rawDepth) : -1,
+    magnitude: Number.isFinite(rawMag) && rawMag > 0 ? Number(rawMag.toFixed(1)) : -1,
+    isCancelled,
+    isTest: false,
+    isAssumedHypocenter: item.isAssumption === true,
+    maxScaleCode,
+    maxScaleLabel: maxScaleCode < 0 ? '不明' : formatSeismicScaleJa(maxScaleCode),
+    areas,
+    receivedAtMs,
+    isWarning,
+    isFinal: item.isFinal === true,
+    source: 'wolfx',
+  };
+}
+
+/** 警報を含むか（未指定は警報扱い: P2P 556 / デモ） */
+export function isEewWarning(eew: EewReport | null | undefined): boolean {
+  return Boolean(eew) && eew!.isWarning !== false;
+}
+
+/** 最終報か（Wolfx は isFinal、それ以外は従来どおり第5報以降を最終報扱い） */
+export function isEewFinal(eew: EewReport | null | undefined): boolean {
+  if (!eew) return false;
+  return eew.isFinal ?? eew.serial >= 5;
+}
+
+/**
+ * Merges an incoming EEW (P2P 警報 or Wolfx 予報/警報) into the currently displayed one.
+ * - Different event: the incoming report wins.
+ * - Same event, older serial: ignored (out-of-order / duplicate delivery from the other feed).
+ * - Same event: once a 警報 was issued the event stays 警報; area lists (with P2P arrival
+ *   times) are kept when the newer report carries none (Wolfx 予報 has no WarnArea).
+ * Returns `prev` itself when nothing changed so React can bail out.
+ */
+export function mergeEew(prev: EewReport | null | undefined, next: EewReport): EewReport {
+  if (!prev || prev.eventId !== next.eventId) return next;
+  if (next.serial < prev.serial && !next.isCancelled) return prev;
+  if (next.serial === prev.serial && !next.isCancelled && prev.isCancelled) return prev;
+
+  const isWarning = isEewWarning(prev) || isEewWarning(next);
+  let areas = next.areas;
+  if (next.serial === prev.serial) {
+    // same report from both feeds: keep the richer area list (P2P has arrival times)
+    const prevTimed = prev.areas.some((a) => a.arrivalTime);
+    const nextTimed = next.areas.some((a) => a.arrivalTime);
+    if ((prevTimed && !nextTimed) || (next.areas.length === 0 && prev.areas.length > 0)) {
+      areas = prev.areas;
+    }
+  } else if (next.areas.length === 0 && prev.areas.length > 0 && !next.isCancelled && isWarning) {
+    areas = prev.areas;
+  }
+  const merged: EewReport = {
+    ...next,
+    areas,
+    isWarning,
+    isFinal: next.isFinal ?? prev.isFinal,
+    maxScaleCode: Math.max(next.maxScaleCode, areas === next.areas ? -1 : prev.maxScaleCode),
+    receivedAtMs: next.serial === prev.serial ? prev.receivedAtMs : next.receivedAtMs,
+  };
+  if (merged.maxScaleCode !== next.maxScaleCode) merged.maxScaleLabel = prev.maxScaleLabel;
+  if (
+    next.serial === prev.serial &&
+    merged.isWarning === isEewWarning(prev) &&
+    merged.areas === prev.areas &&
+    merged.isFinal === prev.isFinal &&
+    merged.isCancelled === prev.isCancelled
+  ) {
+    return prev;
+  }
+  return merged;
 }
 
 /**
@@ -233,7 +391,7 @@ export function formatEewArrivalLabel(
   if (area.kindCode === '11') return '既に到達と予測';
   if (area.kindCode === '19') return '到達予想なし(PLUM法)';
   const sec = getEewArrivalCountdownSec(area.arrivalTime, nowMs);
-  if (sec === null) return '到達時刻不明';
+  if (sec === null) return area.kindCode === '10' ? '未到達と予測' : '到達時刻不明';
   if (sec <= 0) return '到達と予測';
   return `あと${sec}秒`;
 }

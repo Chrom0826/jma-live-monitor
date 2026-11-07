@@ -283,7 +283,7 @@ export interface EewForecastArea {
   arrivalTime: string | null;
 }
 
-/** P2P地震情報 code 556（緊急地震速報（警報））を正規化したレポート（第n報） */
+/** 緊急地震速報（警報: P2P code 556 / 予報・警報: Wolfx jma_eew）を正規化したレポート（第n報） */
 export interface EewReport {
   id: string;
   eventId: string;
@@ -306,6 +306,15 @@ export interface EewReport {
   areas: EewForecastArea[];
   receivedAtMs: number;
   isDemo?: boolean;
+  /**
+   * 緊急地震速報（警報）を含むか。false = 緊急地震速報（予報）のみ。
+   * 未指定は警報扱い（P2P code 556 / デモ）。同一イベントで一度警報になれば以降も警報扱い。
+   */
+  isWarning?: boolean;
+  /** 最終報か（Wolfx isFinal）。未指定時は従来どおり serial >= 5 で推定（isEewFinal） */
+  isFinal?: boolean;
+  /** 受信元 */
+  source?: 'p2p' | 'wolfx' | 'demo';
 }
 
 export type TsunamiGrade =

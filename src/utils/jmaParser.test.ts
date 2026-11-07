@@ -8,8 +8,13 @@ import {
   getSeismicScaleBadgeStyle,
   getTsunamiAlertSeverity,
   parseJmaTsunamiDetail,
+  isEewFinal,
+  isEewWarning,
+  mergeEew,
   parseP2PEew,
   parseP2PTsunami,
+  parseWolfxEew,
+  parseWolfxShindo,
   shouldReplaceEew,
 } from './eewTsunami';
 import {
@@ -1328,4 +1333,89 @@ test('decideIncomingEarthquake: newer event interrupts, follow-ups update, older
   assert.equal(decideIncomingEarthquake(older, shown, now), 'ignore');
   assert.equal(decideIncomingEarthquake(newer, null, now), 'interrupt');
   assert.equal(decideIncomingEarthquake(older, null, now, 10 * 60 * 1000), 'ignore');
+});
+
+test('parseWolfxEew: 緊急地震速報（予報）と警報、P2Pとの統合', () => {
+  // Real Wolfx jma_eew frame (2026/11/07 茨城県沖 予報 第8報 最終報)
+  const forecast = parseWolfxEew(
+    {
+      type: 'jma_eew',
+      Title: '緊急地震速報（予報）',
+      EventID: '20261107200747',
+      Serial: 8,
+      AnnouncedTime: '2026/11/07 20:08:46',
+      OriginTime: '2026/11/07 20:07:41',
+      Hypocenter: '茨城県沖',
+      Latitude: 36.2,
+      Longitude: 141.5,
+      Magunitude: 5.4,
+      Magnitude: 5.4,
+      Depth: 40,
+      MaxIntensity: '3',
+      WarnArea: [],
+      isSea: true,
+      isTraining: false,
+      isAssumption: false,
+      isWarn: false,
+      isFinal: true,
+      isCancel: false,
+    },
+    1000
+  );
+  assert.ok(forecast);
+  assert.equal(forecast!.isWarning, false);
+  assert.equal(isEewWarning(forecast), false);
+  assert.equal(isEewFinal(forecast), true);
+  assert.equal(forecast!.maxScaleCode, 30);
+  assert.equal(forecast!.maxScaleLabel, '3');
+  assert.equal(forecast!.magnitude, 5.4);
+  assert.equal(forecast!.depthKm, 40);
+  assert.equal(forecast!.areas.length, 0);
+
+  assert.equal(parseWolfxEew({ type: 'heartbeat', ver: 25 }), null);
+  assert.equal(parseWolfxEew({ type: 'jma_eew', EventID: 'x', isTraining: true }), null);
+  assert.equal(parseWolfxShindo('5弱'), 45);
+  assert.equal(parseWolfxShindo('6+'), 60);
+  assert.equal(parseWolfxShindo('不明'), -1);
+
+  const warn = parseWolfxEew({
+    type: 'jma_eew',
+    Title: '緊急地震速報（警報）',
+    EventID: '20261107200747',
+    Serial: 9,
+    AnnouncedTime: '2026/11/07 20:08:50',
+    OriginTime: '2026/11/07 20:07:41',
+    Hypocenter: '茨城県沖',
+    Latitude: 36.2,
+    Longitude: 141.5,
+    Magnitude: 6.1,
+    Depth: 40,
+    MaxIntensity: '5強',
+    WarnArea: [
+      { Chiiki: '茨城県南部', Shindo1: '5強', Shindo2: '5弱', Type: '警報', Arrive: false },
+      { Chiiki: '茨城県北部', Shindo1: '5弱', Shindo2: '4', Type: '警報', Arrive: true },
+    ],
+    isWarn: true,
+    isFinal: false,
+    isCancel: false,
+  })!;
+  assert.equal(warn.isWarning, true);
+  assert.equal(warn.areas[0].name, '茨城県南部');
+  assert.equal(warn.areas[0].pref, '茨城県');
+  assert.equal(formatEewScaleRange(warn.areas[0].scaleFrom, warn.areas[0].scaleTo), '5弱～5強');
+  assert.equal(formatEewArrivalLabel(warn.areas[1]), '既に到達と予測');
+
+  // forecast -> warning: newer serial wins; older serial from the other feed is ignored
+  const m1 = mergeEew(forecast, warn);
+  assert.equal(m1.serial, 9);
+  assert.equal(isEewWarning(m1), true);
+  assert.equal(mergeEew(m1, forecast!), m1);
+  // a later 予報-less serial of the same event stays 警報 and keeps the area list
+  const later = { ...forecast!, serial: 10, isWarning: false, areas: [] };
+  const m2 = mergeEew(m1, later);
+  assert.equal(isEewWarning(m2), true);
+  assert.equal(m2.areas.length, 2);
+  // a different event always replaces
+  const other = { ...forecast!, eventId: '20261107210000', serial: 1 };
+  assert.equal(mergeEew(m2, other), other);
 });
