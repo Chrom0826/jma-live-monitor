@@ -439,14 +439,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   data-division-code={divKey}
                   className={`pb-1.5 transition-colors ${
                     isFocusedDivision
-                      ? 'bg-red-950/65 ring-1 ring-inset ring-red-500'
+                      ? 'bg-sky-950/60 ring-2 ring-inset ring-sky-400 border-l-4 border-sky-400'
                       : ''
                   }`}
                 >
                   <div
                     className={`px-2.5 py-0.5 text-[13px] font-bold tracking-wide flex items-center justify-between ${
                       isFocusedDivision
-                        ? 'bg-red-700 text-white'
+                        ? 'bg-sky-600 text-white font-extrabold'
                         : w.severity === 'special'
                           ? 'bg-purple-900 text-white'
                           : w.severity === 'warning'

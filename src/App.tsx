@@ -687,6 +687,16 @@ export default function App() {
   const sceneMeta =
     SCENE_LIST.find((s) => s.id === effectiveScene) || SCENE_LIST[0];
 
+  const effectiveSceneTitle = useMemo(() => {
+    if (effectiveScene === 'amedas') {
+      if (amedasMetric === 'precip') return '全国アメダス気象実況（降水量）';
+      if (amedasMetric === 'wind') return '全国アメダス気象実況（風向・風速）';
+      if (amedasMetric === 'snow') return '全国アメダス気象実況（積雪深）';
+      return '全国アメダス気象実況（気温分布）';
+    }
+    return sceneMeta.title;
+  }, [effectiveScene, amedasMetric, sceneMeta.title]);
+
   return (
     <div className="h-screen w-screen bg-[#0D0F12] text-white p-1.5 overflow-hidden select-none flex">
       {/* Outer Broadcast Frame with NERV-inspired crisp border */}
@@ -694,7 +704,7 @@ export default function App() {
         {/* ==================== LEFT COLUMN (Clock + Dynamic XML Timeline OR Earthquake History + Compact Settings) ==================== */}
         <aside
           aria-label="時計および履歴タイムライン"
-          className="w-[264px] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden"
+          className="w-[264px] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden animate-startup-left z-20"
         >
           {/* Top Clock Box (Isolated memoized component so 1s ticks never re-render the map or panels) */}
           <LiveClockBox />
@@ -867,17 +877,12 @@ export default function App() {
             />
 
             {/* Floating Top-Left Scene Title Box (Matches NERV防災ライブ `全国の気象警報・注意報`) */}
-            <div className="absolute top-3 left-3 z-[400] bg-[#111318]/94 border border-[#686E7A] px-4 py-2.5 pointer-events-auto">
-              <h1 className="text-[28px] font-extrabold tracking-tight text-white leading-none">
-                {effectiveScene === 'amedas'
-                  ? amedasMetric === 'precip'
-                    ? '全国アメダス気象実況（降水量）'
-                    : amedasMetric === 'wind'
-                      ? '全国アメダス気象実況（風向・風速）'
-                      : amedasMetric === 'snow'
-                        ? '全国アメダス気象実況（積雪深）'
-                        : '全国アメダス気象実況（気温分布）'
-                  : sceneMeta.title}
+            <div className="absolute top-3 left-3 z-[400] bg-[#111318]/94 border border-[#686E7A] px-4 py-2.5 pointer-events-auto animate-startup-top">
+              <h1
+                key={effectiveSceneTitle}
+                className="text-[28px] font-extrabold tracking-tight text-white leading-none animate-title-swap"
+              >
+                {effectiveSceneTitle}
               </h1>
               <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-neutral-200">
                 <span className="font-mono font-semibold text-neutral-100">
@@ -915,7 +920,7 @@ export default function App() {
             </div>
 
             {/* Floating Right-Side Slim Regional Strip (Matches NERV防災ライブ right strip) */}
-            <div className="absolute top-3 right-3 bottom-3 z-[400] pointer-events-none">
+            <div className="absolute top-3 right-3 bottom-3 z-[400] pointer-events-none animate-startup-right">
               <SceneDetailPanel
                 activeScene={activeScene}
                 activeRegionConfig={activeRegionConfig}
@@ -945,7 +950,7 @@ export default function App() {
           {/* Slim Single-Row Full-Text XML Feed Ticker (ScrollLeft-driven so text never disappears mid-scroll) */}
           <footer
             aria-label="気象解説情報および全文フィード"
-            className="border-t border-[#5A606D] bg-[#111318] px-3 py-1.5 shrink-0 flex items-center gap-2.5 overflow-hidden"
+            className="border-t border-[#5A606D] bg-[#111318] px-3 py-1.5 shrink-0 flex items-center gap-2.5 overflow-hidden animate-startup-bottom z-20"
           >
             <span className="bg-[#2B303C] text-amber-300 px-2 py-0.5 text-[11px] font-mono font-bold shrink-0">
               XML全文FEED

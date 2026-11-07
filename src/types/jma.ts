@@ -261,6 +261,8 @@ export interface EarthquakeReport {
   issueTypeLabel?: string;
   /** 震度速報など震源未確定（hypocenter.latitude = -200）の場合 true */
   hypocenterUnknown?: boolean;
+  /** 気象庁震度細分区域コード（100, 704等）ごとの最大観測震度 */
+  areaMaxScales?: Record<string, { scaleCode: number; scaleLabel: string; name?: string }>;
   stations: EarthquakeStationIntensity[];
 }
 

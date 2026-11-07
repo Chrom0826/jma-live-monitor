@@ -1245,6 +1245,10 @@ export function parseJmaQuakeDetailJson(
     const maxIntInfo = parseJmaIntensityString(maxIntStr);
 
     const stations: EarthquakeStationIntensity[] = [];
+    const areaMaxScales: Record<
+      string,
+      { scaleCode: number; scaleLabel: string; name?: string }
+    > = {};
     const prefs = Array.isArray(obs.Pref) ? obs.Pref : [];
 
     for (const pref of prefs) {
@@ -1252,6 +1256,16 @@ export function parseJmaQuakeDetailJson(
       const areas = Array.isArray(pref?.Area) ? pref.Area : [];
       for (const area of areas) {
         const areaName = String(area?.Name || prefName);
+        const areaCode = String(area?.Code || '');
+        const areaMaxIntStr = String(area?.MaxInt || '');
+        if (areaCode) {
+          const aInt = parseJmaIntensityString(areaMaxIntStr || '1');
+          areaMaxScales[areaCode] = {
+            scaleCode: aInt.scaleCode,
+            scaleLabel: aInt.scaleLabel,
+            name: areaName,
+          };
+        }
         const cities = Array.isArray(area?.City) ? area.City : [];
         for (const city of cities) {
           const cityName = String(city?.Name || areaName);
@@ -1307,6 +1321,7 @@ export function parseJmaQuakeDetailJson(
           detailJson.Control?.PublishingOffice ||
           '気象庁本庁（震源・震度情報）'
       ),
+      areaMaxScales,
       stations:
         stations.length > 0
           ? stations
@@ -1877,21 +1892,122 @@ export function formatWarningDivisionMapLabel(
 
 /**
  * Computes the effective warning severity to display on the map for a municipality (`class20s`).
- * When zooming into a specific division that has 警報/特別警報 (`activeWarningDivisionCode`),
- * suppresses warning/advisory colors (`'normal'`) for all municipalities outside that division.
+ * Preserves all municipality warning/advisory colors across Japan even when zoomed into a division.
  */
 export function getEffectiveMunicipalitySeverity(
   muniCode: string,
-  muniDivisionCode: string | undefined | null,
+  _muniDivisionCode: string | undefined | null,
   muniSeverityMap: Record<string, WarningSeverity>,
-  activeWarningDivisionCode?: string | null
+  _activeWarningDivisionCode?: string | null
 ): WarningSeverity {
-  if (activeWarningDivisionCode) {
-    if (!muniDivisionCode || muniDivisionCode !== activeWarningDivisionCode) {
-      return 'normal';
+  return muniSeverityMap[muniCode] || 'normal';
+}
+
+/**
+ * Fast ray-casting algorithm to test whether [lon, lat] is inside a polygon ring
+ */
+export function isPointInPolygon(point: [number, number], ring: number[][]): boolean {
+  let inside = false;
+  const px = point[0];
+  const py = point[1];
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0];
+    const yi = ring[i][1];
+    const xj = ring[j][0];
+    const yj = ring[j][1];
+    const intersect =
+      yi > py !== yj > py &&
+      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Maps each JMA earthquake area code (e.g., '100', '704') to its maximum observed seismic scale code (e.g., 10, 20, 30).
+ * Combines JMA official Area.Code observations with spatial point-in-polygon assignment for all stations.
+ */
+export function computeEarthquakeAreaScales(
+  eq: EarthquakeReport,
+  earthquakeGeoJson?: any
+): Map<string, number> {
+  const areaScales = new Map<string, number>();
+
+  // 1. Ingest official JMA areaMaxScales if already parsed
+  if (eq.areaMaxScales) {
+    for (const [code, info] of Object.entries(eq.areaMaxScales)) {
+      if (typeof info?.scaleCode === 'number') {
+        areaScales.set(code, info.scaleCode);
+      }
     }
   }
-  return muniSeverityMap[muniCode] || 'normal';
+
+  // 2. Point-in-polygon from stations into earthquake.json features
+  if (
+    earthquakeGeoJson &&
+    Array.isArray(earthquakeGeoJson.features) &&
+    Array.isArray(eq.stations) &&
+    eq.stations.length > 0
+  ) {
+    for (const st of eq.stations) {
+      if (typeof st.lat !== 'number' || typeof st.lon !== 'number') continue;
+      const pt: [number, number] = [st.lon, st.lat];
+      for (const f of earthquakeGeoJson.features) {
+        const code = String(f?.properties?.code || '');
+        if (!code) continue;
+        const geom = f.geometry;
+        let matched = false;
+        if (geom.type === 'Polygon') {
+          if (geom.coordinates[0] && isPointInPolygon(pt, geom.coordinates[0])) {
+            matched = true;
+          }
+        } else if (geom.type === 'MultiPolygon') {
+          for (const poly of geom.coordinates) {
+            if (poly[0] && isPointInPolygon(pt, poly[0])) {
+              matched = true;
+              break;
+            }
+          }
+        }
+        if (matched) {
+          const cur = areaScales.get(code) || 0;
+          if (st.scaleCode > cur) {
+            areaScales.set(code, st.scaleCode);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // 3. If no areas matched yet (e.g. hypocenter only with maxScale), map hypocenter location
+  if (areaScales.size === 0 && typeof eq.lat === 'number' && typeof eq.lon === 'number' && eq.maxScaleCode > 0) {
+    if (earthquakeGeoJson && Array.isArray(earthquakeGeoJson.features)) {
+      const pt: [number, number] = [eq.lon, eq.lat];
+      for (const f of earthquakeGeoJson.features) {
+        const code = String(f?.properties?.code || '');
+        if (!code) continue;
+        const geom = f.geometry;
+        let matched = false;
+        if (geom.type === 'Polygon') {
+          if (geom.coordinates[0] && isPointInPolygon(pt, geom.coordinates[0])) matched = true;
+        } else if (geom.type === 'MultiPolygon') {
+          for (const poly of geom.coordinates) {
+            if (poly[0] && isPointInPolygon(pt, poly[0])) {
+              matched = true;
+              break;
+            }
+          }
+        }
+        if (matched) {
+          areaScales.set(code, eq.maxScaleCode);
+          break;
+        }
+      }
+    }
+  }
+
+  return areaScales;
 }
 
 /**

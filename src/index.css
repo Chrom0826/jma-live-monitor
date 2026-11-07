@@ -106,3 +106,82 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #434C5E;
 }
+
+/* ==================== BROADCAST STARTUP ANIMATIONS ==================== */
+@keyframes startupSlideLeft {
+  0% {
+    opacity: 0;
+    transform: translate3d(-100%, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes startupSlideRight {
+  0% {
+    opacity: 0;
+    transform: translate3d(100%, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes startupSlideBottom {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 100%, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes startupSlideTop {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -32px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.animate-startup-left {
+  animation: startupSlideLeft 0.75s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-startup-right {
+  animation: startupSlideRight 0.75s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-startup-bottom {
+  animation: startupSlideBottom 0.75s cubic-bezier(0.16, 1, 0.3, 1) 0.08s both;
+}
+
+.animate-startup-top {
+  animation: startupSlideTop 0.65s cubic-bezier(0.16, 1, 0.3, 1) 0.04s both;
+}
+
+/* Title Swap Animation when scene / metric changes */
+@keyframes titleSwapIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+    filter: blur(2px);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+    filter: blur(0);
+  }
+}
+
+.animate-title-swap {
+  animation: titleSwapIn 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
+}

@@ -21,6 +21,7 @@ import {
 import { fetchSharedJmaAreaConst } from '../services/jmaClient';
 import {
   AMEDAS_PATROL_STOPS,
+  computeEarthquakeAreaScales,
   computeTyphoonConeEnvelope,
   dissolveGeoJsonByGroup,
   formatCompactTyphoonCenterLabel,
@@ -54,6 +55,7 @@ let cachedClass20GeoJson: any = null;
 let cachedClass10GeoJson: any = null;
 let cachedDissolvedDivisionsGeoJson: any = null;
 let cachedTsunamiGeoJson: any = null;
+let cachedEarthquakeGeoJson: any = null;
 const cachedClass20LabelPoints: Record<string, [number, number]> = {};
 let class20FetchPromise: Promise<{
   class20: any;
@@ -61,6 +63,24 @@ let class20FetchPromise: Promise<{
   dissolvedDivisions: any;
 }> | null = null;
 let tsunamiFetchPromise: Promise<any> | null = null;
+let earthquakeFetchPromise: Promise<any> | null = null;
+
+function loadJmaEarthquakeGeoJson(): Promise<any> {
+  if (cachedEarthquakeGeoJson) return Promise.resolve(cachedEarthquakeGeoJson);
+  if (earthquakeFetchPromise) return earthquakeFetchPromise;
+  earthquakeFetchPromise = fetch(
+    'https://www.jma.go.jp/bosai/common/const/geojson/earthquake.json'
+  )
+    .then((r) => (r.ok ? r.json() : null))
+    .then((json) => {
+      if (json && Array.isArray(json.features)) {
+        cachedEarthquakeGeoJson = json;
+      }
+      return cachedEarthquakeGeoJson;
+    })
+    .catch(() => null);
+  return earthquakeFetchPromise;
+}
 
 function loadJmaTsunamiGeoJson(): Promise<any> {
   if (cachedTsunamiGeoJson) return Promise.resolve(cachedTsunamiGeoJson);
@@ -471,6 +491,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const dissolvedDivisionsCompiledRef = useRef<CompiledGeoShape[]>([]);
   const class20CompiledRef = useRef<CompiledGeoShape[]>([]);
   const dissolvedWarningFillCompiledRef = useRef<CompiledGeoShape[]>([]);
+  const earthquakeCompiledRef = useRef<CompiledGeoShape[]>([]);
 
   useEffect(() => {
     onSceneCompleteRef.current = onSceneComplete;
@@ -489,6 +510,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     useState<any>(cachedDissolvedDivisionsGeoJson);
   const [tsunamiGeoJsonData, setTsunamiGeoJsonData] = useState<any>(
     cachedTsunamiGeoJson
+  );
+  const [earthquakeGeoJsonData, setEarthquakeGeoJsonData] = useState<any>(
+    cachedEarthquakeGeoJson
   );
   const [compiledVersion, setCompiledVersion] = useState<number>(0);
   const [radarFrameIndex, setRadarFrameIndex] = useState<number>(0);
@@ -640,6 +664,24 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
     setCompiledVersion((v) => v + 1);
   }, [class20GeoJsonData, data.muniSeverityMap]);
+
+  // Compile 188 JMA earthquake sub-division shapes once when earthquakeGeoJsonData loads
+  useEffect(() => {
+    if (
+      !earthquakeGeoJsonData ||
+      !Array.isArray(earthquakeGeoJsonData.features)
+    ) {
+      return;
+    }
+    earthquakeCompiledRef.current = compileGeoJsonShapes(
+      earthquakeGeoJsonData,
+      (f) => ({
+        id: String(f?.properties?.code || ''),
+      }),
+      true
+    );
+    setCompiledVersion((v) => v + 1);
+  }, [earthquakeGeoJsonData]);
 
   // Pre-compile and pre-sort AMeDAS stations when `data.amedas` or `amedasMetric` changes
   // Eliminates 1,300+ filter/sort/trigonometric calls on every 60fps animation frame!
@@ -1134,6 +1176,65 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             }
             setDs(baseCanvas, 'coloredWarningCount', String(coloredMuniCount));
             setDs(baseCanvas, 'warningZoomTier', tier);
+          } else if (
+            effectiveScene === 'earthquake' &&
+            earthquakeCompiledRef.current.length > 0
+          ) {
+            // JMA 188-Area Seismic Intensity Map
+            const eqShapes = earthquakeCompiledRef.current;
+            const areaScaleMap = computeEarthquakeAreaScales(
+              selectedEarthquake,
+              earthquakeGeoJsonData
+            );
+
+            // 1. Draw base land fill for un-shaken regions
+            bCtx.beginPath();
+            for (let i = 0; i < eqShapes.length; i++) {
+              const sh = eqShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              const scale = areaScaleMap.get(sh.id) || 0;
+              if (scale < 10) {
+                traceShapePath(bCtx, sh);
+              }
+            }
+            bCtx.fillStyle = '#232731';
+            bCtx.fill();
+            bCtx.strokeStyle = '#3A4250';
+            bCtx.lineWidth = 1.0;
+            bCtx.stroke();
+
+            // 2. Draw seismic-intensity colored regions (震度1〜7)
+            for (let i = 0; i < eqShapes.length; i++) {
+              const sh = eqShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              const scale = areaScaleMap.get(sh.id) || 0;
+              if (scale >= 10) {
+                const style = getSeismicScaleStyle(scale);
+                bCtx.beginPath();
+                traceShapePath(bCtx, sh);
+                bCtx.fillStyle = style.hex;
+                bCtx.globalAlpha = 0.55;
+                bCtx.fill();
+                bCtx.globalAlpha = 1.0;
+                bCtx.strokeStyle = style.hex;
+                bCtx.lineWidth = 2.0;
+                bCtx.stroke();
+              }
+            }
+
+            // 3. Draw outer prefecture boundaries for geographic clarity
+            bCtx.beginPath();
+            for (let i = 0; i < divShapes.length; i++) {
+              const sh = divShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              traceShapePath(bCtx, sh);
+            }
+            bCtx.strokeStyle = '#5A6273';
+            bCtx.lineWidth = 1.2;
+            bCtx.stroke();
+
+            delete baseCanvas.dataset.focusedDivisionCode;
+            delete baseCanvas.dataset.focusedDivisionBlueBorder;
           } else {
             // Crisp Blank Map (`白地図`) for `radar`, `amedas`, `typhoon`, `forecast`, `earthquake`, `volcano`, `tsunami`
             const isTsunami = effectiveScene === 'tsunami';
@@ -1474,6 +1575,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     amedasMetric,
     warningZoomTier,
     activeWarningDivision?.divisionCode,
+    selectedEarthquake.id,
+    selectedEarthquake.maxScaleCode,
+    earthquakeGeoJsonData,
     compiledVersion,
   ]);
 
@@ -1522,6 +1626,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       .then((json) => {
         if (!cancelled && json) {
           setTsunamiGeoJsonData(json);
+        }
+      })
+      .catch(() => {});
+
+    loadJmaEarthquakeGeoJson()
+      .then((json) => {
+        if (!cancelled && json) {
+          setEarthquakeGeoJsonData(json);
         }
       })
       .catch(() => {});
@@ -2190,7 +2302,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     if (effectiveScene === 'warnings' && activeWarningDivision) {
       return {
         center: [activeWarningDivision.lat, activeWarningDivision.lon],
-        zoom: activeWarningDivision.zoom || 7,
+        zoom: Math.max(8.5, (activeWarningDivision.zoom || 7) + 1.5),
       };
     }
     if (activeRegionConfig.id === 'world') {
@@ -2982,39 +3094,26 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         )
         .sort((a, b) => b.scaleCode - a.scaleCode);
 
-      // Reserve epicenter cross area for regular quake if no EEW is active
-      if (!activeEew) {
-        const epiPt = map.project(
-          [selectedEarthquake.lat, selectedEarthquake.lon],
-          projectionZoom
-        );
-        placedBoxes.push({ x: epiPt.x, y: epiPt.y, w: 30, h: 30 });
-      }
-
+      // 2. Standard Observed Earthquake Stations (All observed stations are displayed, never blocked by epicenter)
       sortedStations.forEach((st) => {
-        const pt = map.project([st.lat, st.lon], projectionZoom);
         const style = getSeismicScaleStyle(st.scaleCode);
         const compactW = st.scaleLabel.length > 1 ? 22 : 18;
         const compactH = 18;
 
-        if (!collidesWithPlaced(pt.x, pt.y, compactW, compactH, 2)) {
-          placedBoxes.push({ x: pt.x, y: pt.y, w: compactW, h: compactH });
-
-          const compactIcon = L.divIcon({
-            className: 'custom-eq-station-compact',
-            html: `
-              <div data-testid="eq-station-compact-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:flex;align-items:center;justify-content:center;width:${compactW}px;height:${compactH}px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:900;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.8);">
-                ${st.scaleLabel}
-              </div>
-            `,
-            iconSize: [compactW, compactH],
-            iconAnchor: [Math.round(compactW / 2), Math.round(compactH / 2)],
-          });
-          L.marker([st.lat, st.lon], {
-            icon: compactIcon,
-            zIndexOffset: st.scaleCode * 10,
-          }).addTo(group);
-        }
+        const compactIcon = L.divIcon({
+          className: 'custom-eq-station-compact',
+          html: `
+            <div data-testid="eq-station-compact-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:flex;align-items:center;justify-content:center;width:${compactW}px;height:${compactH}px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:900;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.8);">
+              ${st.scaleLabel}
+            </div>
+          `,
+          iconSize: [compactW, compactH],
+          iconAnchor: [Math.round(compactW / 2), Math.round(compactH / 2)],
+        });
+        L.marker([st.lat, st.lon], {
+          icon: compactIcon,
+          zIndexOffset: 2500 + st.scaleCode * 10,
+        }).addTo(group);
       });
 
       if (!activeEew) {
@@ -3034,7 +3133,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         });
         L.marker([selectedEarthquake.lat, selectedEarthquake.lon], {
           icon: epiIcon,
-          zIndexOffset: 2000,
+          zIndexOffset: 1800,
         }).addTo(group);
       }
     }

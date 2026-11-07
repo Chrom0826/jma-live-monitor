@@ -977,7 +977,7 @@ test('3-stage Warning zoom hierarchy (prefecture -> division -> municipality) an
   assert.equal(windAtZ10.length, 20);
 });
 
-test('getEffectiveMunicipalitySeverity suppresses colors outside activeWarningDivision and dissolveGeoJsonByGroup topologically merges adjacent polygons into a single clean boundary', async () => {
+test('getEffectiveMunicipalitySeverity preserves warning colors across divisions and dissolveGeoJsonByGroup topologically merges adjacent polygons into a single clean boundary', async () => {
   const { getEffectiveMunicipalitySeverity, dissolveGeoJsonByGroup } = await import('./jmaParser');
 
   const muniSeverityMap = {
@@ -1000,18 +1000,18 @@ test('getEffectiveMunicipalitySeverity suppresses colors outside activeWarningDi
     'warning'
   );
 
-  // When zoomed into 宗谷 ('011000'), ONLY municipalities in '011000' are colored; all other divisions return 'normal'
+  // When zoomed into a division, all municipalities across Japan continue to display their warnings/advisories
   assert.equal(
     getEffectiveMunicipalitySeverity('0121400', '011000', muniSeverityMap, '011000'),
     'warning'
   );
   assert.equal(
     getEffectiveMunicipalitySeverity('0120400', '012000', muniSeverityMap, '011000'),
-    'normal'
+    'advisory'
   );
   assert.equal(
     getEffectiveMunicipalitySeverity('0220100', '020000', muniSeverityMap, '011000'),
-    'normal'
+    'warning'
   );
 
   // Verify topological edge cancellation dissolves two adjacent squares sharing edge (1,0)->(1,1) into 1 unified rectangle
@@ -1105,5 +1105,77 @@ test('sortEarthquakesByNewest sorts earthquake history strictly by occurrenceTim
     ['newest-small-quake', 'middle-moderate-quake', 'older-huge-quake']
   );
 });
+
+test('computeEarthquakeAreaScales maps seismic intensity stations to JMA 188-area codes via point-in-polygon', async () => {
+  const { computeEarthquakeAreaScales, isPointInPolygon } = await import('./jmaParser');
+
+  // Verify point in square
+  const unitSquare: number[][] = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]];
+  assert.equal(isPointInPolygon([5, 5], unitSquare), true);
+  assert.equal(isPointInPolygon([15, 5], unitSquare), false);
+
+  const mockGeoJson = {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        properties: { code: '704', name: '山口県中部' },
+        geometry: {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [131.0, 34.0],
+              [132.0, 34.0],
+              [132.0, 34.5],
+              [131.0, 34.5],
+              [131.0, 34.0],
+            ],
+          ],
+        },
+      },
+    ],
+  };
+
+  const mockQuake = {
+    id: 'test-eq',
+    issueTime: '2026/11/07 06:32 発表',
+    occurrenceTime: '2026/11/07 06:30 頃発生',
+    hypocenterName: '山口県中部',
+    regionId: 'chugoku_shikoku' as const,
+    lat: 34.2,
+    lon: 131.6,
+    depthKm: 10,
+    magnitude: 2.9,
+    maxScaleCode: 20,
+    maxScaleLabel: '2',
+    domesticTsunami: 'なし',
+    foreignTsunami: 'なし',
+    sourceOffice: '気象庁',
+    stations: [
+      {
+        prefecture: '山口県',
+        city: '山口市',
+        stationName: '山口市徳地堀',
+        scaleCode: 20,
+        scaleLabel: '2',
+        lat: 34.19,
+        lon: 131.66,
+      },
+      {
+        prefecture: '山口県',
+        city: '防府市',
+        stationName: '防府市寿',
+        scaleCode: 10,
+        scaleLabel: '1',
+        lat: 34.05,
+        lon: 131.56,
+      },
+    ],
+  };
+
+  const scaleMap = computeEarthquakeAreaScales(mockQuake, mockGeoJson);
+  assert.equal(scaleMap.get('704'), 20);
+});
+
 
 
