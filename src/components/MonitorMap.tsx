@@ -22,6 +22,7 @@ import { fetchSharedJmaAreaConst } from '../services/jmaClient';
 import {
   AMEDAS_PATROL_STOPS,
   computeEarthquakeAreaScales,
+  computeEarthquakeCityScales,
   computeTyphoonConeEnvelope,
   dissolveGeoJsonByGroup,
   formatCompactTyphoonCenterLabel,
@@ -206,6 +207,18 @@ function latLonToNormMercator(
   const normX = lon / 360 + 0.5;
   const normY = 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
   return { normX, normY };
+}
+
+function normMercatorToLatLon(
+  normX: number,
+  normY: number
+): { lat: number; lon: number } {
+  const lon = (normX - 0.5) * 360;
+  const y2 = (0.5 - normY) * (4 * Math.PI);
+  const expY2 = Math.exp(y2);
+  const sin = (expY2 - 1) / (expY2 + 1);
+  const lat = Math.asin(sin) / DEG_TO_RAD;
+  return { lat, lon };
 }
 
 function projectLatLonToWorldPx(
@@ -436,7 +449,7 @@ const SCENE_CAMERA_TARGETS: Record<
   radar: NATIONAL_CAMERA_VIEW,
   typhoon: { center: [37.5, 149.0], zoom: 4 },
   weather_info: NATIONAL_CAMERA_VIEW,
-  amedas: NATIONAL_CAMERA_VIEW,
+  amedas: { center: [37.5, 137.5], zoom: 5.2 },
   forecast: NATIONAL_CAMERA_VIEW,
   volcano: { center: [31.585, 130.657], zoom: 9 },
   tsunami: { center: [36.8, 137.5], zoom: 5.2 },
@@ -483,6 +496,17 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     width: 1280,
     height: 720,
     dpr: 1,
+  });
+
+  // Cascading North-to-South entrance & exit animation state for AMeDAS
+  const amedasAnimRef = useRef<{
+    metric: AmedasMetric;
+    phase: 'waiting_camera' | 'entering' | 'steady' | 'exiting' | 'transitioning';
+    startTime: number;
+  }>({
+    metric: amedasMetric,
+    phase: 'waiting_camera',
+    startTime: performance.now(),
   });
 
   // Pre-compiled normalized Web Mercator geometry refs for 60fps razor-sharp Canvas rendering
@@ -971,17 +995,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             for (let i = 0; i < divShapes.length; i++) {
               const sh = divShapes[i];
               if (!isShapeVisible(sh)) continue;
-              let isYellow = false;
-              if (!focusedDivCode || sh.divisionCode === focusedDivCode) {
-                const divSev =
-                  divHasActiveWarning.get(sh.divisionCode) ||
-                  data.prefSeverityMap[sh.prefId] ||
-                  'normal';
-                isYellow =
-                  divSev === 'special' ||
-                  divSev === 'warning' ||
-                  divSev === 'advisory';
-              }
+              const divSev =
+                divHasActiveWarning.get(sh.divisionCode) ||
+                data.prefSeverityMap[sh.prefId] ||
+                'normal';
+              const isYellow =
+                divSev === 'special' ||
+                divSev === 'warning' ||
+                divSev === 'advisory';
               if (isYellow) {
                 underfillYellowShapes.push(sh);
               } else {
@@ -1069,17 +1090,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               const innerBorderShapes: CompiledGeoShape[] = [];
               for (let i = 0; i < c20Shapes.length; i++) {
                 const sh = c20Shapes[i];
-                if (focusedDivCode && sh.divisionCode !== focusedDivCode) {
-                  if ((muniMap[sh.id] || 'normal') !== 'normal') {
-                    uncoloredOtherDivMuniCount++;
-                  }
-                  continue;
-                }
                 const effSev = getEffectiveMunicipalitySeverity(
                   sh.id,
                   sh.divisionCode,
-                  muniMap,
-                  focusedDivCode
+                  muniMap
                 );
                 if (effSev !== 'normal') {
                   coloredMuniCount++;
@@ -1176,62 +1190,115 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             }
             setDs(baseCanvas, 'coloredWarningCount', String(coloredMuniCount));
             setDs(baseCanvas, 'warningZoomTier', tier);
-          } else if (
-            effectiveScene === 'earthquake' &&
-            earthquakeCompiledRef.current.length > 0
-          ) {
-            // JMA 188-Area Seismic Intensity Map
-            const eqShapes = earthquakeCompiledRef.current;
-            const areaScaleMap = computeEarthquakeAreaScales(
-              selectedEarthquake,
-              earthquakeGeoJsonData
-            );
+          } else if (effectiveScene === 'earthquake') {
+            const isZoomedIn = currentZoom >= 6.8;
+            if (isZoomedIn && class20CompiledRef.current.length > 0) {
+              // Zoomed-in Municipality Level Intensity Map (`市区町村単位で細分化`)
+              const c20Shapes = class20CompiledRef.current;
+              const cityScaleMap = computeEarthquakeCityScales(
+                selectedEarthquake,
+                class20GeoJsonData
+              );
 
-            // 1. Draw base land fill for un-shaken regions
-            bCtx.beginPath();
-            for (let i = 0; i < eqShapes.length; i++) {
-              const sh = eqShapes[i];
-              if (!isShapeVisible(sh)) continue;
-              const scale = areaScaleMap.get(sh.id) || 0;
-              if (scale < 10) {
+              // 1. Un-shaken municipalities base land fill
+              bCtx.beginPath();
+              for (let i = 0; i < c20Shapes.length; i++) {
+                const sh = c20Shapes[i];
+                if (!isShapeVisible(sh)) continue;
+                const scale = cityScaleMap.get(sh.id) || 0;
+                if (scale < 10) {
+                  traceShapePath(bCtx, sh);
+                }
+              }
+              bCtx.fillStyle = '#232731';
+              bCtx.fill();
+              bCtx.strokeStyle = '#3A4250';
+              bCtx.lineWidth = 0.8;
+              bCtx.stroke();
+
+              // 2. Seismic-intensity colored municipalities (震度1〜7)
+              for (let i = 0; i < c20Shapes.length; i++) {
+                const sh = c20Shapes[i];
+                if (!isShapeVisible(sh)) continue;
+                const scale = cityScaleMap.get(sh.id) || 0;
+                if (scale >= 10) {
+                  const style = getSeismicScaleStyle(scale);
+                  bCtx.beginPath();
+                  traceShapePath(bCtx, sh);
+                  bCtx.fillStyle = style.hex;
+                  bCtx.globalAlpha = 0.55;
+                  bCtx.fill();
+                  bCtx.globalAlpha = 1.0;
+                  bCtx.strokeStyle = style.hex;
+                  bCtx.lineWidth = 1.6;
+                  bCtx.stroke();
+                }
+              }
+
+              // 3. Prefecture / Division outer boundaries
+              bCtx.beginPath();
+              for (let i = 0; i < divShapes.length; i++) {
+                const sh = divShapes[i];
+                if (!isShapeVisible(sh)) continue;
                 traceShapePath(bCtx, sh);
               }
-            }
-            bCtx.fillStyle = '#232731';
-            bCtx.fill();
-            bCtx.strokeStyle = '#3A4250';
-            bCtx.lineWidth = 1.0;
-            bCtx.stroke();
+              bCtx.strokeStyle = '#5A6273';
+              bCtx.lineWidth = 1.2;
+              bCtx.stroke();
+            } else if (earthquakeCompiledRef.current.length > 0) {
+              // Nationwide 188-Area Seismic Sub-division Map
+              const eqShapes = earthquakeCompiledRef.current;
+              const areaScaleMap = computeEarthquakeAreaScales(
+                selectedEarthquake,
+                earthquakeGeoJsonData
+              );
 
-            // 2. Draw seismic-intensity colored regions (震度1〜7)
-            for (let i = 0; i < eqShapes.length; i++) {
-              const sh = eqShapes[i];
-              if (!isShapeVisible(sh)) continue;
-              const scale = areaScaleMap.get(sh.id) || 0;
-              if (scale >= 10) {
-                const style = getSeismicScaleStyle(scale);
-                bCtx.beginPath();
-                traceShapePath(bCtx, sh);
-                bCtx.fillStyle = style.hex;
-                bCtx.globalAlpha = 0.55;
-                bCtx.fill();
-                bCtx.globalAlpha = 1.0;
-                bCtx.strokeStyle = style.hex;
-                bCtx.lineWidth = 2.0;
-                bCtx.stroke();
+              // 1. Draw base land fill for un-shaken regions
+              bCtx.beginPath();
+              for (let i = 0; i < eqShapes.length; i++) {
+                const sh = eqShapes[i];
+                if (!isShapeVisible(sh)) continue;
+                const scale = areaScaleMap.get(sh.id) || 0;
+                if (scale < 10) {
+                  traceShapePath(bCtx, sh);
+                }
               }
-            }
+              bCtx.fillStyle = '#232731';
+              bCtx.fill();
+              bCtx.strokeStyle = '#3A4250';
+              bCtx.lineWidth = 1.0;
+              bCtx.stroke();
 
-            // 3. Draw outer prefecture boundaries for geographic clarity
-            bCtx.beginPath();
-            for (let i = 0; i < divShapes.length; i++) {
-              const sh = divShapes[i];
-              if (!isShapeVisible(sh)) continue;
-              traceShapePath(bCtx, sh);
+              // 2. Draw seismic-intensity colored regions (震度1〜7)
+              for (let i = 0; i < eqShapes.length; i++) {
+                const sh = eqShapes[i];
+                if (!isShapeVisible(sh)) continue;
+                const scale = areaScaleMap.get(sh.id) || 0;
+                if (scale >= 10) {
+                  const style = getSeismicScaleStyle(scale);
+                  bCtx.beginPath();
+                  traceShapePath(bCtx, sh);
+                  bCtx.fillStyle = style.hex;
+                  bCtx.globalAlpha = 0.55;
+                  bCtx.fill();
+                  bCtx.globalAlpha = 1.0;
+                  bCtx.strokeStyle = style.hex;
+                  bCtx.lineWidth = 2.0;
+                  bCtx.stroke();
+                }
+              }
+
+              // 3. Draw outer prefecture boundaries for geographic clarity
+              bCtx.beginPath();
+              for (let i = 0; i < divShapes.length; i++) {
+                const sh = divShapes[i];
+                if (!isShapeVisible(sh)) continue;
+                traceShapePath(bCtx, sh);
+              }
+              bCtx.strokeStyle = '#5A6273';
+              bCtx.lineWidth = 1.2;
+              bCtx.stroke();
             }
-            bCtx.strokeStyle = '#5A6273';
-            bCtx.lineWidth = 1.2;
-            bCtx.stroke();
 
             delete baseCanvas.dataset.focusedDivisionCode;
             delete baseCanvas.dataset.focusedDivisionBlueBorder;
@@ -1307,6 +1374,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         }
 
         let drawnCount = 0;
+        const anim = amedasAnimRef.current;
+        const now = performance.now();
+        const isAnimActive = effectiveScene === 'amedas';
 
         if (amedasMetric === 'wind') {
           const arrowSize = getAmedasWindArrowSizeForZoom(currentZoom);
@@ -1318,13 +1388,44 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
           for (let i = 0; i < visibleStations.length; i++) {
             const st = visibleStations[i];
+
+            let stAlpha = 1.0;
+            let stScale = 1.0;
+            let stOffsetY = 0;
+
+            if (isAnimActive && anim.metric === amedasMetric) {
+              if (anim.phase === 'waiting_camera' || anim.phase === 'transitioning') {
+                continue;
+              }
+              if (anim.phase === 'entering') {
+                const elapsed = now - anim.startTime;
+                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
+                const stStart = latNorm * (1600 - 250);
+                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
+                if (p <= 0.001) continue;
+                stAlpha = p;
+                stScale = 0.4 + 0.6 * p;
+                stOffsetY = (1 - p) * -12;
+              } else if (anim.phase === 'exiting') {
+                const elapsed = now - anim.startTime;
+                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
+                const stStart = latNorm * (1300 - 250);
+                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
+                if (p >= 0.999) continue;
+                stAlpha = 1 - p;
+                stScale = 1.0 - 0.4 * p;
+                stOffsetY = p * 10;
+              }
+            }
+
             const meta = preCompiledAmedas.metaByStation.get(st);
             const posX = meta
               ? meta.normX * worldScale - originX
               : projectToScreen(st.lat, st.lon).x;
-            const posY = meta
-              ? meta.normY * worldScale - originY
-              : projectToScreen(st.lat, st.lon).y;
+            const posY =
+              (meta
+                ? meta.normY * worldScale - originY
+                : projectToScreen(st.lat, st.lon).y) + stOffsetY;
 
             if (
               posX < -arrowSize ||
@@ -1344,7 +1445,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.save();
             ctx.translate(posX, posY);
             ctx.rotate(rotRad);
-            ctx.scale(s, s);
+            ctx.scale(s * stScale, s * stScale);
+            ctx.globalAlpha = stAlpha;
 
             ctx.beginPath();
             ctx.moveTo(0, -11);
@@ -1361,20 +1463,49 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         } else {
           const radius = getAmedasPointRadiusForZoom(currentZoom);
           const strokeWidth = currentZoom >= 6 ? 1.0 : 0.7;
-          const colorBatches = new Map<
-            string,
-            Array<{ x: number; y: number }>
-          >();
+          ctx.lineWidth = strokeWidth;
+          ctx.strokeStyle = '#0B0D12';
 
           for (let i = 0; i < visibleStations.length; i++) {
             const st = visibleStations[i];
+
+            let stAlpha = 1.0;
+            let stScale = 1.0;
+            let stOffsetY = 0;
+
+            if (isAnimActive && anim.metric === amedasMetric) {
+              if (anim.phase === 'waiting_camera' || anim.phase === 'transitioning') {
+                continue;
+              }
+              if (anim.phase === 'entering') {
+                const elapsed = now - anim.startTime;
+                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
+                const stStart = latNorm * (1600 - 250);
+                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
+                if (p <= 0.001) continue;
+                stAlpha = p;
+                stScale = 0.4 + 0.6 * p;
+                stOffsetY = (1 - p) * -12;
+              } else if (anim.phase === 'exiting') {
+                const elapsed = now - anim.startTime;
+                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
+                const stStart = latNorm * (1300 - 250);
+                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
+                if (p >= 0.999) continue;
+                stAlpha = 1 - p;
+                stScale = 1.0 - 0.4 * p;
+                stOffsetY = p * 10;
+              }
+            }
+
             const meta = preCompiledAmedas.metaByStation.get(st);
             const posX = meta
               ? meta.normX * worldScale - originX
               : projectToScreen(st.lat, st.lon).x;
-            const posY = meta
-              ? meta.normY * worldScale - originY
-              : projectToScreen(st.lat, st.lon).y;
+            const posY =
+              (meta
+                ? meta.normY * worldScale - originY
+                : projectToScreen(st.lat, st.lon).y) + stOffsetY;
 
             if (
               posX < -radius * 2 ||
@@ -1387,26 +1518,15 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             drawnCount++;
             const dotColor =
               meta?.dotColor || getAmedasMetricColor(st, amedasMetric);
-            let group = colorBatches.get(dotColor);
-            if (!group) {
-              group = [];
-              colorBatches.set(dotColor, group);
-            }
-            group.push({ x: posX, y: posY });
-          }
 
-          ctx.lineWidth = strokeWidth;
-          ctx.strokeStyle = '#0B0D12';
-          for (const [dotColor, pts] of colorBatches.entries()) {
+            ctx.save();
+            ctx.globalAlpha = stAlpha;
             ctx.beginPath();
-            for (let i = 0; i < pts.length; i++) {
-              const p = pts[i];
-              ctx.moveTo(p.x + radius, p.y);
-              ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-            }
+            ctx.arc(posX, posY, radius * stScale, 0, Math.PI * 2);
             ctx.fillStyle = dotColor;
             ctx.fill();
             ctx.stroke();
+            ctx.restore();
           }
         }
 
@@ -1682,79 +1802,92 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     interruptKind,
   ]);
 
-  // AMeDAS Camera Choreography:
-  // 全国表示 -> 北海道 -> 東北 -> 関東中部近畿 -> 中国四国九州 -> 沖縄 -> もう一度全国表示
-  // Smoothly moves (`flyTo`) to each regional stop (including smooth transition when entering AMeDAS from another zoomed-in tab!)
+  // AMeDAS Nationwide Cascading Animation Manager:
+  // Abolished regional patrol; strictly maintained in Nationwide view.
+  // Sequence:
+  // 1. Once camera settles at nationwide view, stations cascade in from North to South (`entering`, 1600ms).
+  // 2. Points remain steady for ~7 seconds (`steady`) for clear reading.
+  // 3. Points cascade out from North to South (`exiting`, 1300ms).
+  // 4. Brief blank pause (`transitioning`, 300ms), then advances to next metric or scene (`onSceneComplete`).
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map || effectiveScene !== 'amedas') return;
-    if (
-      activeRegionConfig.id !== 'national' &&
-      activeRegionConfig.id !== 'world'
-    ) {
-      return;
-    }
 
     let cancelled = false;
-    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let rafId = 0;
 
-    // 1. Smoothly transition (`flyTo`) to Nationwide view (`全国表示`: `[36.8, 137.5], zoom: 5`) if not already there
-    map.stop();
-    const initialStop = AMEDAS_PATROL_STOPS[0];
-    const curCenter = map.getCenter();
-    const curZoom = map.getZoom();
-    const needsInitialFly =
-      Math.abs(curCenter.lat - initialStop.center[0]) > 0.02 ||
-      Math.abs(curCenter.lng - initialStop.center[1]) > 0.02 ||
-      Math.abs(curZoom - initialStop.zoom) > 0.02;
+    amedasAnimRef.current = {
+      metric: amedasMetric,
+      phase: isMovingRef.current ? 'waiting_camera' : 'entering',
+      startTime: performance.now(),
+    };
 
-    if (needsInitialFly) {
-      map.flyTo(initialStop.center, initialStop.zoom, {
-        animate: true,
-        duration: 1.5,
-        easeLinearity: 0.1,
-      });
+    const runEntering = () => {
+      if (cancelled) return;
+      amedasAnimRef.current.phase = 'entering';
+      amedasAnimRef.current.startTime = performance.now();
+
+      const stepEntering = (now: number) => {
+        if (cancelled) return;
+        const elapsed = now - amedasAnimRef.current.startTime;
+        renderInteractiveCanvasRef.current();
+
+        if (elapsed < 1600) {
+          rafId = requestAnimationFrame(stepEntering);
+        } else {
+          amedasAnimRef.current.phase = 'steady';
+          amedasAnimRef.current.startTime = performance.now();
+          renderInteractiveCanvasRef.current();
+
+          timerId = setTimeout(() => {
+            if (cancelled || isLoopPaused || interruptKind !== 'none') return;
+            amedasAnimRef.current.phase = 'exiting';
+            amedasAnimRef.current.startTime = performance.now();
+
+            const stepExiting = (nowExit: number) => {
+              if (cancelled) return;
+              const exitElapsed = nowExit - amedasAnimRef.current.startTime;
+              renderInteractiveCanvasRef.current();
+
+              if (exitElapsed < 1300) {
+                rafId = requestAnimationFrame(stepExiting);
+              } else {
+                amedasAnimRef.current.phase = 'transitioning';
+                amedasAnimRef.current.startTime = performance.now();
+                renderInteractiveCanvasRef.current();
+
+                timerId = setTimeout(() => {
+                  if (cancelled || isLoopPaused || interruptKind !== 'none') return;
+                  onSceneCompleteRef.current();
+                }, 300);
+              }
+            };
+            rafId = requestAnimationFrame(stepExiting);
+          }, 7000);
+        }
+      };
+      rafId = requestAnimationFrame(stepEntering);
+    };
+
+    if (isMovingRef.current) {
+      const onMoveEnd = () => {
+        map.off('moveend', onMoveEnd);
+        if (!cancelled) runEntering();
+      };
+      map.on('moveend', onMoveEnd);
+    } else {
+      runEntering();
     }
-
-    // Step through each stop in AMEDAS_PATROL_STOPS[1..] (`北海道 -> 東北 -> 関東中部近畿 -> 中国四国九州 -> 沖縄 -> 全国表示`)
-    // Hold ~5 seconds (5000ms) at each regional stop so viewers can clearly inspect every region!
-    let cumulativeDelayMs = (needsInitialFly ? 1500 : 0) + 3500;
-
-    for (let i = 1; i < AMEDAS_PATROL_STOPS.length; i++) {
-      const stop = AMEDAS_PATROL_STOPS[i];
-      const isFinalNational = i === AMEDAS_PATROL_STOPS.length - 1;
-      const flyDurationSec = i === 1 || i >= 5 ? 1.5 : 1.35;
-      const pauseAtStopMs = isFinalNational ? 3500 : 5000;
-
-      const tFly = setTimeout(() => {
-        if (cancelled || isLoopPaused || interruptKind !== 'none') return;
-        map.stop();
-        map.flyTo(stop.center, stop.zoom, {
-          animate: true,
-          duration: flyDurationSec,
-          easeLinearity: 0.15,
-        });
-      }, cumulativeDelayMs);
-      timers.push(tFly);
-
-      cumulativeDelayMs += Math.round(flyDurationSec * 1000) + pauseAtStopMs;
-    }
-
-    // Complete metric / scene after holding on the final Nationwide view
-    const tComplete = setTimeout(() => {
-      if (cancelled || isLoopPaused || interruptKind !== 'none') return;
-      onSceneCompleteRef.current();
-    }, cumulativeDelayMs);
-    timers.push(tComplete);
 
     return () => {
       cancelled = true;
-      timers.forEach((t) => clearTimeout(t));
+      if (timerId) clearTimeout(timerId);
+      if (rafId) cancelAnimationFrame(rafId);
     };
   }, [
     effectiveScene,
     amedasMetric,
-    activeRegionConfig.id,
     isLoopPaused,
     interruptKind,
   ]);
@@ -2300,9 +2433,76 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       }
     }
     if (effectiveScene === 'warnings' && activeWarningDivision) {
+      // Find bounding box of the active division to center it perfectly in the unobstructed viewport
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+
+      const targetCode = activeWarningDivision.divisionCode;
+      const targetPref = activeWarningDivision.prefId;
+      const shapes =
+        dissolvedDivisionsCompiledRef.current.length > 0
+          ? dissolvedDivisionsCompiledRef.current
+          : class20CompiledRef.current;
+
+      for (let i = 0; i < shapes.length; i++) {
+        const sh = shapes[i];
+        if (
+          sh.divisionCode === targetCode ||
+          (!targetCode && targetPref && sh.prefId === targetPref)
+        ) {
+          if (sh.minNormX < minX) minX = sh.minNormX;
+          if (sh.maxNormX > maxX) maxX = sh.maxNormX;
+          if (sh.minNormY < minY) minY = sh.minNormY;
+          if (sh.maxNormY > maxY) maxY = sh.maxNormY;
+        }
+      }
+
+      const vpW = viewportSizeRef.current?.width || 1280;
+      const vpH = viewportSizeRef.current?.height || 720;
+      const availW = Math.max(600, vpW - 270);
+      const availH = Math.max(450, vpH - 80);
+
+      if (minX < maxX && minY < maxY) {
+        const spanNormX = maxX - minX;
+        const spanNormY = maxY - minY;
+        const { lat: centerLat, lon: centerLon } = normMercatorToLatLon(
+          (minX + maxX) / 2,
+          (minY + maxY) / 2
+        );
+
+        const zx = Math.log2((availW * 0.82) / (spanNormX * 256));
+        const zy = Math.log2((availH * 0.82) / (spanNormY * 256));
+        const targetZoom = Math.min(
+          8.2,
+          Math.max(6.8, Math.round(Math.min(zx, zy) * 10) / 10)
+        );
+
+        // Shift camera east so the prefecture centers in the open viewing area (left of the 244px right panel)
+        const centerLatRad = (centerLat * Math.PI) / 180;
+        const lonOffsetDeg =
+          (130 * 360) /
+          (256 * Math.pow(2, targetZoom) * Math.cos(centerLatRad));
+
+        return {
+          center: [centerLat, centerLon + lonOffsetDeg],
+          zoom: targetZoom,
+        };
+      }
+
+      // Robust fallback if shapes not yet loaded
+      const fallbackZoom = 7.6;
+      const fallbackLat = activeWarningDivision.lat || 37.0;
+      const fallbackLon = activeWarningDivision.lon || 138.0;
+      const latRad = (fallbackLat * Math.PI) / 180;
+      const lonOffsetDeg =
+        (130 * 360) /
+        (256 * Math.pow(2, fallbackZoom) * Math.cos(latRad));
+
       return {
-        center: [activeWarningDivision.lat, activeWarningDivision.lon],
-        zoom: Math.max(8.5, (activeWarningDivision.zoom || 7) + 1.5),
+        center: [fallbackLat, fallbackLon + lonOffsetDeg],
+        zoom: fallbackZoom,
       };
     }
     if (activeRegionConfig.id === 'world') {
@@ -2333,15 +2533,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     if (isFirstMountRef.current) {
       isFirstMountRef.current = false;
       map.setView(targetCenter, targetZoom, { animate: false });
-      return;
-    }
-
-    // In 'amedas' national mode, the dedicated AMeDAS sweep effect controls the camera
-    if (
-      effectiveScene === 'amedas' &&
-      (activeRegionConfig.id === 'national' ||
-        activeRegionConfig.id === 'world')
-    ) {
       return;
     }
 
@@ -3094,11 +3285,30 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         )
         .sort((a, b) => b.scaleCode - a.scaleCode);
 
-      // 2. Standard Observed Earthquake Stations (All observed stations are displayed, never blocked by epicenter)
+      // 2. Standard Observed Earthquake Stations (sorted descending by scaleCode so higher intensities take priority; badges do NOT overlap each other, but CAN overlap epicenter)
+      const stationBoxes: Array<{ x: number; y: number; w: number; h: number }> = [];
+
       sortedStations.forEach((st) => {
         const style = getSeismicScaleStyle(st.scaleCode);
         const compactW = st.scaleLabel.length > 1 ? 22 : 18;
         const compactH = 18;
+        const pt = map.project([st.lat, st.lon], projectionZoom);
+
+        // Filter out colliding badges: badges do not overlap each other
+        let collides = false;
+        for (let i = 0; i < stationBoxes.length; i++) {
+          const b = stationBoxes[i];
+          if (
+            Math.abs(pt.x - b.x) < (compactW + b.w) / 2 + 2 &&
+            Math.abs(pt.y - b.y) < (compactH + b.h) / 2 + 2
+          ) {
+            collides = true;
+            break;
+          }
+        }
+        if (collides) return;
+
+        stationBoxes.push({ x: pt.x, y: pt.y, w: compactW, h: compactH });
 
         const compactIcon = L.divIcon({
           className: 'custom-eq-station-compact',

@@ -1249,6 +1249,7 @@ export function parseJmaQuakeDetailJson(
       string,
       { scaleCode: number; scaleLabel: string; name?: string }
     > = {};
+    const cityMaxScales: Record<string, number> = {};
     const prefs = Array.isArray(obs.Pref) ? obs.Pref : [];
 
     for (const pref of prefs) {
@@ -1269,6 +1270,12 @@ export function parseJmaQuakeDetailJson(
         const cities = Array.isArray(area?.City) ? area.City : [];
         for (const city of cities) {
           const cityName = String(city?.Name || areaName);
+          const cityCode = String(city?.Code || '');
+          const cityMaxIntStr = String(city?.MaxInt || '');
+          if (cityCode && cityMaxIntStr) {
+            const cInt = parseJmaIntensityString(cityMaxIntStr);
+            cityMaxScales[cityCode] = cInt.scaleCode;
+          }
           const intensityStations = Array.isArray(city?.IntensityStation)
             ? city.IntensityStation
             : [];
@@ -1322,6 +1329,7 @@ export function parseJmaQuakeDetailJson(
           '気象庁本庁（震源・震度情報）'
       ),
       areaMaxScales,
+      cityMaxScales,
       stations:
         stations.length > 0
           ? stations
@@ -1718,14 +1726,14 @@ export function getAmedasPointRadiusForZoom(zoom: number): number {
  */
 export function getAmedasWindArrowSizeForZoom(zoom: number): number {
   const stops: Array<[number, number]> = [
-    [3, 8.0],
-    [4, 9.5],
-    [5, 11.5],
-    [6, 14.5],
-    [7, 18.0],
-    [8, 21.0],
-    [9, 24.0],
-    [11, 28.0],
+    [3, 14.0],
+    [4, 18.0],
+    [5, 24.0],
+    [6, 28.0],
+    [7, 32.0],
+    [8, 36.0],
+    [9, 40.0],
+    [11, 46.0],
   ];
   if (zoom <= stops[0][0]) return stops[0][1];
   const last = stops[stops.length - 1];
@@ -1738,7 +1746,7 @@ export function getAmedasWindArrowSizeForZoom(zoom: number): number {
       return Number((s0 + (s1 - s0) * t).toFixed(2));
     }
   }
-  return 11.5;
+  return 24.0;
 }
 
 /**
@@ -1782,11 +1790,9 @@ export function selectNonOverlappingAmedasStations(
 
   if (metric === 'wind') {
     const arrowSize = getAmedasWindArrowSizeForZoom(zoom);
-    // At nationwide zoom (zoom <= 5.5), keep arrows cleanly separated (minDist = arrowSize * 0.75);
-    // smoothly relax spacing between zoom 5.5 and 8.2 so regional stations progressively appear.
+    // At nationwide zoom (zoom <= 5.5), filter with 52px spacing so ~70-90 prominent large arrows appear!
     const t = Math.max(0, Math.min(1, (zoom - 5.5) / (8.2 - 5.5)));
-    const spacingFactor = 0.75 - t * 0.23;
-    const minDistPx = arrowSize * spacingFactor;
+    const minDistPx = zoom <= 5.5 ? 52.0 : arrowSize * (1.6 - t * 0.7);
     return filterNonOverlappingPoints(ordered, projectFn, minDistPx);
   }
 
@@ -2008,6 +2014,64 @@ export function computeEarthquakeAreaScales(
   }
 
   return areaScales;
+}
+
+/**
+ * Maps each JMA municipality code (e.g., '3520300') to its maximum observed seismic scale code (e.g., 10, 20, 30).
+ * Used when zoomed into municipality level (`zoom >= 6.8`) to subdivide the earthquake intensity map into cities/towns.
+ */
+export function computeEarthquakeCityScales(
+  eq: EarthquakeReport,
+  class20GeoJson?: any
+): Map<string, number> {
+  const cityScales = new Map<string, number>();
+
+  if (eq.cityMaxScales) {
+    for (const [code, scale] of Object.entries(eq.cityMaxScales)) {
+      if (typeof scale === 'number') {
+        cityScales.set(code, scale);
+      }
+    }
+  }
+
+  if (
+    class20GeoJson &&
+    Array.isArray(class20GeoJson.features) &&
+    Array.isArray(eq.stations) &&
+    eq.stations.length > 0
+  ) {
+    for (const st of eq.stations) {
+      if (typeof st.lat !== 'number' || typeof st.lon !== 'number') continue;
+      const pt: [number, number] = [st.lon, st.lat];
+      for (const f of class20GeoJson.features) {
+        const code = String(f?.properties?.code || '');
+        if (!code) continue;
+        const geom = f.geometry;
+        let matched = false;
+        if (geom.type === 'Polygon') {
+          if (geom.coordinates[0] && isPointInPolygon(pt, geom.coordinates[0])) {
+            matched = true;
+          }
+        } else if (geom.type === 'MultiPolygon') {
+          for (const poly of geom.coordinates) {
+            if (poly[0] && isPointInPolygon(pt, poly[0])) {
+              matched = true;
+              break;
+            }
+          }
+        }
+        if (matched) {
+          const cur = cityScales.get(code) || 0;
+          if (st.scaleCode > cur) {
+            cityScales.set(code, st.scaleCode);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  return cityScales;
 }
 
 /**

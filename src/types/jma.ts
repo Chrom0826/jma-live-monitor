@@ -263,6 +263,8 @@ export interface EarthquakeReport {
   hypocenterUnknown?: boolean;
   /** 気象庁震度細分区域コード（100, 704等）ごとの最大観測震度 */
   areaMaxScales?: Record<string, { scaleCode: number; scaleLabel: string; name?: string }>;
+  /** 市区町村コード（3520300等）ごとの最大観測震度（拡大時に使用） */
+  cityMaxScales?: Record<string, number>;
   stations: EarthquakeStationIntensity[];
 }
 

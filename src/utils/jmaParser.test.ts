@@ -495,8 +495,8 @@ test('AUTO_PATROL_SEQUENCE, getNextPatrolStep, municipalityWarnings, isExtratrop
   assert.equal(isExtratropicalCyclone(extraTc), true);
   assert.equal(formatCompactTyphoonCenterLabel(extraTc), '温帯低気圧');
 
-  // 4. Wind arrow size scaling & Top-5 rankings
-  assert.ok(getAmedasWindArrowSizeForZoom(5) >= 11 && getAmedasWindArrowSizeForZoom(5) <= 13);
+  // 4. Wind arrow size scaling & Top-5 rankings (Enlarged for nationwide clarity)
+  assert.ok(getAmedasWindArrowSizeForZoom(5) >= 20 && getAmedasWindArrowSizeForZoom(5) <= 26);
   assert.ok(getAmedasWindArrowSizeForZoom(6) > getAmedasWindArrowSizeForZoom(5));
   assert.ok(getAmedasWindArrowSizeForZoom(7) > getAmedasWindArrowSizeForZoom(6));
 
@@ -1107,7 +1107,7 @@ test('sortEarthquakesByNewest sorts earthquake history strictly by occurrenceTim
 });
 
 test('computeEarthquakeAreaScales maps seismic intensity stations to JMA 188-area codes via point-in-polygon', async () => {
-  const { computeEarthquakeAreaScales, isPointInPolygon } = await import('./jmaParser');
+  const { computeEarthquakeAreaScales, computeEarthquakeCityScales, isPointInPolygon } = await import('./jmaParser');
 
   // Verify point in square
   const unitSquare: number[][] = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]];
@@ -1175,6 +1175,36 @@ test('computeEarthquakeAreaScales maps seismic intensity stations to JMA 188-are
 
   const scaleMap = computeEarthquakeAreaScales(mockQuake, mockGeoJson);
   assert.equal(scaleMap.get('704'), 20);
+
+  // Test computeEarthquakeCityScales with cityMaxScales and class20GeoJson
+  const mockClass20 = {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        properties: { code: '3520300', name: '山口市' },
+        geometry: {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [131.0, 34.0],
+              [132.0, 34.0],
+              [132.0, 34.5],
+              [131.0, 34.5],
+              [131.0, 34.0],
+            ],
+          ],
+        },
+      },
+    ],
+  };
+
+  const quakeWithCity = {
+    ...mockQuake,
+    cityMaxScales: { '3520300': 20 },
+  };
+  const cityScales = computeEarthquakeCityScales(quakeWithCity, mockClass20);
+  assert.equal(cityScales.get('3520300'), 20);
 });
 
 
