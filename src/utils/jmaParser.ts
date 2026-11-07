@@ -1926,6 +1926,49 @@ export function sortEarthquakesByNewest(
   });
 }
 
+/** Occurrence time (ms) of a report, falling back to its issue time. 0 when unknown. */
+export function earthquakeEventTimeMs(eq: Pick<EarthquakeReport, 'occurrenceTime' | 'issueTime'>): number {
+  return parseEarthquakeTimeMs(eq.occurrenceTime) || parseEarthquakeTimeMs(eq.issueTime);
+}
+
+/**
+ * True when two reports describe the same earthquake even though they come from different feeds
+ * (P2P地震情報 ids vs 気象庁 bosai event ids never match). 震度速報 only carries the detection minute,
+ * so origin times within 75 s are treated as one event.
+ */
+export function isSameEarthquakeEvent(
+  a: Pick<EarthquakeReport, 'occurrenceTime' | 'issueTime'>,
+  b: Pick<EarthquakeReport, 'occurrenceTime' | 'issueTime'>,
+  toleranceMs = 75_000
+): boolean {
+  const ta = earthquakeEventTimeMs(a);
+  const tb = earthquakeEventTimeMs(b);
+  if (!ta || !tb) return false;
+  return Math.abs(ta - tb) <= toleranceMs;
+}
+
+export type IncomingEarthquakeDecision = 'interrupt' | 'update' | 'ignore';
+
+/**
+ * Decides what a newly received earthquake report should do to the screen.
+ * - 'interrupt': a newer event than anything seen -> switch to the 地震情報 scene immediately.
+ * - 'update':    a follow-up report (震度速報 -> 震源 -> 各地の震度) of the event already shown.
+ * - 'ignore':    an older event, or a stale event on first load.
+ */
+export function decideIncomingEarthquake(
+  report: Pick<EarthquakeReport, 'occurrenceTime' | 'issueTime'>,
+  latestKnown: Pick<EarthquakeReport, 'occurrenceTime' | 'issueTime'> | null,
+  nowMs: number,
+  freshWindowMs = 60 * 60 * 1000
+): IncomingEarthquakeDecision {
+  const t = earthquakeEventTimeMs(report);
+  if (!t) return 'ignore';
+  if (latestKnown && isSameEarthquakeEvent(report, latestKnown)) return 'update';
+  const tl = latestKnown ? earthquakeEventTimeMs(latestKnown) : 0;
+  if (tl && t < tl) return 'ignore';
+  return nowMs - t <= freshWindowMs ? 'interrupt' : 'ignore';
+}
+
 export type WarningMapZoomTier = 'prefecture' | 'division' | 'municipality';
 
 /**
