@@ -596,6 +596,36 @@ const SCENE_CAMERA_TARGETS: Record<
   earthquake: { center: [36.4, 140.8], zoom: 7 },
 };
 
+
+// AMeDAS 地点の出現・退出アニメーション（北→南の順に、点そのものが上から落ちてきて定位置に収まる）
+const AMEDAS_ENTER_TOTAL_MS = 1600;
+const AMEDAS_EXIT_TOTAL_MS = 1300;
+const AMEDAS_DROP_MS = 420;
+const AMEDAS_DROP_PX = 34;
+function getAmedasDropFrame(
+  phase: 'waiting_camera' | 'entering' | 'steady' | 'exiting' | 'transitioning',
+  elapsedMs: number,
+  lat: number
+): { alpha: number; offsetY: number } | null {
+  if (phase === 'waiting_camera' || phase === 'transitioning') return null;
+  if (phase === 'steady') return { alpha: 1, offsetY: 0 };
+  const latNorm = Math.max(0, Math.min(1, (45.5 - lat) / (45.5 - 24.0)));
+  if (phase === 'entering') {
+    const start = latNorm * (AMEDAS_ENTER_TOTAL_MS - AMEDAS_DROP_MS);
+    const t = Math.max(0, Math.min(1, (elapsedMs - start) / AMEDAS_DROP_MS));
+    if (t <= 0) return null;
+    // ease-out with a tiny overshoot so the point "lands"
+    const c = 1.4;
+    const e = 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2);
+    return { alpha: Math.min(1, t * 2.2), offsetY: (1 - e) * -AMEDAS_DROP_PX };
+  }
+  // exiting: points fall away downward and fade, same North -> South order
+  const start = latNorm * (AMEDAS_EXIT_TOTAL_MS - 260);
+  const t = Math.max(0, Math.min(1, (elapsedMs - start) / 260));
+  if (t >= 1) return null;
+  return { alpha: 1 - t, offsetY: t * t * 14 };
+}
+
 export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   activeScene,
   activeRegionConfig,
@@ -631,6 +661,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const onViewportChangeRef = useRef<typeof onViewportChange>(onViewportChange);
   // True while the camera is moving (flyTo / pan / zoom): enables cheaper draw LOD in the canvas renderer
   const isMovingRef = useRef<boolean>(false);
+  const getSceneCameraTargetRef = useRef<() => { center: [number, number]; zoom: number }>(
+    () => ({ center: [36.8, 137.5], zoom: 5 })
+  );
   const isFlyingRef = useRef<boolean>(false);
   const viewportSizeRef = useRef<{ width: number; height: number; dpr: number }>({
     width: 1280,
@@ -1904,28 +1937,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             let stOffsetY = 0;
 
             if (isAnimActive && anim.metric === amedasMetric) {
-              if (anim.phase === 'waiting_camera' || anim.phase === 'transitioning') {
-                continue;
-              }
-              if (anim.phase === 'entering') {
-                const elapsed = now - anim.startTime;
-                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
-                const stStart = latNorm * (1600 - 250);
-                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
-                if (p <= 0.001) continue;
-                stAlpha = p;
-                stScale = 0.4 + 0.6 * p;
-                stOffsetY = (1 - p) * -12;
-              } else if (anim.phase === 'exiting') {
-                const elapsed = now - anim.startTime;
-                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
-                const stStart = latNorm * (1300 - 250);
-                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
-                if (p >= 0.999) continue;
-                stAlpha = 1 - p;
-                stScale = 1.0 - 0.4 * p;
-                stOffsetY = p * 10;
-              }
+              const f = getAmedasDropFrame(anim.phase, now - anim.startTime, st.lat);
+              if (!f) continue;
+              stAlpha = f.alpha;
+              stOffsetY = f.offsetY;
             }
 
             const meta = preCompiledAmedas.metaByStation.get(st);
@@ -1984,28 +1999,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             let stOffsetY = 0;
 
             if (isAnimActive && anim.metric === amedasMetric) {
-              if (anim.phase === 'waiting_camera' || anim.phase === 'transitioning') {
-                continue;
-              }
-              if (anim.phase === 'entering') {
-                const elapsed = now - anim.startTime;
-                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
-                const stStart = latNorm * (1600 - 250);
-                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
-                if (p <= 0.001) continue;
-                stAlpha = p;
-                stScale = 0.4 + 0.6 * p;
-                stOffsetY = (1 - p) * -12;
-              } else if (anim.phase === 'exiting') {
-                const elapsed = now - anim.startTime;
-                const latNorm = Math.max(0, Math.min(1, (45.5 - st.lat) / (45.5 - 24.0)));
-                const stStart = latNorm * (1300 - 250);
-                const p = Math.max(0, Math.min(1, (elapsed - stStart) / 250));
-                if (p >= 0.999) continue;
-                stAlpha = 1 - p;
-                stScale = 1.0 - 0.4 * p;
-                stOffsetY = p * 10;
-              }
+              const f = getAmedasDropFrame(anim.phase, now - anim.startTime, st.lat);
+              if (!f) continue;
+              stAlpha = f.alpha;
+              stOffsetY = f.offsetY;
             }
 
             const meta = preCompiledAmedas.metaByStation.get(st);
@@ -2714,11 +2711,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     let timerId: ReturnType<typeof setTimeout> | null = null;
     let rafId = 0;
 
+    // Always start hidden; points only drop in once the camera has fully settled.
     amedasAnimRef.current = {
       metric: amedasMetric,
-      phase: isMovingRef.current ? 'waiting_camera' : 'entering',
+      phase: 'waiting_camera',
       startTime: performance.now(),
     };
+    renderInteractiveCanvasRef.current();
 
     const runEntering = () => {
       if (cancelled) return;
@@ -2730,7 +2729,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         const elapsed = now - amedasAnimRef.current.startTime;
         renderInteractiveCanvasRef.current();
 
-        if (elapsed < 1600) {
+        if (elapsed < AMEDAS_ENTER_TOTAL_MS) {
           rafId = requestAnimationFrame(stepEntering);
         } else {
           amedasAnimRef.current.phase = 'steady';
@@ -2747,7 +2746,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               const exitElapsed = nowExit - amedasAnimRef.current.startTime;
               renderInteractiveCanvasRef.current();
 
-              if (exitElapsed < 1300) {
+              if (exitElapsed < AMEDAS_EXIT_TOTAL_MS) {
                 rafId = requestAnimationFrame(stepExiting);
               } else {
                 amedasAnimRef.current.phase = 'transitioning';
@@ -2767,15 +2766,41 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       rafId = requestAnimationFrame(stepEntering);
     };
 
-    if (isMovingRef.current) {
-      const onMoveEnd = () => {
-        map.off('moveend', onMoveEnd);
-        if (!cancelled) runEntering();
-      };
-      map.on('moveend', onMoveEnd);
-    } else {
-      runEntering();
-    }
+    // Wait until the camera is still. This effect runs before the camera effect issues its flyTo,
+    // so `isMovingRef` alone is not enough: require the scene camera target to be reached (or give up
+    // waiting for it after a few seconds, e.g. the user zoomed manually) and the view to stay unchanged
+    // with no Leaflet animation for SETTLE_MS.
+    const SETTLE_MS = 220;
+    const TARGET_WAIT_MAX_MS = 4000;
+    const { center: target, zoom: targetZoom } = getSceneCameraTargetRef.current();
+    const waitStart = performance.now();
+    let lastKey = '';
+    let stableSince = 0;
+    const waitForSettle = (now: number) => {
+      if (cancelled) return;
+      const c = map.getCenter();
+      const z = map.getZoom();
+      const key = `${c.lat.toFixed(5)},${c.lng.toFixed(5)},${z.toFixed(4)}`;
+      const animating =
+        isMovingRef.current ||
+        isFlyingRef.current ||
+        Boolean((map as any)._animatingZoom);
+      if (key !== lastKey || animating) {
+        lastKey = key;
+        stableSince = now;
+      }
+      const atTarget =
+        Math.abs(c.lat - target[0]) < 0.02 &&
+        Math.abs(c.lng - target[1]) < 0.02 &&
+        Math.abs(z - targetZoom) < 0.01;
+      const targetOk = atTarget || now - waitStart > TARGET_WAIT_MAX_MS;
+      if (!animating && targetOk && now - stableSince >= SETTLE_MS) {
+        runEntering();
+        return;
+      }
+      rafId = requestAnimationFrame(waitForSettle);
+    };
+    rafId = requestAnimationFrame(waitForSettle);
 
     return () => {
       cancelled = true;
@@ -3417,6 +3442,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       zoom: activeRegionConfig.zoom,
     };
   };
+
+  getSceneCameraTargetRef.current = getSceneCameraTarget;
 
   // High-acceleration camera flight (`flyTo`) on scene, warning division patrol, region, typhoon, or interrupt change
   useEffect(() => {
