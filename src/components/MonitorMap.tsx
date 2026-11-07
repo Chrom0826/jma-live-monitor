@@ -597,11 +597,11 @@ const SCENE_CAMERA_TARGETS: Record<
 };
 
 
-// AMeDAS 地点の出現・退出アニメーション（北→南の順に、点そのものが上から落ちてきて定位置に収まる）
+// AMeDAS 地点の出現・退出アニメーション: 点は常に本来の位置に描画し（移動・拡大なし）、
+// 北（画面上）から南へ順番に短いフェードで現れ、退出時も同じ順で消える。
 const AMEDAS_ENTER_TOTAL_MS = 1600;
 const AMEDAS_EXIT_TOTAL_MS = 1300;
-const AMEDAS_DROP_MS = 420;
-const AMEDAS_DROP_PX = 34;
+const AMEDAS_FADE_MS = 140;
 function getAmedasDropFrame(
   phase: 'waiting_camera' | 'entering' | 'steady' | 'exiting' | 'transitioning',
   elapsedMs: number,
@@ -610,20 +610,11 @@ function getAmedasDropFrame(
   if (phase === 'waiting_camera' || phase === 'transitioning') return null;
   if (phase === 'steady') return { alpha: 1, offsetY: 0 };
   const latNorm = Math.max(0, Math.min(1, (45.5 - lat) / (45.5 - 24.0)));
-  if (phase === 'entering') {
-    const start = latNorm * (AMEDAS_ENTER_TOTAL_MS - AMEDAS_DROP_MS);
-    const t = Math.max(0, Math.min(1, (elapsedMs - start) / AMEDAS_DROP_MS));
-    if (t <= 0) return null;
-    // ease-out with a tiny overshoot so the point "lands"
-    const c = 1.4;
-    const e = 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2);
-    return { alpha: Math.min(1, t * 2.2), offsetY: (1 - e) * -AMEDAS_DROP_PX };
-  }
-  // exiting: points fall away downward and fade, same North -> South order
-  const start = latNorm * (AMEDAS_EXIT_TOTAL_MS - 260);
-  const t = Math.max(0, Math.min(1, (elapsedMs - start) / 260));
-  if (t >= 1) return null;
-  return { alpha: 1 - t, offsetY: t * t * 14 };
+  const total = phase === 'entering' ? AMEDAS_ENTER_TOTAL_MS : AMEDAS_EXIT_TOTAL_MS;
+  const start = latNorm * (total - AMEDAS_FADE_MS);
+  const t = Math.max(0, Math.min(1, (elapsedMs - start) / AMEDAS_FADE_MS));
+  if (phase === 'entering') return t <= 0 ? null : { alpha: t, offsetY: 0 };
+  return t >= 1 ? null : { alpha: 1 - t, offsetY: 0 };
 }
 
 export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
