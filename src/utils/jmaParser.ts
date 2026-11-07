@@ -1726,14 +1726,14 @@ export function getAmedasPointRadiusForZoom(zoom: number): number {
  */
 export function getAmedasWindArrowSizeForZoom(zoom: number): number {
   const stops: Array<[number, number]> = [
-    [3, 14.0],
-    [4, 18.0],
-    [5, 24.0],
-    [6, 28.0],
-    [7, 32.0],
-    [8, 36.0],
-    [9, 40.0],
-    [11, 46.0],
+    [3, 12.0],
+    [4, 16.0],
+    [5, 20.0],
+    [6, 25.0],
+    [7, 29.0],
+    [8, 33.0],
+    [9, 37.0],
+    [11, 44.0],
   ];
   if (zoom <= stops[0][0]) return stops[0][1];
   const last = stops[stops.length - 1];
@@ -1790,9 +1790,9 @@ export function selectNonOverlappingAmedasStations(
 
   if (metric === 'wind') {
     const arrowSize = getAmedasWindArrowSizeForZoom(zoom);
-    // At nationwide zoom (zoom <= 5.5), filter with 52px spacing so ~70-90 prominent large arrows appear!
+    // Pack wind arrows densely across Japan without gaps (~250+ stations at nationwide zoom)
     const t = Math.max(0, Math.min(1, (zoom - 5.5) / (8.2 - 5.5)));
-    const minDistPx = zoom <= 5.5 ? 52.0 : arrowSize * (1.6 - t * 0.7);
+    const minDistPx = arrowSize * (0.58 - t * 0.22);
     return filterNonOverlappingPoints(ordered, projectFn, minDistPx);
   }
 
@@ -1929,6 +1929,69 @@ export function isPointInPolygon(point: [number, number], ring: number[][]): boo
   return inside;
 }
 
+const geoFeatureBoundsCache = new WeakMap<
+  object,
+  [number, number, number, number]
+>();
+
+function getGeoFeatureBounds(f: any): [number, number, number, number] | null {
+  if (!f || typeof f !== 'object') return null;
+  const cached = geoFeatureBoundsCache.get(f);
+  if (cached) return cached;
+  const geom = f.geometry;
+  if (!geom) return null;
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+  const polys =
+    geom.type === 'Polygon'
+      ? [geom.coordinates]
+      : geom.type === 'MultiPolygon'
+        ? geom.coordinates
+        : [];
+  for (let p = 0; p < polys.length; p++) {
+    const ring = polys[p]?.[0];
+    if (!Array.isArray(ring)) continue;
+    for (let i = 0; i < ring.length; i++) {
+      const lon = Number(ring[i][0]);
+      const lat = Number(ring[i][1]);
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+  }
+  if (minLon > maxLon) return null;
+  const bounds: [number, number, number, number] = [
+    minLon,
+    minLat,
+    maxLon,
+    maxLat,
+  ];
+  geoFeatureBoundsCache.set(f, bounds);
+  return bounds;
+}
+
+function isPointInGeoFeature(pt: [number, number], f: any): boolean {
+  const b = getGeoFeatureBounds(f);
+  if (b && (pt[0] < b[0] || pt[0] > b[2] || pt[1] < b[1] || pt[1] > b[3])) {
+    return false;
+  }
+  const geom = f?.geometry;
+  if (!geom) return false;
+  if (geom.type === 'Polygon') {
+    return Boolean(geom.coordinates[0] && isPointInPolygon(pt, geom.coordinates[0]));
+  }
+  if (geom.type === 'MultiPolygon') {
+    for (let i = 0; i < geom.coordinates.length; i++) {
+      const poly = geom.coordinates[i];
+      if (poly[0] && isPointInPolygon(pt, poly[0])) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Maps each JMA earthquake area code (e.g., '100', '704') to its maximum observed seismic scale code (e.g., 10, 20, 30).
  * Combines JMA official Area.Code observations with spatial point-in-polygon assignment for all stations.
@@ -1948,8 +2011,9 @@ export function computeEarthquakeAreaScales(
     }
   }
 
-  // 2. Point-in-polygon from stations into earthquake.json features
+  // 2. Point-in-polygon fallback from stations into earthquake.json features
   if (
+    areaScales.size === 0 &&
     earthquakeGeoJson &&
     Array.isArray(earthquakeGeoJson.features) &&
     Array.isArray(eq.stations) &&
@@ -1961,21 +2025,7 @@ export function computeEarthquakeAreaScales(
       for (const f of earthquakeGeoJson.features) {
         const code = String(f?.properties?.code || '');
         if (!code) continue;
-        const geom = f.geometry;
-        let matched = false;
-        if (geom.type === 'Polygon') {
-          if (geom.coordinates[0] && isPointInPolygon(pt, geom.coordinates[0])) {
-            matched = true;
-          }
-        } else if (geom.type === 'MultiPolygon') {
-          for (const poly of geom.coordinates) {
-            if (poly[0] && isPointInPolygon(pt, poly[0])) {
-              matched = true;
-              break;
-            }
-          }
-        }
-        if (matched) {
+        if (isPointInGeoFeature(pt, f)) {
           const cur = areaScales.get(code) || 0;
           if (st.scaleCode > cur) {
             areaScales.set(code, st.scaleCode);
@@ -1993,19 +2043,7 @@ export function computeEarthquakeAreaScales(
       for (const f of earthquakeGeoJson.features) {
         const code = String(f?.properties?.code || '');
         if (!code) continue;
-        const geom = f.geometry;
-        let matched = false;
-        if (geom.type === 'Polygon') {
-          if (geom.coordinates[0] && isPointInPolygon(pt, geom.coordinates[0])) matched = true;
-        } else if (geom.type === 'MultiPolygon') {
-          for (const poly of geom.coordinates) {
-            if (poly[0] && isPointInPolygon(pt, poly[0])) {
-              matched = true;
-              break;
-            }
-          }
-        }
-        if (matched) {
+        if (isPointInGeoFeature(pt, f)) {
           areaScales.set(code, eq.maxScaleCode);
           break;
         }
@@ -2035,6 +2073,7 @@ export function computeEarthquakeCityScales(
   }
 
   if (
+    cityScales.size === 0 &&
     class20GeoJson &&
     Array.isArray(class20GeoJson.features) &&
     Array.isArray(eq.stations) &&
@@ -2046,21 +2085,7 @@ export function computeEarthquakeCityScales(
       for (const f of class20GeoJson.features) {
         const code = String(f?.properties?.code || '');
         if (!code) continue;
-        const geom = f.geometry;
-        let matched = false;
-        if (geom.type === 'Polygon') {
-          if (geom.coordinates[0] && isPointInPolygon(pt, geom.coordinates[0])) {
-            matched = true;
-          }
-        } else if (geom.type === 'MultiPolygon') {
-          for (const poly of geom.coordinates) {
-            if (poly[0] && isPointInPolygon(pt, poly[0])) {
-              matched = true;
-              break;
-            }
-          }
-        }
-        if (matched) {
+        if (isPointInGeoFeature(pt, f)) {
           const cur = cityScales.get(code) || 0;
           if (st.scaleCode > cur) {
             cityScales.set(code, st.scaleCode);

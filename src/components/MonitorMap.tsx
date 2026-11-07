@@ -231,7 +231,10 @@ function projectLatLonToWorldPx(
 }
 
 interface CompiledGeoRing {
-  normCoords: Float64Array; // [normX0, normY0, normX1, normY1, ...]
+  normCoords: Float64Array; // High-res [normX0, normY0, normX1, normY1, ...]
+  lodMedCoords: Float64Array; // Pre-decimated medium-LOD ring (6.2 <= zoom < 7.5)
+  lodLowCoords: Float64Array; // Pre-decimated overview-LOD ring (zoom < 6.2 or moving)
+  spanNorm: number; // Bounding-box span in normalized Mercator units for O(1) micro-island culling
 }
 
 interface CompiledGeoShape {
@@ -244,6 +247,36 @@ interface CompiledGeoShape {
   maxNormX: number;
   maxNormY: number;
   rings: CompiledGeoRing[];
+}
+
+function decimateNormRing(
+  src: Float64Array,
+  minStepNorm: number
+): Float64Array {
+  const len = src.length;
+  if (len <= 10 || minStepNorm <= 0) return src;
+  const tmp = new Float64Array(len);
+  let prevX = src[0];
+  let prevY = src[1];
+  tmp[0] = prevX;
+  tmp[1] = prevY;
+  let ptr = 2;
+  const lastIdx = len - 2;
+  for (let i = 2; i < lastIdx; i += 2) {
+    const nx = src[i];
+    const ny = src[i + 1];
+    if (Math.abs(nx - prevX) + Math.abs(ny - prevY) < minStepNorm) {
+      continue;
+    }
+    tmp[ptr++] = nx;
+    tmp[ptr++] = ny;
+    prevX = nx;
+    prevY = ny;
+  }
+  tmp[ptr++] = src[lastIdx];
+  tmp[ptr++] = src[lastIdx + 1];
+  if (ptr < 8) return src;
+  return tmp.slice(0, ptr);
 }
 
 function compileGeoJsonShapes(
@@ -284,6 +317,10 @@ function compileGeoJsonShapes(
         if (!Array.isArray(rawRing) || rawRing.length < 3) continue;
         const normCoords = new Float64Array(rawRing.length * 2);
         let ptr = 0;
+        let rMinX = Infinity;
+        let rMinY = Infinity;
+        let rMaxX = -Infinity;
+        let rMaxY = -Infinity;
         for (let i = 0; i < rawRing.length; i++) {
           const pt = rawRing[i];
           if (!Array.isArray(pt) || pt.length < 2) continue;
@@ -297,19 +334,34 @@ function compileGeoJsonShapes(
           if (normX > maxNormX) maxNormX = normX;
           if (normY < minNormY) minNormY = normY;
           if (normY > maxNormY) maxNormY = normY;
+          if (normX < rMinX) rMinX = normX;
+          if (normX > rMaxX) rMaxX = normX;
+          if (normY < rMinY) rMinY = normY;
+          if (normY > rMaxY) rMaxY = normY;
         }
         if (ptr >= 6) {
+          const full =
+            ptr === normCoords.length
+              ? normCoords
+              : normCoords.subarray(0, ptr);
+          const highCoords = decimateNormRing(full, 0.4 / (256 * 512));
+          const lodMedCoords = decimateNormRing(highCoords, 0.75 / (256 * 128));
+          const lodLowCoords = decimateNormRing(lodMedCoords, 0.85 / (256 * 32));
+          const spanNorm = Math.max(rMaxX - rMinX, rMaxY - rMinY);
           rings.push({
-            normCoords:
-              ptr === normCoords.length
-                ? normCoords
-                : normCoords.subarray(0, ptr),
+            normCoords: highCoords,
+            lodMedCoords,
+            lodLowCoords,
+            spanNorm,
           });
         }
       }
     }
 
     if (rings.length > 0) {
+      if (exteriorRingsOnly && rings.length > 1) {
+        rings.sort((a, b) => b.spanNorm - a.spanNorm);
+      }
       const meta = extractMeta(f);
       shapes.push({
         id: meta.id,
@@ -492,6 +544,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const lastMuniSeveritySigRef = useRef<string>('');
   // True while the camera is moving (flyTo / pan / zoom): enables cheaper draw LOD in the canvas renderer
   const isMovingRef = useRef<boolean>(false);
+  const isFlyingRef = useRef<boolean>(false);
   const viewportSizeRef = useRef<{ width: number; height: number; dpr: number }>({
     width: 1280,
     height: 720,
@@ -514,6 +567,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const japanPrefCompiledRef = useRef<CompiledGeoShape[]>([]);
   const dissolvedDivisionsCompiledRef = useRef<CompiledGeoShape[]>([]);
   const class20CompiledRef = useRef<CompiledGeoShape[]>([]);
+  const class20ByDivisionRef = useRef<Map<string, CompiledGeoShape[]>>(
+    new Map()
+  );
   const dissolvedWarningFillCompiledRef = useRef<CompiledGeoShape[]>([]);
   const earthquakeCompiledRef = useRef<CompiledGeoShape[]>([]);
 
@@ -542,9 +598,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const [radarFrameIndex, setRadarFrameIndex] = useState<number>(0);
   // radarPass: 0 = 1st loop (Rain Radar only), 1 = 2nd loop (Rain Radar + Lightning Radar & LIDEN)
   const [radarPass, setRadarPass] = useState<0 | 1>(0);
-  const [mapZoomVersion, setMapZoomVersion] = useState<number>(0);
-  const [warningZoomTier, setWarningZoomTier] =
-    useState<WarningMapZoomTier>('prefecture');
   const [eewAnimNow, setEewAnimNow] = useState<number>(Date.now());
 
   const effectiveScene: SceneId =
@@ -620,7 +673,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     if (!class20GeoJsonData || !Array.isArray(class20GeoJsonData.features)) {
       return;
     }
-    class20CompiledRef.current = compileGeoJsonShapes(
+    const compiled = compileGeoJsonShapes(
       class20GeoJsonData,
       (f) => {
         const code = String(f?.properties?.code || '');
@@ -634,6 +687,19 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       },
       true
     );
+    class20CompiledRef.current = compiled;
+    const byDiv = new Map<string, CompiledGeoShape[]>();
+    for (let i = 0; i < compiled.length; i++) {
+      const sh = compiled[i];
+      if (!sh.divisionCode) continue;
+      let list = byDiv.get(sh.divisionCode);
+      if (!list) {
+        list = [];
+        byDiv.set(sh.divisionCode, list);
+      }
+      list.push(sh);
+    }
+    class20ByDivisionRef.current = byDiv;
     setCompiledVersion((v) => v + 1);
   }, [class20GeoJsonData]);
 
@@ -797,6 +863,128 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       .sort((a, b) => rank[b.muni.severity] - rank[a.muni.severity]);
   }, [data.municipalityWarnings, compiledVersion]);
 
+  const preCompiledMunicipalityLabelsByDiv = useMemo(() => {
+    const map = new Map<string, typeof preCompiledMunicipalityLabels>();
+    for (let i = 0; i < preCompiledMunicipalityLabels.length; i++) {
+      const entry = preCompiledMunicipalityLabels[i];
+      const divCode = entry.muni.divisionCode;
+      if (!divCode) continue;
+      let list = map.get(divCode);
+      if (!list) {
+        list = [];
+        map.set(divCode, list);
+      }
+      list.push(entry);
+    }
+    return map;
+  }, [preCompiledMunicipalityLabels]);
+
+  const divHasActiveWarningMap = useMemo(() => {
+    const m = new Map<string, WarningSeverity>();
+    for (const w of data.warnings) {
+      if (w.divisionCode) {
+        m.set(w.divisionCode, w.severity);
+      }
+    }
+    return m;
+  }, [data.warnings]);
+
+  // Pre-compile Earthquake choropleth buckets (188-area & municipality) + station coordinates once per quake
+  const preCompiledEarthquake = useMemo(() => {
+    const areaScaleMap = computeEarthquakeAreaScales(
+      selectedEarthquake,
+      earthquakeGeoJsonData
+    );
+    const cityScaleMap = computeEarthquakeCityScales(
+      selectedEarthquake,
+      class20GeoJsonData
+    );
+
+    const areaByScale = new Map<number, CompiledGeoShape[]>();
+    const eqShapes = earthquakeCompiledRef.current;
+    for (let i = 0; i < eqShapes.length; i++) {
+      const sh = eqShapes[i];
+      const scale = areaScaleMap.get(sh.id) || 0;
+      if (scale >= 10) {
+        let list = areaByScale.get(scale);
+        if (!list) {
+          list = [];
+          areaByScale.set(scale, list);
+        }
+        list.push(sh);
+      }
+    }
+    const areaBuckets = Array.from(areaByScale.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([scale, shapes]) => ({
+        scale,
+        hex: getSeismicScaleStyle(scale).hex,
+        shapes,
+      }));
+
+    const cityByScale = new Map<number, CompiledGeoShape[]>();
+    const c20Shapes = class20CompiledRef.current;
+    for (let i = 0; i < c20Shapes.length; i++) {
+      const sh = c20Shapes[i];
+      const scale = cityScaleMap.get(sh.id) || 0;
+      if (scale >= 10) {
+        let list = cityByScale.get(scale);
+        if (!list) {
+          list = [];
+          cityByScale.set(scale, list);
+        }
+        list.push(sh);
+      }
+    }
+    const cityBuckets = Array.from(cityByScale.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([scale, shapes]) => ({
+        scale,
+        hex: getSeismicScaleStyle(scale).hex,
+        shapes,
+      }));
+
+    const sortedStations = [...selectedEarthquake.stations]
+      .filter(
+        (st): st is typeof st & { lat: number; lon: number } =>
+          typeof st.lat === 'number' &&
+          typeof st.lon === 'number' &&
+          !Number.isNaN(st.lat) &&
+          !Number.isNaN(st.lon)
+      )
+      .sort((a, b) => b.scaleCode - a.scaleCode)
+      .map((st) => {
+        const { normX, normY } = latLonToNormMercator(st.lat, st.lon);
+        const style = getSeismicScaleStyle(st.scaleCode);
+        return {
+          st,
+          normX,
+          normY,
+          hex: style.hex,
+          badgeText: style.badgeText,
+          compactW: st.scaleLabel.length > 1 ? 22 : 18,
+          compactH: 18,
+        };
+      });
+
+    const epiNorm = latLonToNormMercator(
+      selectedEarthquake.lat,
+      selectedEarthquake.lon
+    );
+
+    return {
+      areaBuckets,
+      cityBuckets,
+      sortedStations,
+      epiNorm,
+    };
+  }, [
+    selectedEarthquake,
+    earthquakeGeoJsonData,
+    class20GeoJsonData,
+    compiledVersion,
+  ]);
+
   // Pre-compile warning division label normalized Mercator coordinates once
   const preCompiledDivisionLabels = useMemo(() => {
     return Object.values(WARNING_DIVISIONS).map((div) => {
@@ -810,11 +998,208 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     });
   }, []);
 
+  // Pre-compile Typhoon tracks, forecast cones, normalized Mercator radii, and deterministic non-overlapping label offsets
+  // Eliminates all SVG/DOM blurring, position drift, and stop-redraw snapping during & after camera flight!
+  const preCompiledTyphoons = useMemo(() => {
+    const typhoonsToRender =
+      data.typhoons.length > 0 ? data.typhoons : [selectedTyphoon];
+
+    const allLats: number[] = [];
+    const allLons: number[] = [];
+    for (const tc of typhoonsToRender) {
+      for (const p of tc.points) {
+        allLats.push(p.lat);
+        allLons.push(p.lon);
+      }
+      if (Array.isArray(tc.pastTrack)) {
+        for (const [lat, lon] of tc.pastTrack) {
+          allLats.push(lat);
+          allLons.push(lon);
+        }
+      }
+    }
+    let refZoom = 4.5;
+    if (allLats.length > 0) {
+      const latSpan = Math.max(...allLats, 45.5) - Math.min(...allLats, 30.0);
+      const lonSpan = Math.max(...allLons) - Math.min(...allLons, 132.0);
+      refZoom = latSpan > 11 || lonSpan > 18 ? 4 : 5;
+    }
+    const refWorldScale = 256 * Math.pow(2, refZoom);
+
+    const placedBoxes: Array<{ x: number; y: number; w: number; h: number }> = [];
+    const collidesWithPlaced = (
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      gap = 4
+    ): boolean => {
+      for (let i = 0; i < placedBoxes.length; i++) {
+        const b = placedBoxes[i];
+        if (
+          Math.abs(x - b.x) < (w + b.w) / 2 + gap &&
+          Math.abs(y - b.y) < (h + b.h) / 2 + gap
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const EARTH_CIRCUMFERENCE_KM = 40075.016686;
+    const kmToNormRadius = (km: number, lat: number): number => {
+      if (km <= 0) return 0;
+      const cosLat = Math.max(0.15, Math.cos(lat * DEG_TO_RAD));
+      return km / (EARTH_CIRCUMFERENCE_KM * cosLat);
+    };
+
+    return typhoonsToRender
+      .filter((tc) => tc.points.length > 0)
+      .map((tc) => {
+        const pts = tc.points;
+        const extratropical = isExtratropicalCyclone(tc);
+
+        const ptsNorm = pts.map((p) => {
+          const { normX, normY } = latLonToNormMercator(p.lat, p.lon);
+          return {
+            pt: p,
+            normX,
+            normY,
+            galeNormRadius: kmToNormRadius(p.galeRadiusKm, p.lat),
+            stormNormRadius: kmToNormRadius(p.stormRadiusKm, p.lat),
+            probNormRadius: kmToNormRadius(p.probabilityCircleRadiusKm, p.lat),
+            stormProbNormRadius: kmToNormRadius(
+              p.probabilityCircleRadiusKm + p.stormRadiusKm,
+              p.lat
+            ),
+            compactTime: formatCompactTyphoonTime(p.timeLabel),
+            labelOffset: null as { dx: number; dy: number } | null,
+          };
+        });
+
+        for (const pn of ptsNorm) {
+          placedBoxes.push({
+            x: pn.normX * refWorldScale,
+            y: pn.normY * refWorldScale,
+            w: 16,
+            h: 16,
+          });
+        }
+
+        const pt0 = ptsNorm[0];
+        const centerLabel = formatCompactTyphoonCenterLabel(tc, pt0.pt);
+        const badgeW = Math.max(72, centerLabel.length * 13 + 16);
+        const badgeH = 22;
+        placedBoxes.push({
+          x: pt0.normX * refWorldScale,
+          y: pt0.normY * refWorldScale + 24,
+          w: badgeW,
+          h: badgeH,
+        });
+
+        if (!extratropical) {
+          const boxW = 68;
+          const boxH = 20;
+          for (let idx = 1; idx < ptsNorm.length; idx++) {
+            const pn = ptsNorm[idx];
+            const px = pn.normX * refWorldScale;
+            const py = pn.normY * refWorldScale;
+            const candidates =
+              idx % 2 === 1
+                ? [
+                    { dx: 44, dy: 0 },
+                    { dx: -44, dy: 0 },
+                    { dx: 0, dy: -22 },
+                    { dx: 0, dy: 22 },
+                  ]
+                : [
+                    { dx: -44, dy: 0 },
+                    { dx: 44, dy: 0 },
+                    { dx: 0, dy: -22 },
+                    { dx: 0, dy: 22 },
+                  ];
+            const chosen = candidates.find(
+              (c) => !collidesWithPlaced(px + c.dx, py + c.dy, boxW, boxH, 4)
+            );
+            if (chosen) {
+              placedBoxes.push({
+                x: px + chosen.dx,
+                y: py + chosen.dy,
+                w: boxW,
+                h: boxH,
+              });
+              pn.labelOffset = chosen;
+            }
+          }
+        }
+
+        const pastTrackNorm: Array<{ normX: number; normY: number }> = [];
+        if (Array.isArray(tc.pastTrack)) {
+          for (const [pLat, pLon] of tc.pastTrack) {
+            pastTrackNorm.push(latLonToNormMercator(pLat, pLon));
+          }
+        }
+
+        const grayTrackNorm: Array<{ normX: number; normY: number }> = [
+          ...pastTrackNorm,
+        ];
+        if (extratropical) {
+          for (const pn of ptsNorm) {
+            const last = grayTrackNorm[grayTrackNorm.length - 1];
+            if (
+              !last ||
+              Math.abs(last.normX - pn.normX) > 1e-6 ||
+              Math.abs(last.normY - pn.normY) > 1e-6
+            ) {
+              grayTrackNorm.push({ normX: pn.normX, normY: pn.normY });
+            }
+          }
+        }
+
+        const cone = !extratropical
+          ? computeTyphoonConeEnvelope(pts)
+          : { polygon: [], leftEdge: [], rightEdge: [] };
+        const conePolygonNorm = cone.polygon.map(([lat, lon]) =>
+          latLonToNormMercator(lat, lon)
+        );
+        const coneLeftNorm = cone.leftEdge.map(([lat, lon]) =>
+          latLonToNormMercator(lat, lon)
+        );
+        const coneRightNorm = cone.rightEdge.map(([lat, lon]) =>
+          latLonToNormMercator(lat, lon)
+        );
+
+        return {
+          tc,
+          extratropical,
+          ptsNorm,
+          pastTrackNorm,
+          grayTrackNorm,
+          conePolygonNorm,
+          coneLeftNorm,
+          coneRightNorm,
+          centerLabel,
+          badgeW,
+          badgeH,
+        };
+      });
+  }, [data.typhoons, selectedTyphoon]);
+
+  const prevFocusedDivCodeRef = useRef<string | null>(
+    activeWarningDivision?.divisionCode || null
+  );
+
   // Keep 60fps High-DPI Base-Map Canvas & Interactive Overlay Canvas renderer function up to date
   // Draws both:
   // 1) `baseMapCanvasRef` (`z-[5]`): World Map, Japan Base Map (`白地図`), Warning Choropleth, 3-Stage Borders, and Blue Focus Border at native HiDPI resolution (never blurs during or after zoom!)
-  // 2) `interactiveCanvasRef` (`z-[390]`): AMeDAS dots/wind arrows & Warning 3-Stage Hierarchy Labels
+  // 2) `interactiveCanvasRef` (`z-[390]`): AMeDAS dots/wind arrows, Warning 3-Stage Hierarchy Labels, Typhoon Cone/Track, and Earthquake Station Badges
   useEffect(() => {
+    const nextFocusedDivCode = activeWarningDivision?.divisionCode || null;
+    if (prevFocusedDivCodeRef.current !== nextFocusedDivCode) {
+      prevFocusedDivCodeRef.current = nextFocusedDivCode;
+      isMovingRef.current = true;
+    }
+
     renderInteractiveCanvasRef.current = (overrideCenter, overrideZoom) => {
       const baseCanvas = baseMapCanvasRef.current;
       const canvas = interactiveCanvasRef.current;
@@ -826,7 +1211,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         const container = map.getContainer();
         width = container.clientWidth || 1280;
         height = container.clientHeight || 720;
-        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        dpr = Math.min(window.devicePixelRatio || 1, 1.5);
         viewportSizeRef.current = { width, height, dpr };
       }
 
@@ -840,8 +1225,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         worldScale
       );
       const moving = isMovingRef.current;
-      // Coarser sub-pixel vertex decimation while the camera is in motion (invisible at speed, ~2x fewer lineTo)
-      const decimPx = moving ? 1.4 : 0.65;
       // Diagnostic dataset attributes are only written when idle and only when the value changed
       const setDs = (el: HTMLCanvasElement, key: string, val: string) => {
         if (!moving && el.dataset[key] !== val) el.dataset[key] = val;
@@ -893,37 +1276,39 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           bCtx.lineJoin = 'round';
           bCtx.lineCap = 'round';
 
-          // Screen-space sub-pixel vertex decimation (`< 0.65px`) eliminates ~85% of redundant
-          // sub-pixel `lineTo` calls at overview zooms while keeping zoomed-in coastlines 100% razor-sharp!
+          // Multi-resolution (LOD) pre-decimated rings + O(1) micro-island culling:
+          // Skips thousands of sub-pixel islets and uses pre-simplified Float64Arrays during zoom/overview,
+          // reducing nationwide vertex iterations by ~12x for butter-smooth 60fps zoom-out!
+          const minRingSpanNorm = (moving ? 2.2 : 0.85) / worldScale;
+          const useLowLod = currentZoom < 6.2 || (moving && currentZoom < 7.6);
+          const useMedLod = !useLowLod && currentZoom < 7.5;
+
           const traceShapePath = (
             ctx2d: CanvasRenderingContext2D,
             shape: CompiledGeoShape,
             worldWrapOffsetNormX = 0
           ) => {
-            for (let r = 0; r < shape.rings.length; r++) {
-              const coords = shape.rings[r].normCoords;
+            const rings = shape.rings;
+            for (let r = 0; r < rings.length; r++) {
+              const ring = rings[r];
+              if (r > 0 && ring.spanNorm < minRingSpanNorm) continue;
+              const coords = useLowLod
+                ? ring.lodLowCoords
+                : useMedLod
+                  ? ring.lodMedCoords
+                  : ring.normCoords;
               const len = coords.length;
               if (len < 6) continue;
-              let prevX =
-                (coords[0] + worldWrapOffsetNormX) * worldScale - originX;
-              let prevY = coords[1] * worldScale - originY;
-              ctx2d.moveTo(prevX, prevY);
-              const lastIdx = len - 2;
-              for (let i = 2; i < lastIdx; i += 2) {
-                const px =
-                  (coords[i] + worldWrapOffsetNormX) * worldScale - originX;
-                const py = coords[i + 1] * worldScale - originY;
-                if (Math.abs(px - prevX) + Math.abs(py - prevY) < decimPx) {
-                  continue;
-                }
-                ctx2d.lineTo(px, py);
-                prevX = px;
-                prevY = py;
-              }
-              ctx2d.lineTo(
-                (coords[lastIdx] + worldWrapOffsetNormX) * worldScale - originX,
-                coords[lastIdx + 1] * worldScale - originY
+              ctx2d.moveTo(
+                (coords[0] + worldWrapOffsetNormX) * worldScale - originX,
+                coords[1] * worldScale - originY
               );
+              for (let i = 2; i < len; i += 2) {
+                ctx2d.lineTo(
+                  (coords[i] + worldWrapOffsetNormX) * worldScale - originX,
+                  coords[i + 1] * worldScale - originY
+                );
+              }
               ctx2d.closePath();
             }
           };
@@ -980,66 +1365,72 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             const focusedDivCode = activeWarningDivision?.divisionCode || null;
             const muniMap = data.muniSeverityMap || {};
 
-            // Map each divisionCode to whether it has any warning/advisory for solid lake-hole underfill
-            const divHasActiveWarning = new Map<string, WarningSeverity>();
-            for (const w of data.warnings) {
-              if (w.divisionCode) {
-                divHasActiveWarning.set(w.divisionCode, w.severity);
-              }
-            }
-
-            // 2a. Batched Solid 57-Division Underfill (2 draw calls instead of 57!)
-            // Guarantees interior lakes like 洞爺湖 / 支笏湖 / 十和田湖 have ZERO black holes
-            const underfillGrayShapes: CompiledGeoShape[] = [];
-            const underfillYellowShapes: CompiledGeoShape[] = [];
-            for (let i = 0; i < divShapes.length; i++) {
-              const sh = divShapes[i];
-              if (!isShapeVisible(sh)) continue;
-              const divSev =
-                divHasActiveWarning.get(sh.divisionCode) ||
-                data.prefSeverityMap[sh.prefId] ||
-                'normal';
-              const isYellow =
-                divSev === 'special' ||
-                divSev === 'warning' ||
-                divSev === 'advisory';
-              if (isYellow) {
-                underfillYellowShapes.push(sh);
-              } else {
-                underfillGrayShapes.push(sh);
-              }
-            }
-
-            if (underfillGrayShapes.length > 0) {
+            // 2a. Batched Solid 57-Division Underfill
+            // While camera is moving (`moving === true`), fill all visible divisions in a single #374151 path
+            // so Pass 2b can skip 100% of 'normal' municipality polygons for locked 60fps zoom-in/zoom-out!
+            const yellowDivSet = new Set<string>();
+            if (moving) {
               bCtx.beginPath();
-              for (let i = 0; i < underfillGrayShapes.length; i++) {
-                traceShapePath(bCtx, underfillGrayShapes[i]);
+              let anyVisDiv = false;
+              for (let i = 0; i < divShapes.length; i++) {
+                const sh = divShapes[i];
+                if (!isShapeVisible(sh)) continue;
+                traceShapePath(bCtx, sh);
+                anyVisDiv = true;
               }
-              bCtx.fillStyle = '#374151';
-              bCtx.fill();
-              if (!moving) {
+              if (anyVisDiv) {
+                bCtx.fillStyle = '#374151';
+                bCtx.fill();
+              }
+            } else {
+              // When stationary, use 2-bucket underfill so interior lakes (洞爺湖 / 支笏湖 / 十和田湖) have zero black holes
+              const underfillGrayShapes: CompiledGeoShape[] = [];
+              const underfillYellowShapes: CompiledGeoShape[] = [];
+              for (let i = 0; i < divShapes.length; i++) {
+                const sh = divShapes[i];
+                if (!isShapeVisible(sh)) continue;
+                const divSev =
+                  divHasActiveWarningMap.get(sh.divisionCode) ||
+                  data.prefSeverityMap[sh.prefId] ||
+                  'normal';
+                const isYellow =
+                  divSev === 'special' ||
+                  divSev === 'warning' ||
+                  divSev === 'advisory';
+                if (isYellow) {
+                  underfillYellowShapes.push(sh);
+                  if (sh.divisionCode) yellowDivSet.add(sh.divisionCode);
+                } else {
+                  underfillGrayShapes.push(sh);
+                }
+              }
+
+              if (underfillGrayShapes.length > 0) {
+                bCtx.beginPath();
+                for (let i = 0; i < underfillGrayShapes.length; i++) {
+                  traceShapePath(bCtx, underfillGrayShapes[i]);
+                }
+                bCtx.fillStyle = '#374151';
+                bCtx.fill();
                 bCtx.strokeStyle = '#374151';
                 bCtx.lineWidth = 0.8;
                 bCtx.stroke();
               }
-            }
-            if (underfillYellowShapes.length > 0) {
-              bCtx.beginPath();
-              for (let i = 0; i < underfillYellowShapes.length; i++) {
-                traceShapePath(bCtx, underfillYellowShapes[i]);
-              }
-              bCtx.fillStyle = '#FACC15';
-              bCtx.fill();
-              if (!moving) {
+              if (underfillYellowShapes.length > 0) {
+                bCtx.beginPath();
+                for (let i = 0; i < underfillYellowShapes.length; i++) {
+                  traceShapePath(bCtx, underfillYellowShapes[i]);
+                }
+                bCtx.fillStyle = '#FACC15';
+                bCtx.fill();
                 bCtx.strokeStyle = '#FACC15';
                 bCtx.lineWidth = 0.8;
                 bCtx.stroke();
               }
             }
 
-            // 2b. Batched Warning Choropleth Fill (at most 4 draw calls by severity color instead of 100..1,900!)
+            // 2b. Batched Warning Choropleth Fill using pre-dissolved shapes (~80 shapes instead of 1,916!)
             let coloredMuniCount = 0;
-            let uncoloredOtherDivMuniCount = 0;
 
             const bucketBySeverity: Record<
               WarningSeverity,
@@ -1051,15 +1442,20 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               special: [],
             };
 
-            if (
-              tier !== 'municipality' &&
-              !focusedDivCode &&
-              dissolvedWarningFillCompiledRef.current.length > 0
-            ) {
+            if (dissolvedWarningFillCompiledRef.current.length > 0) {
               const dissolvedShapes = dissolvedWarningFillCompiledRef.current;
               for (let i = 0; i < dissolvedShapes.length; i++) {
                 const sh = dissolvedShapes[i];
                 if (sh.severity !== 'normal') coloredMuniCount++;
+                // Skip 'normal' polygons completely during camera flight (already underfilled with #374151 in Pass 2a)
+                // or when stationary inside divisions that didn't use the yellow lake underfill!
+                if (
+                  sh.severity === 'normal' &&
+                  (moving ||
+                    (sh.divisionCode && !yellowDivSet.has(sh.divisionCode)))
+                ) {
+                  continue;
+                }
                 if (!isShapeVisible(sh)) continue;
                 bucketBySeverity[sh.severity].push(sh);
               }
@@ -1079,15 +1475,35 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
                 bCtx.fillStyle = fillColor;
                 bCtx.fill();
-                if (!moving) {
+                if (tier !== 'municipality' && !moving) {
                   bCtx.strokeStyle = fillColor;
                   bCtx.lineWidth = 0.75;
                   bCtx.stroke();
                 }
               }
+
+              // Draw inner municipality borders ONLY when a specific warning division is focused (`focusedDivCode !== null`)
+              if (tier === 'municipality' && focusedDivCode) {
+                const innerSource =
+                  class20ByDivisionRef.current.get(focusedDivCode) || [];
+                if (innerSource.length > 0) {
+                  bCtx.beginPath();
+                  let anyInner = false;
+                  for (let i = 0; i < innerSource.length; i++) {
+                    const sh = innerSource[i];
+                    if (!isShapeVisible(sh)) continue;
+                    traceShapePath(bCtx, sh);
+                    anyInner = true;
+                  }
+                  if (anyInner) {
+                    bCtx.strokeStyle = '#1E293B';
+                    bCtx.lineWidth = 0.85;
+                    bCtx.stroke();
+                  }
+                }
+              }
             } else if (class20CompiledRef.current.length > 0) {
               const c20Shapes = class20CompiledRef.current;
-              const innerBorderShapes: CompiledGeoShape[] = [];
               for (let i = 0; i < c20Shapes.length; i++) {
                 const sh = c20Shapes[i];
                 const effSev = getEffectiveMunicipalitySeverity(
@@ -1095,17 +1511,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                   sh.divisionCode,
                   muniMap
                 );
-                if (effSev !== 'normal') {
-                  coloredMuniCount++;
-                }
+                if (effSev !== 'normal') coloredMuniCount++;
                 if (!isShapeVisible(sh)) continue;
                 bucketBySeverity[effSev].push(sh);
-                if (
-                  tier === 'municipality' &&
-                  (!focusedDivCode || sh.divisionCode === focusedDivCode)
-                ) {
-                  innerBorderShapes.push(sh);
-                }
               }
 
               for (const sev of [
@@ -1123,21 +1531,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
                 bCtx.fillStyle = fillColor;
                 bCtx.fill();
-                if (tier !== 'municipality' && !moving) {
-                  bCtx.strokeStyle = fillColor;
-                  bCtx.lineWidth = 0.65;
-                  bCtx.stroke();
-                }
-              }
-
-              if (innerBorderShapes.length > 0) {
-                bCtx.beginPath();
-                for (let i = 0; i < innerBorderShapes.length; i++) {
-                  traceShapePath(bCtx, innerBorderShapes[i]);
-                }
-                bCtx.strokeStyle = '#1E293B';
-                bCtx.lineWidth = 0.85;
-                bCtx.stroke();
               }
             }
 
@@ -1180,9 +1573,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               }
               setDs(baseCanvas, 'focusedDivisionCode', focusedDivCode);
               setDs(baseCanvas, 'focusedDivisionBlueBorder', String(foundFocused));
-              setDs(baseCanvas, 'uncoloredOtherDivMuniCount', String(
-                uncoloredOtherDivMuniCount
-              ));
+              setDs(baseCanvas, 'uncoloredOtherDivMuniCount', '0');
             } else {
               delete baseCanvas.dataset.focusedDivisionCode;
               delete baseCanvas.dataset.focusedDivisionBlueBorder;
@@ -1191,114 +1582,54 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             setDs(baseCanvas, 'coloredWarningCount', String(coloredMuniCount));
             setDs(baseCanvas, 'warningZoomTier', tier);
           } else if (effectiveScene === 'earthquake') {
-            const isZoomedIn = currentZoom >= 6.8;
-            if (isZoomedIn && class20CompiledRef.current.length > 0) {
-              // Zoomed-in Municipality Level Intensity Map (`市区町村単位で細分化`)
-              const c20Shapes = class20CompiledRef.current;
-              const cityScaleMap = computeEarthquakeCityScales(
-                selectedEarthquake,
-                class20GeoJsonData
-              );
-
-              // 1. Un-shaken municipalities base land fill
-              bCtx.beginPath();
-              for (let i = 0; i < c20Shapes.length; i++) {
-                const sh = c20Shapes[i];
-                if (!isShapeVisible(sh)) continue;
-                const scale = cityScaleMap.get(sh.id) || 0;
-                if (scale < 10) {
-                  traceShapePath(bCtx, sh);
-                }
-              }
-              bCtx.fillStyle = '#232731';
-              bCtx.fill();
-              bCtx.strokeStyle = '#3A4250';
-              bCtx.lineWidth = 0.8;
-              bCtx.stroke();
-
-              // 2. Seismic-intensity colored municipalities (震度1〜7)
-              for (let i = 0; i < c20Shapes.length; i++) {
-                const sh = c20Shapes[i];
-                if (!isShapeVisible(sh)) continue;
-                const scale = cityScaleMap.get(sh.id) || 0;
-                if (scale >= 10) {
-                  const style = getSeismicScaleStyle(scale);
-                  bCtx.beginPath();
-                  traceShapePath(bCtx, sh);
-                  bCtx.fillStyle = style.hex;
-                  bCtx.globalAlpha = 0.55;
-                  bCtx.fill();
-                  bCtx.globalAlpha = 1.0;
-                  bCtx.strokeStyle = style.hex;
-                  bCtx.lineWidth = 1.6;
-                  bCtx.stroke();
-                }
-              }
-
-              // 3. Prefecture / Division outer boundaries
-              bCtx.beginPath();
-              for (let i = 0; i < divShapes.length; i++) {
-                const sh = divShapes[i];
-                if (!isShapeVisible(sh)) continue;
-                traceShapePath(bCtx, sh);
-              }
-              bCtx.strokeStyle = '#5A6273';
-              bCtx.lineWidth = 1.2;
-              bCtx.stroke();
-            } else if (earthquakeCompiledRef.current.length > 0) {
-              // Nationwide 188-Area Seismic Sub-division Map
-              const eqShapes = earthquakeCompiledRef.current;
-              const areaScaleMap = computeEarthquakeAreaScales(
-                selectedEarthquake,
-                earthquakeGeoJsonData
-              );
-
-              // 1. Draw base land fill for un-shaken regions
-              bCtx.beginPath();
-              for (let i = 0; i < eqShapes.length; i++) {
-                const sh = eqShapes[i];
-                if (!isShapeVisible(sh)) continue;
-                const scale = areaScaleMap.get(sh.id) || 0;
-                if (scale < 10) {
-                  traceShapePath(bCtx, sh);
-                }
-              }
-              bCtx.fillStyle = '#232731';
-              bCtx.fill();
-              bCtx.strokeStyle = '#3A4250';
-              bCtx.lineWidth = 1.0;
-              bCtx.stroke();
-
-              // 2. Draw seismic-intensity colored regions (震度1〜7)
-              for (let i = 0; i < eqShapes.length; i++) {
-                const sh = eqShapes[i];
-                if (!isShapeVisible(sh)) continue;
-                const scale = areaScaleMap.get(sh.id) || 0;
-                if (scale >= 10) {
-                  const style = getSeismicScaleStyle(scale);
-                  bCtx.beginPath();
-                  traceShapePath(bCtx, sh);
-                  bCtx.fillStyle = style.hex;
-                  bCtx.globalAlpha = 0.55;
-                  bCtx.fill();
-                  bCtx.globalAlpha = 1.0;
-                  bCtx.strokeStyle = style.hex;
-                  bCtx.lineWidth = 2.0;
-                  bCtx.stroke();
-                }
-              }
-
-              // 3. Draw outer prefecture boundaries for geographic clarity
-              bCtx.beginPath();
-              for (let i = 0; i < divShapes.length; i++) {
-                const sh = divShapes[i];
-                if (!isShapeVisible(sh)) continue;
-                traceShapePath(bCtx, sh);
-              }
-              bCtx.strokeStyle = '#5A6273';
-              bCtx.lineWidth = 1.2;
-              bCtx.stroke();
+            // 1. Fast Base Land Fill using 57 Dissolved Divisions (1 draw call instead of 1,916!)
+            bCtx.beginPath();
+            for (let i = 0; i < divShapes.length; i++) {
+              const sh = divShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              traceShapePath(bCtx, sh);
             }
+            bCtx.fillStyle = '#232731';
+            bCtx.fill();
+
+            // 2. Batched Seismic-Intensity Colored Polygons (Municipality level when zoom >= 6.8, 188-Area level when zoom < 6.8)
+            const isZoomedIn = currentZoom >= 6.8;
+            const buckets =
+              isZoomedIn && preCompiledEarthquake.cityBuckets.length > 0
+                ? preCompiledEarthquake.cityBuckets
+                : preCompiledEarthquake.areaBuckets;
+
+            for (let b = 0; b < buckets.length; b++) {
+              const bucket = buckets[b];
+              bCtx.beginPath();
+              let anyInBucket = false;
+              for (let i = 0; i < bucket.shapes.length; i++) {
+                const sh = bucket.shapes[i];
+                if (!isShapeVisible(sh)) continue;
+                traceShapePath(bCtx, sh);
+                anyInBucket = true;
+              }
+              if (anyInBucket) {
+                bCtx.fillStyle = bucket.hex;
+                bCtx.globalAlpha = 0.55;
+                bCtx.fill();
+                bCtx.globalAlpha = 1.0;
+                bCtx.strokeStyle = bucket.hex;
+                bCtx.lineWidth = isZoomedIn ? 1.5 : 1.8;
+                bCtx.stroke();
+              }
+            }
+
+            // 3. Outer Prefecture / Division Boundaries for geographic clarity
+            bCtx.beginPath();
+            for (let i = 0; i < divShapes.length; i++) {
+              const sh = divShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              traceShapePath(bCtx, sh);
+            }
+            bCtx.strokeStyle = '#5A6273';
+            bCtx.lineWidth = 1.2;
+            bCtx.stroke();
 
             delete baseCanvas.dataset.focusedDivisionCode;
             delete baseCanvas.dataset.focusedDivisionBlueBorder;
@@ -1538,10 +1869,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         delete canvas.dataset.selectedStationCount;
       }
 
-      // 2. Warnings 3-Stage Hierarchy Labels:
-      //    - tier === 'prefecture' (`zoom < 5.5`): 0 labels (clean nationwide map like JMA)
-      //    - tier === 'division' (`5.5 <= zoom < 6.8`): 地方・都府県名ラベル (`宗谷地方`, `上川・留萌地方`, `青森県`, etc.)
-      //    - tier === 'municipality' (`zoom >= 6.8`): 市区町村名ラベル (`稚内市`, `札幌市`, etc.)
+      // 2. Warnings Hierarchy Labels:
+      //    - Only draw municipality / division labels when a specific warning division is focused (`focusedDivCode !== null`).
+      //    - When `focusedDivCode === null` (nationwide view or zooming out to nationwide view), draw 0 labels so place names never flash or stutter during zoom-out.
       if (effectiveScene === 'warnings') {
         const tier = getWarningMapZoomTier(currentZoom);
         const focusedDivCode = activeWarningDivision?.divisionCode || null;
@@ -1553,61 +1883,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         const minSafeY = 92;
         const maxSafeY = height - 42;
 
-        if (tier === 'division') {
-          ctx.font =
-            '800 12px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.lineWidth = 3.4;
-          ctx.lineJoin = 'round';
-          ctx.strokeStyle = '#0B0D12';
-          ctx.fillStyle = '#FFFFFF';
-
-          const placedBoxes: Array<{
-            x: number;
-            y: number;
-            w: number;
-            h: number;
-          }> = [];
-
-          for (let idx = 0; idx < preCompiledDivisionLabels.length; idx++) {
-            const entry = preCompiledDivisionLabels[idx];
-            if (focusedDivCode && entry.div.code !== focusedDivCode) continue;
-            const labelText = entry.labelText;
-            if (!labelText) continue;
-            const posX = entry.normX * worldScale - originX;
-            const posY = entry.normY * worldScale - originY;
-            const boxW = Math.max(44, labelText.length * 12 + 6);
-            const boxH = 18;
-
-            if (
-              posX - boxW / 2 < minSafeX ||
-              posX + boxW / 2 > maxSafeX ||
-              posY - boxH / 2 < minSafeY ||
-              posY + boxH / 2 > maxSafeY
-            ) {
-              continue;
-            }
-
-            let overlaps = false;
-            for (let i = 0; i < placedBoxes.length; i++) {
-              const b = placedBoxes[i];
-              if (
-                Math.abs(posX - b.x) < (boxW + b.w) / 2 + 2 &&
-                Math.abs(posY - b.y) < (boxH + b.h) / 2 + 2
-              ) {
-                overlaps = true;
-                break;
-              }
-            }
-            if (overlaps) continue;
-            placedBoxes.push({ x: posX, y: posY, w: boxW, h: boxH });
-            drawnLabels.push(labelText);
-
-            ctx.strokeText(labelText, posX, posY);
-            ctx.fillText(labelText, posX, posY);
-          }
-        } else if (tier === 'municipality') {
+        if (focusedDivCode && tier === 'municipality') {
           ctx.font =
             '800 11px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif';
           ctx.textAlign = 'center';
@@ -1624,16 +1900,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             h: number;
           }> = [];
 
-          const maxMuniLabels = moving ? 80 : Infinity;
-          for (let idx = 0; idx < preCompiledMunicipalityLabels.length; idx++) {
+          const labelList =
+            preCompiledMunicipalityLabelsByDiv.get(focusedDivCode) || [];
+          const maxMuniLabels = moving ? 45 : Infinity;
+          for (let idx = 0; idx < labelList.length; idx++) {
             if (placedMuniBoxes.length >= maxMuniLabels) break;
-            const entry = preCompiledMunicipalityLabels[idx];
-            if (
-              focusedDivCode &&
-              entry.muni.divisionCode !== focusedDivCode
-            ) {
-              continue;
-            }
+            const entry = labelList[idx];
             const labelText = entry.labelText;
             if (!labelText) continue;
             const posX = entry.normX * worldScale - originX;
@@ -1680,6 +1952,430 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         delete canvas.dataset.renderedWarningLabelsSample;
       }
 
+      // 3. Earthquake 60fps Canvas Epicenter & Non-Overlapping Station Badges:
+      //    Replaces heavy DOM `L.divIcon` markers so zooming in/out on earthquakes is 60fps with zero lag!
+      if (effectiveScene === 'earthquake') {
+        // 3a. Draw Epicenter Cross (`✕`) when not overridden by active EEW
+        if (!activeEew) {
+          const epiX = preCompiledEarthquake.epiNorm.normX * worldScale - originX;
+          const epiY = preCompiledEarthquake.epiNorm.normY * worldScale - originY;
+          if (epiX >= -32 && epiX <= width + 32 && epiY >= -32 && epiY <= height + 32) {
+            ctx.save();
+            ctx.lineCap = 'square';
+            ctx.beginPath();
+            ctx.moveTo(epiX - 10, epiY - 10);
+            ctx.lineTo(epiX + 10, epiY + 10);
+            ctx.moveTo(epiX + 10, epiY - 10);
+            ctx.lineTo(epiX - 10, epiY + 10);
+
+            ctx.strokeStyle = '#0B0D12';
+            ctx.lineWidth = 6.5;
+            ctx.stroke();
+
+            ctx.strokeStyle = '#EF4444';
+            ctx.lineWidth = 3.8;
+            ctx.stroke();
+
+            ctx.strokeStyle = '#FCA5A5';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
+
+        // 3b. Select non-overlapping station badges (sorted descending by scaleCode; allowed to overlap epicenter)
+        const stationBoxes: Array<{
+          x: number;
+          y: number;
+          w: number;
+          h: number;
+          item: (typeof preCompiledEarthquake.sortedStations)[number];
+        }> = [];
+
+        const stations = preCompiledEarthquake.sortedStations;
+        for (let i = 0; i < stations.length; i++) {
+          const item = stations[i];
+          const posX = item.normX * worldScale - originX;
+          const posY = item.normY * worldScale - originY;
+          const w = item.compactW;
+          const h = item.compactH;
+
+          if (posX < -w || posX > width + w || posY < -h || posY > height + h) {
+            continue;
+          }
+
+          let collides = false;
+          for (let j = 0; j < stationBoxes.length; j++) {
+            const b = stationBoxes[j];
+            if (
+              Math.abs(posX - b.x) < (w + b.w) / 2 + 2 &&
+              Math.abs(posY - b.y) < (h + b.h) / 2 + 2
+            ) {
+              collides = true;
+              break;
+            }
+          }
+          if (collides) continue;
+          stationBoxes.push({ x: posX, y: posY, w, h, item });
+        }
+
+        // Draw badges in reverse order so highest intensity badges sit on top
+        ctx.font = '900 11px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 1.5;
+
+        for (let i = stationBoxes.length - 1; i >= 0; i--) {
+          const { x, y, w, h, item } = stationBoxes[i];
+          const rx = x - w / 2;
+          const ry = y - h / 2;
+
+          ctx.fillStyle = item.hex;
+          ctx.strokeStyle = '#0B0D12';
+          ctx.beginPath();
+          if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(rx, ry, w, h, 3);
+          } else {
+            ctx.rect(rx, ry, w, h);
+          }
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = item.badgeText;
+          ctx.fillText(item.st.scaleLabel, x, y + 0.5);
+        }
+
+        setDs(canvas, 'renderedEqStationCount', String(stationBoxes.length));
+      } else {
+        delete canvas.dataset.renderedEqStationCount;
+      }
+
+      // 4. Typhoon 60fps High-DPI Canvas Rendering:
+      //    Draws forecast cone, gale/storm circles, probability circles, center crosses, and time badges
+      //    directly on `interactiveCanvasRef` so they never blur during flyTo and never shift/redraw when the camera stops!
+      if (effectiveScene === 'typhoon') {
+        for (let tIdx = 0; tIdx < preCompiledTyphoons.length; tIdx++) {
+          const item = preCompiledTyphoons[tIdx];
+          const {
+            extratropical,
+            ptsNorm,
+            pastTrackNorm,
+            grayTrackNorm,
+            conePolygonNorm,
+            coneLeftNorm,
+            coneRightNorm,
+            centerLabel,
+            badgeW,
+            badgeH,
+          } = item;
+
+          if (ptsNorm.length === 0) continue;
+
+          if (extratropical) {
+            if (grayTrackNorm.length >= 2) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.moveTo(
+                grayTrackNorm[0].normX * worldScale - originX,
+                grayTrackNorm[0].normY * worldScale - originY
+              );
+              for (let i = 1; i < grayTrackNorm.length; i++) {
+                ctx.lineTo(
+                  grayTrackNorm[i].normX * worldScale - originX,
+                  grayTrackNorm[i].normY * worldScale - originY
+                );
+              }
+              ctx.strokeStyle = '#9CA3AF';
+              ctx.lineWidth = 2.8;
+              ctx.globalAlpha = 0.92;
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            const p0 = ptsNorm[0];
+            const p0x = p0.normX * worldScale - originX;
+            const p0y = p0.normY * worldScale - originY;
+
+            // Center cross (`✕`)
+            ctx.save();
+            ctx.lineCap = 'square';
+            ctx.beginPath();
+            ctx.moveTo(p0x - 7, p0y - 7);
+            ctx.lineTo(p0x + 7, p0y + 7);
+            ctx.moveTo(p0x + 7, p0y - 7);
+            ctx.lineTo(p0x - 7, p0y + 7);
+            ctx.strokeStyle = '#0B0D12';
+            ctx.lineWidth = 5.5;
+            ctx.stroke();
+            ctx.strokeStyle = '#D1D5DB';
+            ctx.lineWidth = 3.0;
+            ctx.stroke();
+            ctx.restore();
+
+            // Center badge
+            const bx = p0x - badgeW / 2;
+            const by = p0y + 13;
+            ctx.save();
+            ctx.fillStyle = 'rgba(17, 19, 24, 0.95)';
+            ctx.strokeStyle = '#9CA3AF';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.rect(bx, by, badgeW, badgeH);
+            ctx.fill();
+            ctx.stroke();
+            ctx.font =
+              '800 11px "JetBrains Mono", "Noto Sans JP", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#E5E7EB';
+            ctx.fillText(centerLabel, p0x, by + badgeH / 2 + 0.5);
+            ctx.restore();
+            continue;
+          }
+
+          // 0. Historical Past Track
+          if (pastTrackNorm.length >= 2) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(
+              pastTrackNorm[0].normX * worldScale - originX,
+              pastTrackNorm[0].normY * worldScale - originY
+            );
+            for (let i = 1; i < pastTrackNorm.length; i++) {
+              ctx.lineTo(
+                pastTrackNorm[i].normX * worldScale - originX,
+                pastTrackNorm[i].normY * worldScale - originY
+              );
+            }
+            ctx.strokeStyle = '#38BDF8';
+            ctx.lineWidth = 2.5;
+            ctx.globalAlpha = 0.9;
+            ctx.stroke();
+
+            ctx.fillStyle = '#38BDF8';
+            ctx.strokeStyle = '#0B0D12';
+            ctx.lineWidth = 1.0;
+            for (let i = 0; i < pastTrackNorm.length - 1; i++) {
+              const px = pastTrackNorm[i].normX * worldScale - originX;
+              const py = pastTrackNorm[i].normY * worldScale - originY;
+              ctx.beginPath();
+              ctx.arc(px, py, 2.6, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+
+          // 1. Forecast Cone Envelope
+          if (conePolygonNorm.length >= 4) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(
+              conePolygonNorm[0].normX * worldScale - originX,
+              conePolygonNorm[0].normY * worldScale - originY
+            );
+            for (let i = 1; i < conePolygonNorm.length; i++) {
+              ctx.lineTo(
+                conePolygonNorm[i].normX * worldScale - originX,
+                conePolygonNorm[i].normY * worldScale - originY
+              );
+            }
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(248, 250, 252, 0.12)';
+            ctx.fill();
+
+            ctx.setLineDash([6, 4]);
+            ctx.strokeStyle = '#E2E8F0';
+            ctx.lineWidth = 1.8;
+            if (coneLeftNorm.length >= 2) {
+              ctx.beginPath();
+              ctx.moveTo(
+                coneLeftNorm[0].normX * worldScale - originX,
+                coneLeftNorm[0].normY * worldScale - originY
+              );
+              for (let i = 1; i < coneLeftNorm.length; i++) {
+                ctx.lineTo(
+                  coneLeftNorm[i].normX * worldScale - originX,
+                  coneLeftNorm[i].normY * worldScale - originY
+                );
+              }
+              ctx.stroke();
+            }
+            if (coneRightNorm.length >= 2) {
+              ctx.beginPath();
+              ctx.moveTo(
+                coneRightNorm[0].normX * worldScale - originX,
+                coneRightNorm[0].normY * worldScale - originY
+              );
+              for (let i = 1; i < coneRightNorm.length; i++) {
+                ctx.lineTo(
+                  coneRightNorm[i].normX * worldScale - originX,
+                  coneRightNorm[i].normY * worldScale - originY
+                );
+              }
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+
+          // 2. Analysis Gale Warning Zone (yellow) & Storm Warning Zone (red)
+          const p0 = ptsNorm[0];
+          const p0x = p0.normX * worldScale - originX;
+          const p0y = p0.normY * worldScale - originY;
+          if (p0.galeNormRadius > 0) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(p0x, p0y, p0.galeNormRadius * worldScale, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(234, 179, 8, 0.18)';
+            ctx.fill();
+            ctx.strokeStyle = '#FACC15';
+            ctx.lineWidth = 2.0;
+            ctx.stroke();
+            ctx.restore();
+          }
+          if (p0.stormNormRadius > 0) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(p0x, p0y, p0.stormNormRadius * worldScale, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(220, 38, 38, 0.30)';
+            ctx.fill();
+            ctx.strokeStyle = '#EF4444';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // 3. Forecast Center Track Polyline (dashed cyan)
+          if (ptsNorm.length >= 2) {
+            ctx.save();
+            ctx.setLineDash([6, 4]);
+            ctx.strokeStyle = '#38BDF8';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(p0x, p0y);
+            for (let i = 1; i < ptsNorm.length; i++) {
+              ctx.lineTo(
+                ptsNorm[i].normX * worldScale - originX,
+                ptsNorm[i].normY * worldScale - originY
+              );
+            }
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // 4. Forecast Probability Circles & Storm Warning Probability Circles
+          for (let idx = 1; idx < ptsNorm.length; idx++) {
+            const pn = ptsNorm[idx];
+            if (pn.probNormRadius <= 0) continue;
+            const px = pn.normX * worldScale - originX;
+            const py = pn.normY * worldScale - originY;
+
+            if (pn.pt.stormRadiusKm > 0 && pn.stormProbNormRadius > 0) {
+              ctx.save();
+              ctx.setLineDash([5, 4]);
+              ctx.beginPath();
+              ctx.arc(
+                px,
+                py,
+                pn.stormProbNormRadius * worldScale,
+                0,
+                Math.PI * 2
+              );
+              ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+              ctx.fill();
+              ctx.strokeStyle = '#EF4444';
+              ctx.lineWidth = 1.8;
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            ctx.save();
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.arc(px, py, pn.probNormRadius * worldScale, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+            ctx.fill();
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // 5. Forecast Point Dots & Time Badges (idx >= 1)
+          const boxW = 68;
+          const boxH = 20;
+          ctx.save();
+          ctx.font = '800 11px "JetBrains Mono", "Noto Sans JP", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          for (let idx = 1; idx < ptsNorm.length; idx++) {
+            const pn = ptsNorm[idx];
+            const px = pn.normX * worldScale - originX;
+            const py = pn.normY * worldScale - originY;
+
+            ctx.beginPath();
+            ctx.arc(px, py, 4.5, 0, Math.PI * 2);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fill();
+            ctx.strokeStyle = '#0F172A';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            if (pn.labelOffset) {
+              const lx = px + pn.labelOffset.dx - boxW / 2;
+              const ly = py + pn.labelOffset.dy - boxH / 2;
+              ctx.fillStyle = 'rgba(17, 19, 24, 0.92)';
+              ctx.strokeStyle = '#94A3B8';
+              ctx.lineWidth = 1.0;
+              ctx.beginPath();
+              ctx.rect(lx, ly, boxW, boxH);
+              ctx.fill();
+              ctx.stroke();
+              ctx.fillStyle = '#38BDF8';
+              ctx.fillText(
+                pn.compactTime,
+                px + pn.labelOffset.dx,
+                py + pn.labelOffset.dy + 0.5
+              );
+            }
+          }
+          ctx.restore();
+
+          // 6. Current Analysis Center Cross (`✕`) & Center Badge (idx === 0)
+          ctx.save();
+          ctx.lineCap = 'square';
+          ctx.beginPath();
+          ctx.moveTo(p0x - 7, p0y - 7);
+          ctx.lineTo(p0x + 7, p0y + 7);
+          ctx.moveTo(p0x + 7, p0y - 7);
+          ctx.lineTo(p0x - 7, p0y + 7);
+          ctx.strokeStyle = '#0B0D12';
+          ctx.lineWidth = 5.5;
+          ctx.stroke();
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.lineWidth = 3.0;
+          ctx.stroke();
+          ctx.restore();
+
+          const bx = p0x - badgeW / 2;
+          const by = p0y + 13;
+          ctx.save();
+          ctx.fillStyle = 'rgba(17, 19, 24, 0.95)';
+          ctx.strokeStyle = '#EF4444';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.rect(bx, by, badgeW, badgeH);
+          ctx.fill();
+          ctx.stroke();
+          ctx.font = '800 11px "JetBrains Mono", "Noto Sans JP", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillText(centerLabel, p0x, by + badgeH / 2 + 0.5);
+          ctx.restore();
+        }
+      }
+
       ctx.restore();
     };
 
@@ -1688,16 +2384,17 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     effectiveScene,
     preCompiledAmedas,
     preCompiledMunicipalityLabels,
+    preCompiledMunicipalityLabelsByDiv,
     preCompiledDivisionLabels,
+    preCompiledTyphoons,
+    divHasActiveWarningMap,
+    preCompiledEarthquake,
+    activeEew,
     data.warnings,
     data.muniSeverityMap,
     data.prefSeverityMap,
     amedasMetric,
-    warningZoomTier,
     activeWarningDivision?.divisionCode,
-    selectedEarthquake.id,
-    selectedEarthquake.maxScaleCode,
-    earthquakeGeoJsonData,
     compiledVersion,
   ]);
 
@@ -1903,7 +2600,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       maxZoom: 12,
       zoomControl: false,
       attributionControl: false,
-      zoomSnap: 0.25,
+      zoomSnap: 0,
       zoomDelta: 0.5,
       wheelPxPerZoomLevel: 60,
       worldCopyJump: true,
@@ -1934,28 +2631,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       viewportSizeRef.current = {
         width: container.clientWidth || 1280,
         height: container.clientHeight || 720,
-        dpr: Math.min(window.devicePixelRatio || 1, 2),
+        dpr: Math.min(window.devicePixelRatio || 1, 1.5),
       };
     };
     syncViewportSize();
 
-    // Adaptive duty-cycle throttle: remember how long the last canvas render took and never let the renderer
-    // occupy more than ~50% of the main thread while the camera moves (keeps Leaflet's own animation smooth).
-    let lastRenderMs = 0;
-    let lastRenderEnd = 0;
-    const timedRender = (
-      overrideCenter?: { lat: number; lng: number },
-      overrideZoom?: number
-    ) => {
-      const t0 = performance.now();
-      renderInteractiveCanvasRef.current(overrideCenter, overrideZoom);
-      lastRenderEnd = performance.now();
-      lastRenderMs = lastRenderEnd - t0;
-    };
-    const shouldSkipFrame = () =>
-      isMovingRef.current &&
-      lastRenderMs > 8 &&
-      performance.now() - lastRenderEnd < lastRenderMs;
+    let lastSyncFlyToTime = 0;
 
     const flushFrameUpdate = () => {
       frameRenderRaf = 0;
@@ -1963,18 +2644,31 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       const nextTier = getWarningMapZoomTier(z);
       if (nextTier !== warningZoomTierRef.current) {
         warningZoomTierRef.current = nextTier;
-        setWarningZoomTier(nextTier);
       }
-      timedRender();
+      renderInteractiveCanvasRef.current();
     };
 
-    const handleFrameUpdate = () => {
+    const handleFrameUpdate = (e?: L.LeafletEvent) => {
+      // Leaflet's flyTo animation invokes _onPanTransitionStep inside a requestAnimationFrame tick
+      // and fires both 'move' and 'zoom' with { flyTo: true }. Render synchronously in the same VSync
+      // frame (coalescing the move+zoom pair) so there is zero 1-frame lag or frame-skip stutter.
+      if ((e as any)?.flyTo) {
+        isMovingRef.current = true;
+        isFlyingRef.current = true;
+        cancelAnimationFrame(zoomAnimRaf);
+        if (frameRenderRaf !== 0) {
+          cancelAnimationFrame(frameRenderRaf);
+          frameRenderRaf = 0;
+        }
+        const now = performance.now();
+        if (now - lastSyncFlyToTime >= 4) {
+          lastSyncFlyToTime = now;
+          flushFrameUpdate();
+        }
+        return;
+      }
       if (frameRenderRaf !== 0) return;
       frameRenderRaf = requestAnimationFrame(() => {
-        if (shouldSkipFrame()) {
-          frameRenderRaf = 0;
-          return;
-        }
         flushFrameUpdate();
       });
     };
@@ -1990,7 +2684,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
     const handleZoomAnim = (e: L.ZoomAnimEvent) => {
       cancelAnimationFrame(zoomAnimRaf);
-      if ((e as any).noUpdate) {
+      if ((e as any).noUpdate || isFlyingRef.current) {
         return;
       }
       const startCenter = map.getCenter();
@@ -2012,11 +2706,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         const nextTier = getWarningMapZoomTier(curZoom);
         if (nextTier !== warningZoomTierRef.current) {
           warningZoomTierRef.current = nextTier;
-          setWarningZoomTier(nextTier);
         }
-        if (!shouldSkipFrame()) {
-          timedRender({ lat: curLat, lng: curLng }, curZoom);
-        }
+        renderInteractiveCanvasRef.current({ lat: curLat, lng: curLng }, curZoom);
 
         if (rawT < 1) {
           zoomAnimRaf = requestAnimationFrame(step);
@@ -2027,6 +2718,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     };
 
     const emitViewport = () => {
+      isFlyingRef.current = false;
       isMovingRef.current = false;
       cancelAnimationFrame(zoomAnimRaf);
       if (frameRenderRaf !== 0) {
@@ -2041,7 +2733,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
       (overlayRendererRef.current as any)?._reset?.();
       flushFrameUpdate();
-      setMapZoomVersion((v) => v + 1);
       if (onViewportChangeRef.current) {
         const c = map.getCenter();
         const b = map.getBounds();
@@ -2546,7 +3237,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       return;
     }
 
-    map.stop();
+    isMovingRef.current = true;
+    isFlyingRef.current = true;
     map.flyTo(targetCenter, targetZoom, {
       animate: true,
       duration: 1.35,
@@ -2674,351 +3366,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             interactive: false,
           }).addTo(group);
         }
-      }
-    } else if (effectiveScene === 'typhoon') {
-      const targetZoom = getSceneCameraTarget().zoom;
-      const currentZoom = map.getZoom();
-      const projectionZoom =
-        Math.abs(currentZoom - targetZoom) <= 1 ? currentZoom : targetZoom;
-
-      // Track placed screen-space bounding boxes so typhoon labels and forecast time badges never overlap
-      const placedBoxes: Array<{
-        x: number;
-        y: number;
-        w: number;
-        h: number;
-      }> = [];
-
-      const collidesWithPlaced = (
-        x: number,
-        y: number,
-        w: number,
-        h: number,
-        gap = 4
-      ): boolean => {
-        for (let i = 0; i < placedBoxes.length; i++) {
-          const b = placedBoxes[i];
-          if (
-            Math.abs(x - b.x) < (w + b.w) / 2 + gap &&
-            Math.abs(y - b.y) < (h + b.h) / 2 + gap
-          ) {
-            return true;
-          }
-        }
-        return false;
-      };
-
-      const typhoonsToRender =
-        data.typhoons.length > 0 ? data.typhoons : [selectedTyphoon];
-
-      for (const tc of typhoonsToRender) {
-        const pts = tc.points;
-        if (pts.length === 0) continue;
-        const extratropical = isExtratropicalCyclone(tc);
-
-        // Reserve all track point dots in placedBoxes so labels don't cover track dots
-        for (const p of pts) {
-          const dotScreen = map.project([p.lat, p.lon], projectionZoom);
-          placedBoxes.push({ x: dotScreen.x, y: dotScreen.y, w: 16, h: 16 });
-        }
-
-        // Special Case: Already converted to Extratropical Cyclone (`温帯低気圧`)
-        // -> Single solid gray line (`#9CA3AF`) with NO intermediate circle dots!
-        if (extratropical) {
-          const grayTrackCoords: Array<[number, number]> = [];
-          if (Array.isArray(tc.pastTrack)) {
-            for (const c of tc.pastTrack) {
-              grayTrackCoords.push([c[0], c[1]]);
-            }
-          }
-          for (const p of pts) {
-            const last = grayTrackCoords[grayTrackCoords.length - 1];
-            if (
-              !last ||
-              Math.abs(last[0] - p.lat) > 0.001 ||
-              Math.abs(last[1] - p.lon) > 0.001
-            ) {
-              grayTrackCoords.push([p.lat, p.lon]);
-            }
-          }
-          if (grayTrackCoords.length >= 2) {
-            L.polyline(grayTrackCoords, {
-              pane: 'vectorOverlayPane',
-              renderer: overlayRenderer,
-              color: '#9CA3AF',
-              weight: 2.8,
-              opacity: 0.92,
-              interactive: false,
-            }).addTo(group);
-          }
-
-          const pt0 = pts[0];
-          const centerLabel = formatCompactTyphoonCenterLabel(tc, pt0);
-          const ptScreen = map.project([pt0.lat, pt0.lon], projectionZoom);
-          const badgeW = Math.max(72, centerLabel.length * 13 + 16);
-          const badgeH = 22;
-          placedBoxes.push({
-            x: ptScreen.x,
-            y: ptScreen.y + 24,
-            w: badgeW,
-            h: badgeH,
-          });
-
-          const centerCrossIcon = L.divIcon({
-            className: 'custom-typhoon-center-cross',
-            html: `
-              <div style="position:relative;display:flex;align-items:center;justify-content:center;width:28px;height:28px;">
-                <svg data-testid="typhoon-center-cross" width="24" height="24" viewBox="0 0 24 24" fill="none">
-                  <path d="M5 5L19 19M19 5L5 19" stroke="#0B0D12" stroke-width="5.5" stroke-linecap="square"/>
-                  <path d="M5 5L19 19M19 5L5 19" stroke="#D1D5DB" stroke-width="3" stroke-linecap="square"/>
-                </svg>
-                <div data-testid="typhoon-center-label" style="position:absolute;top:24px;left:50%;transform:translateX(-50%);background:rgba(17,19,24,0.95);border:1.5px solid #9CA3AF;padding:1px 7px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 2px 8px rgba(0,0,0,0.75);">
-                  <span style="color:#E5E7EB;font-size:11px;font-weight:800;">${centerLabel}</span>
-                </div>
-              </div>
-            `,
-            iconSize: [28, 28],
-            iconAnchor: [14, 14],
-          });
-          L.marker([pt0.lat, pt0.lon], {
-            icon: centerCrossIcon,
-            zIndexOffset: 950,
-          }).addTo(group);
-          continue;
-        }
-
-        // 0. Historical Past Track (過去の移動軌跡 — 実線＋小ドット)
-        if (Array.isArray(tc.pastTrack) && tc.pastTrack.length >= 2) {
-          L.polyline(tc.pastTrack, {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            color: '#38BDF8',
-            weight: 2.5,
-            opacity: 0.9,
-            interactive: false,
-          }).addTo(group);
-
-          for (let i = 0; i < tc.pastTrack.length - 1; i++) {
-            const [pLat, pLon] = tc.pastTrack[i];
-            L.circleMarker([pLat, pLon], {
-              pane: 'vectorOverlayPane',
-              renderer: overlayRenderer,
-              radius: 2.6,
-              color: '#0B0D12',
-              fillColor: '#38BDF8',
-              fillOpacity: 0.9,
-              weight: 1,
-              interactive: false,
-            }).addTo(group);
-          }
-        }
-
-        // 1. Forecast Cone Envelope (進路予報円の包絡線・扇形)
-        const cone = computeTyphoonConeEnvelope(pts);
-        if (cone.polygon.length >= 4) {
-          L.polygon(cone.polygon, {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            color: 'transparent',
-            fillColor: '#F8FAFC',
-            fillOpacity: 0.12,
-            interactive: false,
-          }).addTo(group);
-
-          L.polyline(cone.leftEdge, {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            color: '#E2E8F0',
-            weight: 1.8,
-            dashArray: '6 4',
-            interactive: false,
-          }).addTo(group);
-
-          L.polyline(cone.rightEdge, {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            color: '#E2E8F0',
-            weight: 1.8,
-            dashArray: '6 4',
-            interactive: false,
-          }).addTo(group);
-        }
-
-        // 2. Analysis Gale Warning Zone (強風域 15m/s以上 — 黄色円) & Storm Warning Zone (暴風域 25m/s以上 — 赤色円)
-        const currentPt = pts[0];
-        if (currentPt.galeRadiusKm > 0) {
-          L.circle([currentPt.lat, currentPt.lon], {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            radius: currentPt.galeRadiusKm * 1000,
-            color: '#FACC15',
-            weight: 2,
-            fillColor: '#EAB308',
-            fillOpacity: 0.18,
-            interactive: false,
-          }).addTo(group);
-        }
-        if (currentPt.stormRadiusKm > 0) {
-          L.circle([currentPt.lat, currentPt.lon], {
-            pane: 'vectorOverlayPane',
-            renderer: overlayRenderer,
-            radius: currentPt.stormRadiusKm * 1000,
-            color: '#EF4444',
-            weight: 2.5,
-            fillColor: '#DC2626',
-            fillOpacity: 0.3,
-            interactive: false,
-          }).addTo(group);
-        }
-
-        // 3. Forecast Center Track Polyline (中心進路予想線 — 破線)
-        const trackCoords: Array<[number, number]> = pts.map((p) => [
-          p.lat,
-          p.lon,
-        ]);
-        L.polyline(trackCoords, {
-          pane: 'vectorOverlayPane',
-          renderer: overlayRenderer,
-          color: '#38BDF8',
-          weight: 2.5,
-          dashArray: '6 4',
-          interactive: false,
-        }).addTo(group);
-
-        // 4. Forecast Probability Circles (予報円) & Storm Warning Probability Circles (暴風警戒域)
-        pts.forEach((pt, idx) => {
-          if (idx > 0 && pt.probabilityCircleRadiusKm > 0) {
-            if (pt.stormRadiusKm > 0) {
-              L.circle([pt.lat, pt.lon], {
-                pane: 'vectorOverlayPane',
-                renderer: overlayRenderer,
-                radius: (pt.probabilityCircleRadiusKm + pt.stormRadiusKm) * 1000,
-                color: '#EF4444',
-                weight: 1.8,
-                dashArray: '5 4',
-                fillColor: '#EF4444',
-                fillOpacity: 0.08,
-                interactive: false,
-              }).addTo(group);
-            }
-
-            L.circle([pt.lat, pt.lon], {
-              pane: 'vectorOverlayPane',
-              renderer: overlayRenderer,
-              radius: pt.probabilityCircleRadiusKm * 1000,
-              color: '#FFFFFF',
-              weight: 1.8,
-              dashArray: '5 5',
-              fillColor: '#FFFFFF',
-              fillOpacity: 0.08,
-              interactive: false,
-            }).addTo(group);
-          }
-
-          // 5. Point Markers & Compact Non-Overlapping Labels
-          if (idx === 0) {
-            const centerLabel = formatCompactTyphoonCenterLabel(tc, pt);
-            const ptScreen = map.project([pt.lat, pt.lon], projectionZoom);
-            const badgeW = Math.max(72, centerLabel.length * 13 + 16);
-            const badgeH = 22;
-            placedBoxes.push({
-              x: ptScreen.x,
-              y: ptScreen.y + 24,
-              w: badgeW,
-              h: badgeH,
-            });
-
-            const centerCrossIcon = L.divIcon({
-              className: 'custom-typhoon-center-cross',
-              html: `
-                <div style="position:relative;display:flex;align-items:center;justify-content:center;width:28px;height:28px;">
-                  <svg data-testid="typhoon-center-cross" width="24" height="24" viewBox="0 0 24 24" fill="none">
-                    <path d="M5 5L19 19M19 5L5 19" stroke="#0B0D12" stroke-width="5.5" stroke-linecap="square"/>
-                    <path d="M5 5L19 19M19 5L5 19" stroke="#FFFFFF" stroke-width="3" stroke-linecap="square"/>
-                  </svg>
-                  <div data-testid="typhoon-center-label" style="position:absolute;top:24px;left:50%;transform:translateX(-50%);background:rgba(17,19,24,0.95);border:1.5px solid #EF4444;padding:1px 7px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 2px 8px rgba(0,0,0,0.75);">
-                    <span style="color:#FFFFFF;font-size:11px;font-weight:800;">${centerLabel}</span>
-                  </div>
-                </div>
-              `,
-              iconSize: [28, 28],
-              iconAnchor: [14, 14],
-            });
-            L.marker([pt.lat, pt.lon], {
-              icon: centerCrossIcon,
-              zIndexOffset: 1000,
-            }).addTo(group);
-          } else {
-            L.circleMarker([pt.lat, pt.lon], {
-              pane: 'vectorOverlayPane',
-              renderer: overlayRenderer,
-              radius: 4.5,
-              color: '#0F172A',
-              fillColor: '#FFFFFF',
-              fillOpacity: 1,
-              weight: 1.5,
-              interactive: false,
-            }).addTo(group);
-
-            const compactTime = formatCompactTyphoonTime(pt.timeLabel);
-            const ptScreen = map.project([pt.lat, pt.lon], projectionZoom);
-            const boxW = 68;
-            const boxH = 20;
-
-            // Try 4 candidate offsets around the forecast point so labels never overlap
-            const candidates: Array<{
-              dx: number;
-              dy: number;
-              anchorX: number;
-              anchorY: number;
-            }> =
-              idx % 2 === 1
-                ? [
-                    { dx: 44, dy: 0, anchorX: -10, anchorY: 10 },
-                    { dx: -44, dy: 0, anchorX: 78, anchorY: 10 },
-                    { dx: 0, dy: -22, anchorX: 34, anchorY: 32 },
-                    { dx: 0, dy: 22, anchorX: 34, anchorY: -12 },
-                  ]
-                : [
-                    { dx: -44, dy: 0, anchorX: 78, anchorY: 10 },
-                    { dx: 44, dy: 0, anchorX: -10, anchorY: 10 },
-                    { dx: 0, dy: -22, anchorX: 34, anchorY: 32 },
-                    { dx: 0, dy: 22, anchorX: 34, anchorY: -12 },
-                  ];
-
-            const chosen = candidates.find(
-              (c) =>
-                !collidesWithPlaced(
-                  ptScreen.x + c.dx,
-                  ptScreen.y + c.dy,
-                  boxW,
-                  boxH,
-                  4
-                )
-            );
-
-            if (chosen) {
-              placedBoxes.push({
-                x: ptScreen.x + chosen.dx,
-                y: ptScreen.y + chosen.dy,
-                w: boxW,
-                h: boxH,
-              });
-
-              const fcIcon = L.divIcon({
-                className: 'custom-typhoon-fc-label',
-                html: `
-                  <div data-testid="typhoon-fc-compact-label" style="display:inline-flex;align-items:center;justify-content:center;width:${boxW}px;height:${boxH}px;background:rgba(17,19,24,0.92);border:1px solid #94A3B8;padding:1px 5px;white-space:nowrap;font-family:'JetBrains Mono',monospace;">
-                    <span style="color:#38BDF8;font-size:11px;font-weight:800;">${compactTime}</span>
-                  </div>
-                `,
-                iconSize: [boxW, boxH],
-                iconAnchor: [chosen.anchorX, chosen.anchorY],
-              });
-              L.marker([pt.lat, pt.lon], { icon: fcIcon }).addTo(group);
-            }
-          }
-        });
       }
     } else if (effectiveScene === 'forecast') {
       // Dedicated ocean-side callout positions + leader lines so no two city labels ever overlap
@@ -3273,79 +3620,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }
         });
       }
-
-      // 2. Standard Observed Earthquake Stations (if available)
-      const sortedStations = [...selectedEarthquake.stations]
-        .filter(
-          (st): st is typeof st & { lat: number; lon: number } =>
-            typeof st.lat === 'number' &&
-            typeof st.lon === 'number' &&
-            !Number.isNaN(st.lat) &&
-            !Number.isNaN(st.lon)
-        )
-        .sort((a, b) => b.scaleCode - a.scaleCode);
-
-      // 2. Standard Observed Earthquake Stations (sorted descending by scaleCode so higher intensities take priority; badges do NOT overlap each other, but CAN overlap epicenter)
-      const stationBoxes: Array<{ x: number; y: number; w: number; h: number }> = [];
-
-      sortedStations.forEach((st) => {
-        const style = getSeismicScaleStyle(st.scaleCode);
-        const compactW = st.scaleLabel.length > 1 ? 22 : 18;
-        const compactH = 18;
-        const pt = map.project([st.lat, st.lon], projectionZoom);
-
-        // Filter out colliding badges: badges do not overlap each other
-        let collides = false;
-        for (let i = 0; i < stationBoxes.length; i++) {
-          const b = stationBoxes[i];
-          if (
-            Math.abs(pt.x - b.x) < (compactW + b.w) / 2 + 2 &&
-            Math.abs(pt.y - b.y) < (compactH + b.h) / 2 + 2
-          ) {
-            collides = true;
-            break;
-          }
-        }
-        if (collides) return;
-
-        stationBoxes.push({ x: pt.x, y: pt.y, w: compactW, h: compactH });
-
-        const compactIcon = L.divIcon({
-          className: 'custom-eq-station-compact',
-          html: `
-            <div data-testid="eq-station-compact-badge" title="${st.prefecture} ${st.stationName}（震度${st.scaleLabel}）" style="display:flex;align-items:center;justify-content:center;width:${compactW}px;height:${compactH}px;background:${style.hex};color:${style.badgeText};border:1.5px solid #0B0D12;border-radius:3px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:900;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.8);">
-              ${st.scaleLabel}
-            </div>
-          `,
-          iconSize: [compactW, compactH],
-          iconAnchor: [Math.round(compactW / 2), Math.round(compactH / 2)],
-        });
-        L.marker([st.lat, st.lon], {
-          icon: compactIcon,
-          zIndexOffset: 2500 + st.scaleCode * 10,
-        }).addTo(group);
-      });
-
-      if (!activeEew) {
-        const epiIcon = L.divIcon({
-          className: 'custom-epicenter-marker',
-          html: `
-            <div style="position:relative;display:flex;align-items:center;justify-content:center;width:32px;height:32px;">
-              <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
-                <path d="M6 6L26 26M26 6L6 26" stroke="#0B0D12" stroke-width="6.5" stroke-linecap="square"/>
-                <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="3.8" stroke-linecap="square"/>
-                <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.2" stroke-linecap="square"/>
-              </svg>
-            </div>
-          `,
-          iconSize: [32, 32],
-          iconAnchor: [16, 16],
-        });
-        L.marker([selectedEarthquake.lat, selectedEarthquake.lon], {
-          icon: epiIcon,
-          zIndexOffset: 1800,
-        }).addTo(group);
-      }
+      // Note: Standard Observed Earthquake Stations and Epicenter marker are rendered directly on interactiveCanvasRef at 60fps for zero DOM layout overhead during zoom/flyTo.
     }
 
     if (effectiveScene === 'tsunami') {
@@ -3404,7 +3679,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     activeEew,
     activeTsunamiForecast,
     eewAnimNow,
-    mapZoomVersion,
   ]);
 
   const currentNowcastEntry =

@@ -274,7 +274,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
     // Special handling for final nationwide return view in warnings scene after zooming into active divisions
     if (effectiveScene === 'warnings' && isFinalWarningNational) {
-      el.scrollTo({ top: 0, behavior: 'smooth' });
+      el.scrollTop = 0;
       fallbackTimer = setTimeout(() => {
         if (!cancelled) {
           onSceneCompleteRef.current();
@@ -369,8 +369,6 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     activeRegionConfig.id,
     activeWarningDivision,
     isFinalWarningNational,
-    syncedRegionId,
-    isZoomedIn,
     amedasMetric,
     selectedTyphoon.id,
     selectedEarthquake.id,
