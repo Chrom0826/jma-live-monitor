@@ -47,6 +47,27 @@
   }
 }
 
+/* Footer XML ticker: compositor-only transform loop (distance/duration set via CSS vars from App) */
+@keyframes ticker-track-loop {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(calc(var(--ticker-shift, 0px) * -1), 0, 0);
+  }
+}
+
+.ticker-track {
+  display: inline-flex;
+  width: max-content;
+  will-change: transform;
+  animation: ticker-track-loop var(--ticker-duration, 60s) linear infinite;
+}
+
+.ticker-viewport:hover .ticker-track {
+  animation-play-state: paused;
+}
+
 /* Leaflet Dark Broadcast Customizations */
 .leaflet-container {
   background-color: transparent !important;

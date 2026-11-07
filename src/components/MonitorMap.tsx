@@ -337,7 +337,6 @@ function createJmaSeamlessNowcastLayer(
       const tile = document.createElement('div');
       tile.style.width = '256px';
       tile.style.height = '256px';
-      tile.style.opacity = String(opacity);
       tile.style.pointerEvents = 'none';
 
       const inner = document.createElement('div');
@@ -392,9 +391,12 @@ function createJmaSeamlessNowcastLayer(
     tileSize: 256,
     minZoom: 2,
     maxZoom: 12,
-    keepBuffer: 8,
-    updateWhenIdle: false,
-    updateWhenZooming: true,
+    // Light tile loading: small buffer, no per-intermediate-zoom tile requests while flying
+    keepBuffer: 2,
+    updateWhenIdle: true,
+    updateWhenZooming: false,
+    updateInterval: 250,
+    opacity,
     zIndex,
   });
 }
@@ -448,14 +450,15 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const tsunamiCasingLayerRef = useRef<L.GeoJSON | null>(null);
   const tsunamiGeoJsonLayerRef = useRef<L.GeoJSON | null>(null);
   const overlayGroupRef = useRef<L.LayerGroup | null>(null);
-  const hrpnsLayerRef = useRef<L.GridLayer | null>(null);
-  const thnsLayerRef = useRef<L.GridLayer | null>(null);
+  const radarLayerCacheRef = useRef<Map<string, L.GridLayer>>(new Map());
   const overlayRendererRef = useRef<L.SVG | null>(null);
   const isFirstMountRef = useRef<boolean>(true);
   const warningZoomTierRef = useRef<WarningMapZoomTier>('prefecture');
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
   const onViewportChangeRef = useRef<typeof onViewportChange>(onViewportChange);
   const lastMuniSeveritySigRef = useRef<string>('');
+  // True while the camera is moving (flyTo / pan / zoom): enables cheaper draw LOD in the canvas renderer
+  const isMovingRef = useRef<boolean>(false);
   const viewportSizeRef = useRef<{ width: number; height: number; dpr: number }>({
     width: 1280,
     height: 720,
@@ -683,7 +686,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       coordByLatLon.set(`${st.lat},${st.lon}`, { normX, normY });
     }
 
-    return { sortedCandidates: candidates, metaByStation, coordByLatLon };
+    // Screen-space selection only depends on zoom (translation invariant), so work on normalized coords
+    // (lat := normX, lon := normY) and memoize the picked subset per quantized zoom level.
+    const proxies = candidates.map((st) => {
+      const m = metaByStation.get(st)!;
+      return { lat: m.normX, lon: m.normY, st };
+    });
+    const selectionCache = new Map<number, AmedasStationData[]>();
+
+    return {
+      sortedCandidates: candidates,
+      metaByStation,
+      coordByLatLon,
+      proxies,
+      selectionCache,
+    };
   }, [data.amedas, amedasMetric]);
 
   // Pre-compile and pre-sort municipality warning labels once when `data.municipalityWarnings` or `compiledVersion` updates
@@ -756,6 +773,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         center.lng,
         worldScale
       );
+      const moving = isMovingRef.current;
+      // Coarser sub-pixel vertex decimation while the camera is in motion (invisible at speed, ~2x fewer lineTo)
+      const decimPx = moving ? 1.4 : 0.65;
+      // Diagnostic dataset attributes are only written when idle and only when the value changed
+      const setDs = (el: HTMLCanvasElement, key: string, val: string) => {
+        if (!moving && el.dataset[key] !== val) el.dataset[key] = val;
+      };
       const halfW = width / 2;
       const halfH = height / 2;
       const originX = centerWorld.x - halfW;
@@ -823,7 +847,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 const px =
                   (coords[i] + worldWrapOffsetNormX) * worldScale - originX;
                 const py = coords[i + 1] * worldScale - originY;
-                if (Math.abs(px - prevX) + Math.abs(py - prevY) < 0.65) {
+                if (Math.abs(px - prevX) + Math.abs(py - prevY) < decimPx) {
                   continue;
                 }
                 ctx2d.lineTo(px, py);
@@ -874,7 +898,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               }
               if (anyWorld) {
                 bCtx.fill();
-                bCtx.stroke();
+                if (!moving) bCtx.stroke();
               }
             }
           }
@@ -930,9 +954,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               }
               bCtx.fillStyle = '#374151';
               bCtx.fill();
-              bCtx.strokeStyle = '#374151';
-              bCtx.lineWidth = 0.8;
-              bCtx.stroke();
+              if (!moving) {
+                bCtx.strokeStyle = '#374151';
+                bCtx.lineWidth = 0.8;
+                bCtx.stroke();
+              }
             }
             if (underfillYellowShapes.length > 0) {
               bCtx.beginPath();
@@ -941,9 +967,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               }
               bCtx.fillStyle = '#FACC15';
               bCtx.fill();
-              bCtx.strokeStyle = '#FACC15';
-              bCtx.lineWidth = 0.8;
-              bCtx.stroke();
+              if (!moving) {
+                bCtx.strokeStyle = '#FACC15';
+                bCtx.lineWidth = 0.8;
+                bCtx.stroke();
+              }
             }
 
             // 2b. Batched Warning Choropleth Fill (at most 4 draw calls by severity color instead of 100..1,900!)
@@ -988,9 +1016,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
                 bCtx.fillStyle = fillColor;
                 bCtx.fill();
-                bCtx.strokeStyle = fillColor;
-                bCtx.lineWidth = 0.75;
-                bCtx.stroke();
+                if (!moving) {
+                  bCtx.strokeStyle = fillColor;
+                  bCtx.lineWidth = 0.75;
+                  bCtx.stroke();
+                }
               }
             } else if (class20CompiledRef.current.length > 0) {
               const c20Shapes = class20CompiledRef.current;
@@ -1037,7 +1067,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
                 bCtx.fillStyle = fillColor;
                 bCtx.fill();
-                if (tier !== 'municipality') {
+                if (tier !== 'municipality' && !moving) {
                   bCtx.strokeStyle = fillColor;
                   bCtx.lineWidth = 0.65;
                   bCtx.stroke();
@@ -1083,25 +1113,27 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
               }
               if (foundFocused) {
-                bCtx.strokeStyle = '#050810';
-                bCtx.lineWidth = 5.2;
-                bCtx.stroke();
+                if (!moving) {
+                  bCtx.strokeStyle = '#050810';
+                  bCtx.lineWidth = 5.2;
+                  bCtx.stroke();
+                }
                 bCtx.strokeStyle = '#38BDF8';
                 bCtx.lineWidth = 2.8;
                 bCtx.stroke();
               }
-              baseCanvas.dataset.focusedDivisionCode = focusedDivCode;
-              baseCanvas.dataset.focusedDivisionBlueBorder = String(foundFocused);
-              baseCanvas.dataset.uncoloredOtherDivMuniCount = String(
+              setDs(baseCanvas, 'focusedDivisionCode', focusedDivCode);
+              setDs(baseCanvas, 'focusedDivisionBlueBorder', String(foundFocused));
+              setDs(baseCanvas, 'uncoloredOtherDivMuniCount', String(
                 uncoloredOtherDivMuniCount
-              );
+              ));
             } else {
               delete baseCanvas.dataset.focusedDivisionCode;
               delete baseCanvas.dataset.focusedDivisionBlueBorder;
               delete baseCanvas.dataset.uncoloredOtherDivMuniCount;
             }
-            baseCanvas.dataset.coloredWarningCount = String(coloredMuniCount);
-            baseCanvas.dataset.warningZoomTier = tier;
+            setDs(baseCanvas, 'coloredWarningCount', String(coloredMuniCount));
+            setDs(baseCanvas, 'warningZoomTier', tier);
           } else {
             // Crisp Blank Map (`白地図`) for `radar`, `amedas`, `typhoon`, `forecast`, `earthquake`, `volcano`, `tsunami`
             const isTsunami = effectiveScene === 'tsunami';
@@ -1125,8 +1157,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             delete baseCanvas.dataset.focusedDivisionBlueBorder;
           }
 
-          baseCanvas.dataset.currentZoom = currentZoom.toFixed(2);
-          baseCanvas.dataset.dpr = String(dpr);
+          setDs(baseCanvas, 'currentZoom', currentZoom.toFixed(2));
+          setDs(baseCanvas, 'dpr', String(dpr));
           bCtx.restore();
         }
       }
@@ -1148,18 +1180,30 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, width, height);
 
-      canvas.dataset.currentZoom = currentZoom.toFixed(2);
-      canvas.dataset.effectiveScene = effectiveScene;
+      setDs(canvas, 'currentZoom', currentZoom.toFixed(2));
+      setDs(canvas, 'effectiveScene', effectiveScene);
 
       // 1. AMeDAS Interactive High-Density Non-Overlapping Rendering
       if (effectiveScene === 'amedas') {
-        const visibleStations = selectNonOverlappingAmedasStations(
-          preCompiledAmedas.sortedCandidates,
-          amedasMetric,
-          currentZoom,
-          projectToScreen,
-          true
-        );
+        const zoomKey = Math.round(currentZoom * 20);
+        let visibleStations = preCompiledAmedas.selectionCache.get(zoomKey);
+        if (!visibleStations) {
+          const zq = zoomKey / 20;
+          const ws = 256 * Math.pow(2, zq);
+          const picked = selectNonOverlappingAmedasStations(
+            preCompiledAmedas.proxies as unknown as AmedasStationData[],
+            amedasMetric,
+            zq,
+            (nx, ny) => ({ x: nx * ws, y: ny * ws }),
+            true
+          ) as unknown as Array<{ st: AmedasStationData }>;
+          visibleStations = picked.map((p) => p.st);
+          if (preCompiledAmedas.selectionCache.size > 80) {
+            const firstKey = preCompiledAmedas.selectionCache.keys().next().value;
+            if (firstKey !== undefined) preCompiledAmedas.selectionCache.delete(firstKey);
+          }
+          preCompiledAmedas.selectionCache.set(zoomKey, visibleStations);
+        }
 
         let drawnCount = 0;
 
@@ -1265,9 +1309,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }
         }
 
-        canvas.dataset.amedasMetric = amedasMetric;
-        canvas.dataset.renderedStationCount = String(drawnCount);
-        canvas.dataset.selectedStationCount = String(visibleStations.length);
+        setDs(canvas, 'amedasMetric', amedasMetric);
+        setDs(canvas, 'renderedStationCount', String(drawnCount));
+        setDs(canvas, 'selectedStationCount', String(visibleStations.length));
       } else {
         delete canvas.dataset.renderedStationCount;
         delete canvas.dataset.selectedStationCount;
@@ -1280,7 +1324,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       if (effectiveScene === 'warnings') {
         const tier = getWarningMapZoomTier(currentZoom);
         const focusedDivCode = activeWarningDivision?.divisionCode || null;
-        canvas.dataset.warningZoomTier = tier;
+        setDs(canvas, 'warningZoomTier', tier);
         const drawnLabels: string[] = [];
 
         const minSafeX = 28;
@@ -1359,7 +1403,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             h: number;
           }> = [];
 
+          const maxMuniLabels = moving ? 80 : Infinity;
           for (let idx = 0; idx < preCompiledMunicipalityLabels.length; idx++) {
+            if (placedMuniBoxes.length >= maxMuniLabels) break;
             const entry = preCompiledMunicipalityLabels[idx];
             if (
               focusedDivCode &&
@@ -1403,10 +1449,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }
         }
 
-        canvas.dataset.renderedWarningLabelCount = String(drawnLabels.length);
-        canvas.dataset.renderedWarningLabelsSample = drawnLabels
+        setDs(canvas, 'renderedWarningLabelCount', String(drawnLabels.length));
+        setDs(canvas, 'renderedWarningLabelsSample', drawnLabels
           .slice(0, 10)
-          .join(',');
+          .join(','));
       } else {
         delete canvas.dataset.warningZoomTier;
         delete canvas.dataset.renderedWarningLabelCount;
@@ -1648,6 +1694,24 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     };
     syncViewportSize();
 
+    // Adaptive duty-cycle throttle: remember how long the last canvas render took and never let the renderer
+    // occupy more than ~50% of the main thread while the camera moves (keeps Leaflet's own animation smooth).
+    let lastRenderMs = 0;
+    let lastRenderEnd = 0;
+    const timedRender = (
+      overrideCenter?: { lat: number; lng: number },
+      overrideZoom?: number
+    ) => {
+      const t0 = performance.now();
+      renderInteractiveCanvasRef.current(overrideCenter, overrideZoom);
+      lastRenderEnd = performance.now();
+      lastRenderMs = lastRenderEnd - t0;
+    };
+    const shouldSkipFrame = () =>
+      isMovingRef.current &&
+      lastRenderMs > 8 &&
+      performance.now() - lastRenderEnd < lastRenderMs;
+
     const flushFrameUpdate = () => {
       frameRenderRaf = 0;
       const z = map.getZoom();
@@ -1656,12 +1720,22 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         warningZoomTierRef.current = nextTier;
         setWarningZoomTier(nextTier);
       }
-      renderInteractiveCanvasRef.current();
+      timedRender();
     };
 
     const handleFrameUpdate = () => {
       if (frameRenderRaf !== 0) return;
-      frameRenderRaf = requestAnimationFrame(flushFrameUpdate);
+      frameRenderRaf = requestAnimationFrame(() => {
+        if (shouldSkipFrame()) {
+          frameRenderRaf = 0;
+          return;
+        }
+        flushFrameUpdate();
+      });
+    };
+
+    const handleMoveStart = () => {
+      isMovingRef.current = true;
     };
 
     const handleResize = () => {
@@ -1695,10 +1769,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           warningZoomTierRef.current = nextTier;
           setWarningZoomTier(nextTier);
         }
-        renderInteractiveCanvasRef.current(
-          { lat: curLat, lng: curLng },
-          curZoom
-        );
+        if (!shouldSkipFrame()) {
+          timedRender({ lat: curLat, lng: curLng }, curZoom);
+        }
 
         if (rawT < 1) {
           zoomAnimRaf = requestAnimationFrame(step);
@@ -1709,6 +1782,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     };
 
     const emitViewport = () => {
+      isMovingRef.current = false;
       cancelAnimationFrame(zoomAnimRaf);
       if (frameRenderRaf !== 0) {
         cancelAnimationFrame(frameRenderRaf);
@@ -1740,6 +1814,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       }
     };
 
+    map.on('movestart', handleMoveStart);
+    map.on('zoomstart', handleMoveStart);
     map.on('move', handleFrameUpdate);
     map.on('zoom', handleFrameUpdate);
     map.on('zoomanim', handleZoomAnim);
@@ -2196,47 +2272,72 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   ]);
 
   // Update JMA High-Resolution Precipitation Nowcast (`hrpns`) + Lightning Nowcast (`thns`)
-  // Rendered inside `radarPane` (z-index: 450) directly ON TOP of the Japan & World maps
+  // Rendered inside `radarPane` (z-index: 450) directly ON TOP of the Japan & World maps.
+  // Layers are cached per frame and the NEXT frame is preloaded invisibly (opacity 0), so frame changes are
+  // a cheap opacity swap instead of destroying/recreating a tile layer (which re-downloaded every tile each 1.8s).
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
+    const cache = radarLayerCacheRef.current;
 
-    if (hrpnsLayerRef.current) {
-      map.removeLayer(hrpnsLayerRef.current);
-      hrpnsLayerRef.current = null;
-    }
-    if (thnsLayerRef.current) {
-      map.removeLayer(thnsLayerRef.current);
-      thnsLayerRef.current = null;
-    }
+    const wanted = new Map<
+      string,
+      { opacity: number; make: () => L.GridLayer }
+    >();
 
     if (effectiveScene === 'radar' && data.nowcastTimes.length > 0) {
-      const safeIdx = Math.min(radarFrameIndex, data.nowcastTimes.length - 1);
-      const entry = data.nowcastTimes[safeIdx];
-      if (entry && entry.basetime && entry.validtime) {
-        const hrpnsLayer = createJmaSeamlessNowcastLayer(
-          entry.basetime,
-          entry.validtime,
-          'hrpns',
-          0.92,
-          450
-        );
-        hrpnsLayer.addTo(map);
-        hrpnsLayerRef.current = hrpnsLayer;
+      const total = data.nowcastTimes.length;
+      const safeIdx = Math.min(radarFrameIndex, total - 1);
 
-        // Overlay Lightning Nowcast (`thns`) on top ONLY during Pass 1 (2周目: 雨雲＋雷レーダー)
+      const addFrame = (idx: number, visible: boolean) => {
+        const entry = data.nowcastTimes[idx];
+        if (!entry || !entry.basetime || !entry.validtime) return;
+        wanted.set(`hrpns:${entry.basetime}:${entry.validtime}`, {
+          opacity: visible ? 0.92 : 0,
+          make: () =>
+            createJmaSeamlessNowcastLayer(
+              entry.basetime,
+              entry.validtime,
+              'hrpns',
+              0.92,
+              450
+            ),
+        });
+        // Lightning Nowcast (`thns`) overlay ONLY during Pass 1 (2周目: 雨雲＋雷レーダー)
         if (radarPass === 1 && entry.thnsBasetime && entry.thnsValidtime) {
-          const thnsLayer = createJmaSeamlessNowcastLayer(
-            entry.thnsBasetime,
-            entry.thnsValidtime,
-            'thns',
-            0.84,
-            460
-          );
-          thnsLayer.addTo(map);
-          thnsLayerRef.current = thnsLayer;
+          wanted.set(`thns:${entry.thnsBasetime}:${entry.thnsValidtime}`, {
+            opacity: visible ? 0.84 : 0,
+            make: () =>
+              createJmaSeamlessNowcastLayer(
+                entry.thnsBasetime!,
+                entry.thnsValidtime!,
+                'thns',
+                0.84,
+                460
+              ),
+          });
         }
+      };
+
+      // Preload next frame first so the visible (current) frame wins if both resolve to the same key
+      if (total > 1) addFrame((safeIdx + 1) % total, false);
+      addFrame(safeIdx, true);
+    }
+
+    for (const [key, layer] of Array.from(cache.entries())) {
+      if (!wanted.has(key)) {
+        map.removeLayer(layer);
+        cache.delete(key);
       }
+    }
+    for (const [key, spec] of wanted.entries()) {
+      let layer = cache.get(key);
+      if (!layer) {
+        layer = spec.make();
+        layer.addTo(map);
+        cache.set(key, layer);
+      }
+      layer.setOpacity(spec.opacity);
     }
   }, [effectiveScene, radarFrameIndex, radarPass, data.nowcastTimes]);
 

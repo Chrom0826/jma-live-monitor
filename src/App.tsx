@@ -208,10 +208,9 @@ export default function App() {
   const latestVolcanoXmlIdRef = useRef<string>('');
 
   // Bottom XML Ticker refs (uses tiled scrollLeft with cached copyWidth so it never triggers forced layout reflows)
-  const tickerContainerRef = useRef<HTMLDivElement | null>(null);
+  const tickerTrackRef = useRef<HTMLDivElement | null>(null);
   const tickerFirstCopyRef = useRef<HTMLDivElement | null>(null);
   const tickerCopyWidthRef = useRef<number>(0);
-  const isTickerHoveredRef = useRef<boolean>(false);
 
   // Smooth scrollLeft-based bottom XML ticker with cached width (zero layout thrashing)
   useEffect(() => {
@@ -223,30 +222,31 @@ export default function App() {
     measureCopyWidth();
     window.addEventListener('resize', measureCopyWidth);
 
-    let subPixelScroll = tickerContainerRef.current?.scrollLeft || 0;
-    const speedPxPerTick = 1.9; // ~57px/s at 30fps
-
-    const intervalId = setInterval(() => {
-      const container = tickerContainerRef.current;
-      if (container && !isTickerHoveredRef.current) {
-        const copyWidth =
-          tickerCopyWidthRef.current ||
-          (tickerFirstCopyRef.current
-            ? (tickerCopyWidthRef.current =
-                tickerFirstCopyRef.current.offsetWidth)
-            : 0);
-        if (copyWidth > 0) {
-          subPixelScroll += speedPxPerTick;
-          if (subPixelScroll >= copyWidth) {
-            subPixelScroll -= copyWidth;
-          }
-          container.scrollLeft = subPixelScroll;
-        }
-      }
-    }, 33);
+    // Compositor-driven ticker: the track is moved by a CSS `transform` animation (no main-thread timer,
+    // no scrollLeft layout/paint work). Only the loop distance (one copy's width) and duration are set here.
+    const track = tickerTrackRef.current;
+    const copy = tickerFirstCopyRef.current;
+    const speedPxPerSec = 57;
+    const applyTickerGeometry = () => {
+      if (!track || !copy) return;
+      const w = copy.offsetWidth;
+      if (w <= 0) return;
+      tickerCopyWidthRef.current = w;
+      track.style.setProperty('--ticker-shift', `${w}px`);
+      track.style.setProperty(
+        '--ticker-duration',
+        `${Math.max(10, w / speedPxPerSec)}s`
+      );
+    };
+    applyTickerGeometry();
+    const resizeObserver =
+      copy && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(applyTickerGeometry)
+        : null;
+    if (resizeObserver && copy) resizeObserver.observe(copy);
 
     return () => {
-      clearInterval(intervalId);
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', measureCopyWidth);
     };
   }, [data.xmlEntries]);
@@ -951,16 +951,10 @@ export default function App() {
               XML全文FEED
             </span>
             <div
-              ref={tickerContainerRef}
               data-testid="xml-ticker-scroll-container"
-              onMouseEnter={() => {
-                isTickerHoveredRef.current = true;
-              }}
-              onMouseLeave={() => {
-                isTickerHoveredRef.current = false;
-              }}
-              className="flex-1 overflow-x-hidden whitespace-nowrap relative"
+              className="ticker-viewport flex-1 overflow-hidden whitespace-nowrap relative"
             >
+              <div ref={tickerTrackRef} className="ticker-track">
               <div
                 ref={tickerFirstCopyRef}
                 className="inline-flex items-center gap-10 pr-10 text-xs text-neutral-200"
@@ -998,6 +992,7 @@ export default function App() {
                     <span className="text-neutral-600 ml-4">｜</span>
                   </span>
                 ))}
+              </div>
               </div>
             </div>
           </footer>

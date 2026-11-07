@@ -240,6 +240,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     if (!el) return;
 
     let scrollIntervalId: ReturnType<typeof setInterval> | null = null;
+    let scrollRaf = 0;
     let startDelayTimer: ReturnType<typeof setTimeout> | null = null;
     let endHoldTimer: ReturnType<typeof setTimeout> | null = null;
     let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -304,13 +305,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
           ? Math.max(0, initialContainer.scrollHeight - initialContainer.clientHeight)
           : maxScroll;
 
-        scrollIntervalId = setInterval(() => {
+        // vsync-aligned, time-based scrolling (72px/s) instead of a 33ms timer: smoother and no timer jitter
+        let lastTs = performance.now();
+        const scrollTick = (now: number) => {
+          scrollRaf = 0;
           if (cancelled) return;
           const container = scrollContainerRef.current;
           if (!container) return;
+          const dt = Math.min(64, now - lastTs);
+          lastTs = now;
 
           if (cachedMax <= 4) {
-            if (scrollIntervalId) clearInterval(scrollIntervalId);
             const remainingHoldMs = Math.max(
               2000,
               minSceneDurationMs - (performance.now() - sceneStartTime)
@@ -323,12 +328,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
           virtualScrollTop = Math.min(
             cachedMax,
-            virtualScrollTop + scrollSpeedPxPerTick
+            virtualScrollTop + (scrollSpeedPxPerTick / 33) * dt
           );
           container.scrollTop = virtualScrollTop;
 
           if (virtualScrollTop >= cachedMax - 1.5) {
-            if (scrollIntervalId) clearInterval(scrollIntervalId);
             const remainingHoldMs = Math.max(
               2000,
               minSceneDurationMs - (performance.now() - sceneStartTime)
@@ -336,8 +340,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             endHoldTimer = setTimeout(() => {
               if (!cancelled) onSceneCompleteRef.current();
             }, remainingHoldMs);
+            return;
           }
-        }, 33);
+          scrollRaf = requestAnimationFrame(scrollTick);
+        };
+        scrollRaf = requestAnimationFrame(scrollTick);
       }, 1500);
     } else {
       // Non-overflowing right panel (e.g., Typhoon / Forecast / Earthquake with short list):
@@ -351,6 +358,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
     return () => {
       cancelled = true;
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
       if (scrollIntervalId) clearInterval(scrollIntervalId);
       if (startDelayTimer) clearTimeout(startDelayTimer);
       if (endHoldTimer) clearTimeout(endHoldTimer);
