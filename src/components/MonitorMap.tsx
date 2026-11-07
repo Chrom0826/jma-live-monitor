@@ -19,6 +19,7 @@ import {
   WarningSeverity,
 } from '../types/jma';
 import { fetchSharedJmaAreaConst } from '../services/jmaClient';
+import { attachSmoothWheelZoom } from '../utils/smoothWheelZoom';
 import {
   AMEDAS_PATROL_STOPS,
   computeEarthquakeAreaScales,
@@ -1374,7 +1375,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                   coords[i + 1] * worldScale - originY
                 );
               }
-              ctx2d.closePath();
+              // lineTo(start) instead of closePath(): closePath is O(path length) in Chromium,
+              // which makes batching thousands of rings into one path quadratic.
+              ctx2d.lineTo(
+                (coords[0] + worldWrapOffsetNormX) * worldScale - originX,
+                coords[1] * worldScale - originY
+              );
             }
           };
 
@@ -1448,11 +1454,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 );
               }
               if (drawn > 0) {
+                // Mesh strokes cover thousands of vertices: miter joins (bevel fallback) + butt caps look
+                // the same at <=2px but rasterize ~25% faster than round joins/caps.
+                bCtx.lineJoin = 'miter';
+                bCtx.miterLimit = 2;
+                bCtx.lineCap = 'butt';
                 bCtx.globalAlpha = alpha;
                 bCtx.strokeStyle = color;
                 bCtx.lineWidth = width;
                 bCtx.stroke();
                 bCtx.globalAlpha = 1;
+                bCtx.lineJoin = 'round';
+                bCtx.lineCap = 'round';
               }
             };
             const strokeArcList = (
@@ -1485,15 +1498,15 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               const focusedDivCode = activeWarningDivision?.divisionCode || null;
               const muniMap = data.muniSeverityMap || {};
 
-              // a. Land underfill (lakes stay filled, no black holes)
-              fillLand('#374151');
-
-              // b. Severity buckets. Municipality status comes ONLY from the municipality's own report;
+              // a+b. Single fill pass: every municipality is filled exactly once, either in its severity
+              //      colour or in the neutral land colour (no full-land underfill pass -> ~20% less raster).
+              //      Severity buckets. Municipality status comes ONLY from the municipality's own report;
               //    division severity is used solely for areas JMA did not report at all.
               const buckets: Record<
                 Exclude<WarningSeverity, 'normal'>,
                 CompiledGeoShape[]
               > = { advisory: [], warning: [], danger: [], special: [] };
+              const normalShapes: CompiledGeoShape[] = [];
               let coloredMuniCount = 0;
               for (let i = 0; i < c20All.length; i++) {
                 const sh = c20All[i];
@@ -1501,10 +1514,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 if (sev === undefined) {
                   sev = divHasActiveWarningMap.get(sh.divisionCode) || 'normal';
                 }
-                if (sev === 'normal') continue;
-                coloredMuniCount++;
+                if (sev !== 'normal') coloredMuniCount++;
                 if (!isShapeVisible(sh)) continue;
-                buckets[sev].push(sh);
+                if (sev === 'normal') normalShapes.push(sh);
+                else buckets[sev].push(sh);
+              }
+              if (normalShapes.length > 0) {
+                bCtx.beginPath();
+                for (let i = 0; i < normalShapes.length; i++) traceShapePath(bCtx, normalShapes[i]);
+                bCtx.fillStyle = '#374151';
+                bCtx.fill();
               }
               for (const sev of ['advisory', 'warning', 'danger', 'special'] as const) {
                 const bucket = buckets[sev];
@@ -1515,16 +1534,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 bCtx.fill();
               }
 
-              // c. Municipality borders: fade in smoothly with zoom (no popping), drawn once per shared arc
+              // c. Municipality borders: 1-device-pixel hairlines (Skia's fast hairline path, ~3x cheaper
+              //    to rasterize than sub-2px AA strokes), fading in with zoom so they never pop.
+              const hairline = 1 / Math.max(1, dpr);
               const muniAlpha = Math.max(0, Math.min(1, (currentZoom - 6.0) / 1.0));
               if (muniAlpha > 0) {
-                strokeArcKinds(['muni'], '#0B0F19', 0.6 + 0.3 * muniAlpha, 0.5 * muniAlpha);
+                strokeArcKinds(['muni'], '#0B0F19', hairline, 0.65 * muniAlpha);
               }
               if (tier === 'municipality' && focusedDivCode) {
                 strokeArcList(
                   topo.divisionInnerArcs.get(focusedDivCode),
                   '#1E293B',
-                  0.9
+                  Math.max(hairline, 0.9)
                 );
               }
 
@@ -2575,17 +2596,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       })
       .catch(() => {});
 
-    fetch(`${import.meta.env.BASE_URL}japan-prefectures.geojson`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((json) => {
-        if (!cancelled && json) {
-          setGeoJsonData(json);
-        }
-      })
-      .catch(() => {});
+    // 47-prefecture GeoJSON (~500KB) is only needed by the legacy (non-topology) renderer:
+    // fetch it lazily, only if the pre-built topology could not be loaded.
+    const loadPrefectureFallback = () =>
+      fetch(`${import.meta.env.BASE_URL}japan-prefectures.geojson`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((json) => {
+          if (!cancelled && json) {
+            setGeoJsonData(json);
+          }
+        })
+        .catch(() => {});
 
     loadJmaMunicipalityGeoJson()
       .then(({ class20, dissolvedDivisions, topology }) => {
+        if (!topology) loadPrefectureFallback();
         if (!cancelled) {
           if (topology) {
             topologyRef.current = topology;
@@ -2608,7 +2633,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        loadPrefectureFallback();
+      });
 
     loadJmaTsunamiGeoJson()
       .then((json) => {
@@ -2773,9 +2800,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       attributionControl: false,
       zoomSnap: 0,
       zoomDelta: 0.5,
-      wheelPxPerZoomLevel: 60,
+      // Leaflet's wheel zoom drops input while its 250ms zoom animation runs (stepwise stutter);
+      // replaced by a continuous, cursor-anchored wheel zoom (see utils/smoothWheelZoom).
+      scrollWheelZoom: false,
       worldCopyJump: true,
     });
+    const detachSmoothWheel = attachSmoothWheelZoom(map, { pxPerZoomLevel: 60 });
 
     const radarPane = map.createPane('radarPane');
     radarPane.style.zIndex = '450';
@@ -2937,6 +2967,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     return () => {
       cancelAnimationFrame(zoomAnimRaf);
       cancelAnimationFrame(frameRenderRaf);
+      detachSmoothWheel();
       map.remove();
       mapInstanceRef.current = null;
     };
