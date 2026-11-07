@@ -50,7 +50,9 @@ import {
   formatEewArrivalLabel,
   formatEewScaleRange,
   getTsunamiGradeStyle,
+  isEewFinal,
   isEewStillActive,
+  isEewWarning,
 } from '../utils/eewTsunami';
 import {
   decodeJmaTopology,
@@ -3737,12 +3739,15 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         }
 
         // EEW Epicenter Marker
-        const isFinal = activeEew.serial >= 5;
+        const isFinal = isEewFinal(activeEew);
+        const eewColor = isEewWarning(activeEew) ? '#EF4444' : '#F59E0B';
+        const eewTag = isEewWarning(activeEew) ? 'EEW 警報' : 'EEW 予報';
         const reportBadge = isFinal
           ? `最終報(第${activeEew.serial}報)`
           : `第${activeEew.serial}報`;
         const epiPt = map.project([eewLat, eewLon], projectionZoom);
-        placedBoxes.push({ x: epiPt.x, y: epiPt.y, w: 60, h: 40 });
+        // icon is 160x68 anchored at (80, 20): the × plus the label strip below it
+        placedBoxes.push({ x: epiPt.x, y: epiPt.y + 14, w: 160, h: 68 });
 
         const magLabel =
           activeEew.magnitude > 0
@@ -3753,16 +3758,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           html: `
             <div style="position:relative;display:flex;flex-direction:column;align-items:center;pointer-events:none;">
               <div style="position:relative;display:flex;align-items:center;justify-content:center;width:40px;height:40px;">
-                <div style="position:absolute;width:36px;height:36px;border-radius:50%;background:rgba(239,68,68,0.45);animation:ping 1.4s cubic-bezier(0,0,0.2,1) infinite;"></div>
+                <div style="position:absolute;width:36px;height:36px;border-radius:50%;background:${eewColor}73;animation:ping 1.4s cubic-bezier(0,0,0.2,1) infinite;"></div>
                 <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
                   <path d="M5 5L27 27M27 5L5 27" stroke="#0B0D12" stroke-width="7" stroke-linecap="square"/>
-                  <path d="M5 5L27 27M27 5L5 27" stroke="#EF4444" stroke-width="4.2" stroke-linecap="square"/>
+                  <path d="M5 5L27 27M27 5L5 27" stroke="${eewColor}" stroke-width="4.2" stroke-linecap="square"/>
                   <path d="M5 5L27 27M27 5L5 27" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="square"/>
                 </svg>
               </div>
-              <div style="background:rgba(18,20,26,0.96);border:2px solid #EF4444;padding:2px 8px;white-space:nowrap;margin-top:2px;box-shadow:0 3px 10px rgba(0,0,0,0.85);border-radius:3px;font-family:'JetBrains Mono',monospace;">
-                <span style="background:#EF4444;color:#FFFFFF;font-weight:900;font-size:10px;padding:1px 4px;margin-right:4px;">EEW</span>
-                <span style="color:#EF4444;font-size:11px;font-weight:800;">${reportBadge}</span>
+              <div style="background:rgba(18,20,26,0.96);border:2px solid ${eewColor};padding:2px 8px;white-space:nowrap;margin-top:2px;box-shadow:0 3px 10px rgba(0,0,0,0.85);border-radius:3px;font-family:'JetBrains Mono',monospace;">
+                <span style="background:${eewColor};color:#FFFFFF;font-weight:900;font-size:10px;padding:1px 4px;margin-right:4px;">${eewTag}</span>
+                <span style="color:${eewColor};font-size:11px;font-weight:800;">${reportBadge}</span>
                 <span style="color:#FFFFFF;font-size:11px;font-weight:800;margin-left:4px;">${magLabel}</span>
               </div>
             </div>
@@ -3799,13 +3804,25 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
           const scaleText = formatEewScaleRange(area.scaleFrom, area.scaleTo);
           const arrivalLabel = formatEewArrivalLabel(area, eewAnimNow);
-          const isArrived = arrivalLabel.includes('到達');
+          const isArrived = arrivalLabel.includes('到達') && !arrivalLabel.startsWith('未');
           const pt = map.project(pos, projectionZoom);
           const boxW = 120;
           const boxH = 22;
 
-          if (!collidesWithPlaced(pt.x, pt.y, boxW, boxH, 2)) {
-            placedBoxes.push({ x: pt.x, y: pt.y, w: boxW, h: boxH });
+          // Prefecture centres are coarse and often sit under the epicentre label: nudge the badge to the
+          // nearest free slot instead of dropping it.
+          const offsets: Array<[number, number]> = [
+            [0, 0], [0, 26], [0, -26], [0, 52], [0, -52], [boxW + 6, 0], [-(boxW + 6), 0],
+            [boxW + 6, 26], [-(boxW + 6), 26], [0, 78], [0, -78],
+          ];
+          const slot = offsets.find(
+            ([dx, dy]) => !collidesWithPlaced(pt.x + dx, pt.y + dy, boxW, boxH, 2)
+          );
+          if (slot) {
+            const sx = pt.x + slot[0];
+            const sy = pt.y + slot[1];
+            placedBoxes.push({ x: sx, y: sy, w: boxW, h: boxH });
+            const badgePos = map.unproject([sx, sy], projectionZoom);
             const areaIcon = L.divIcon({
               className: 'custom-eew-area-badge',
               html: `
@@ -3818,7 +3835,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               iconSize: [boxW, boxH],
               iconAnchor: [Math.round(boxW / 2), Math.round(boxH / 2)],
             });
-            L.marker(pos, { icon: areaIcon, zIndexOffset: 2500 }).addTo(group);
+            L.marker(badgePos, { icon: areaIcon, zIndexOffset: 2500 }).addTo(group);
           }
         });
       }

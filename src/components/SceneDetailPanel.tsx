@@ -28,7 +28,9 @@ import {
   formatOccurrenceTimeJa,
   getSeismicScaleBadgeStyle,
   getTsunamiGradeStyle,
+  isEewFinal,
   isEewStillActive,
+  isEewWarning,
 } from '../utils/eewTsunami';
 
 interface SceneDetailPanelProps {
@@ -397,7 +399,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         <div className="bg-red-950/95 border border-red-500 px-2.5 py-1.5 shrink-0">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-mono font-bold text-red-200 whitespace-nowrap">
-              {interruptKind === 'earthquake'
+              {interruptKind === 'eew'
+                ? isEewWarning(activeEew)
+                  ? '● EEW警報 割込中'
+                  : '● EEW予報 割込中'
+                : interruptKind === 'earthquake'
                 ? '● 地震情報 割込中'
                 : interruptKind === 'volcano'
                   ? '● 火山Lv変化 割込中'
@@ -1132,15 +1138,33 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
           <>
             {/* EEW (緊急地震速報) Live Banner (NERV / Broadcast Style) */}
             {activeEew && isEewStillActive(activeEew) && (
-              <div className="pb-2 mb-2 bg-[#1A0B0E] border-2 border-red-500 rounded-xs shadow-lg shadow-red-950/60 animate-pulse-slow">
-                <div className="bg-red-600 px-2.5 py-1 text-[13px] font-black text-white flex items-center justify-between tracking-wide">
+              <div
+                className={`pb-2 mb-2 border-2 rounded-xs shadow-lg ${
+                  isEewWarning(activeEew)
+                    ? 'bg-[#1A0B0E] border-red-500 shadow-red-950/60 animate-pulse-slow'
+                    : 'bg-[#1A140A] border-amber-500 shadow-amber-950/50'
+                }`}
+              >
+                <div
+                  className={`px-2.5 py-1 text-[13px] font-black flex items-center justify-between tracking-wide ${
+                    isEewWarning(activeEew)
+                      ? 'bg-red-600 text-white'
+                      : 'bg-amber-500 text-slate-950'
+                  }`}
+                >
                   <span className="flex items-center gap-1.5">
-                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-                    緊急地震速報 (警報)
+                    <span
+                      className={`inline-block w-2.5 h-2.5 rounded-full animate-ping ${
+                        isEewWarning(activeEew) ? 'bg-white' : 'bg-slate-950'
+                      }`}
+                    />
+                    緊急地震速報 ({isEewWarning(activeEew) ? '警報' : '予報'})
+                    {activeEew.isCancelled ? ' 取消' : ''}
+                    {activeEew.isAssumedHypocenter ? ' [仮定震源]' : ''}
                   </span>
-                  <span className="font-mono text-xs bg-black/40 px-1.5 py-0.2 rounded-xs">
+                  <span className="font-mono text-xs bg-black/40 text-white px-1.5 py-0.2 rounded-xs">
                     第{activeEew.serial}報
-                    {activeEew.serial >= 5 ? ' (最終報)' : ''}
+                    {isEewFinal(activeEew) ? ' (最終報)' : ''}
                   </span>
                 </div>
 
@@ -1179,7 +1203,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   {activeEew.areas.length > 0 && (
                     <div className="space-y-1 pt-1">
                       <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
-                        <span>強い揺れの予想地域</span>
+                        <span>
+                          {isEewWarning(activeEew)
+                            ? '強い揺れの予想地域（警報）'
+                            : '予測震度の地域'}
+                        </span>
                         <span className="font-mono text-[10px] text-neutral-400">
                           {activeEew.areas.length}地域
                         </span>
@@ -1194,7 +1222,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                             area,
                             eewAnimNow
                           );
-                          const isArrived = arrival.includes('到達');
+                          const isArrived = arrival.includes('到達') && !arrival.startsWith('未');
                           return (
                             <div
                               key={`${area.pref}-${area.name}`}
@@ -1207,7 +1235,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 {area.name}
                               </div>
                               <div className="flex items-center gap-2 font-mono">
-                                <span className="px-1.5 py-0.2 bg-yellow-400 text-slate-950 font-black rounded-xs text-[11px]">
+                                <span className="px-1.5 py-0.2 bg-yellow-400 text-slate-950 font-black rounded-xs text-[11px] whitespace-nowrap">
                                   {scaleRange}
                                 </span>
                                 <span
