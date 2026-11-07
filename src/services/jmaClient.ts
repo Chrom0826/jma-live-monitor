@@ -38,6 +38,7 @@ import {
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
   PREFECTURE_NAMES,
+  sortEarthquakesByNewest,
 } from '../utils/jmaParser';
 import {
   isTsunamiForecastActive,
@@ -83,6 +84,7 @@ const P2P_TSUNAMI_HISTORY_URL =
 
 let cachedAmedasTable: Record<string, any> | null = null;
 let cachedJmaAreaConst: Record<string, any> | null = null;
+let jmaAreaConstPromise: Promise<Record<string, any> | null> | null = null;
 let cachedJmaXyConst: Record<string, any> | null = null;
 let cachedHourlySnowTs = '';
 let cachedHourlySnowMap: Record<string, any> | null = null;
@@ -99,6 +101,19 @@ async function fetchWithTimeout(url: string, timeoutMs = 4500): Promise<Response
   } finally {
     clearTimeout(id);
   }
+}
+
+export function fetchSharedJmaAreaConst(): Promise<Record<string, any> | null> {
+  if (cachedJmaAreaConst) return Promise.resolve(cachedJmaAreaConst);
+  if (jmaAreaConstPromise) return jmaAreaConstPromise;
+  jmaAreaConstPromise = fetchWithTimeout(JMA_AREA_CONST_URL, 4500)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((json) => {
+      if (json) cachedJmaAreaConst = json;
+      return cachedJmaAreaConst;
+    })
+    .catch(() => null);
+  return jmaAreaConstPromise;
 }
 
 async function fetchSingleJmaXmlFeed(
@@ -293,18 +308,13 @@ async function fetchLiveJmaWarnings(): Promise<{
   try {
     const [resR8, areaData, xyData] = await Promise.all([
       fetchWithTimeout(JMA_WARNING_MAP_URL, 4500).catch(() => null),
-      cachedJmaAreaConst
-        ? Promise.resolve(cachedJmaAreaConst)
-        : fetchWithTimeout(JMA_AREA_CONST_URL, 4500)
-            .then((r) => (r.ok ? r.json() : null))
-            .catch(() => null),
+      fetchSharedJmaAreaConst(),
       cachedJmaXyConst
         ? Promise.resolve(cachedJmaXyConst)
         : fetchWithTimeout(JMA_XY_CONST_URL, 4500)
             .then((r) => (r.ok ? r.json() : null))
             .catch(() => null),
     ]);
-    if (areaData) cachedJmaAreaConst = areaData;
     if (xyData) cachedJmaXyConst = xyData;
 
     const res =
@@ -672,13 +682,9 @@ async function fetchRecentEarthquakes(): Promise<{
           })
         );
 
-        const validReports = detailReports
-          .filter((r): r is EarthquakeReport => r !== null)
-          .sort(
-            (a, b) =>
-              b.maxScaleCode - a.maxScaleCode ||
-              b.occurrenceTime.localeCompare(a.occurrenceTime)
-          );
+        const validReports = sortEarthquakesByNewest(
+          detailReports.filter((r): r is EarthquakeReport => r !== null)
+        );
         if (validReports.length > 0) {
           return { earthquakes: validReports, live: true };
         }
@@ -695,14 +701,11 @@ async function fetchRecentEarthquakes(): Promise<{
       return { earthquakes: INITIAL_EARTHQUAKES, live: false };
     }
     const json = (await res.json()) as Array<Record<string, any>>;
-    const parsed = json
-      .map(convertP2PQuakeItem)
-      .filter((x): x is EarthquakeReport => x !== null)
-      .sort(
-        (a, b) =>
-          b.maxScaleCode - a.maxScaleCode ||
-          b.occurrenceTime.localeCompare(a.occurrenceTime)
-      );
+    const parsed = sortEarthquakesByNewest(
+      json
+        .map(convertP2PQuakeItem)
+        .filter((x): x is EarthquakeReport => x !== null)
+    );
     if (parsed.length > 0) {
       return { earthquakes: parsed, live: true };
     }

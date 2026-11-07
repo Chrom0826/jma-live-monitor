@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MonitorMap } from './components/MonitorMap';
 import { SceneDetailPanel } from './components/SceneDetailPanel';
 import { ModalTabMode, XmlInspectorModal } from './components/XmlInspectorModal';
@@ -51,6 +51,7 @@ import {
   getSeismicScaleStyle,
   REGION_CONFIGS,
   SCENE_LIST,
+  sortEarthquakesByNewest,
 } from './utils/jmaParser';
 import {
   getTsunamiAlertSeverity,
@@ -107,6 +108,43 @@ function formatTimeHm(isoOrText: string): string {
   return '13:40';
 }
 
+const LiveClockBox = memo(function LiveClockBox() {
+  const [dateHeaderText, setDateHeaderText] = useState<string>('11月5日 木曜日');
+  const [timeHeaderText, setTimeHeaderText] = useState<string>('13:43:07');
+
+  useEffect(() => {
+    const updateClock = () => {
+      const now = new Date();
+      const month = now.getMonth() + 1;
+      const day = now.getDate();
+      const weekday = WEEKDAYS_JA[now.getDay()];
+      const hh = String(now.getHours()).padStart(2, '0');
+      const min = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      const nextDate = `${month}月${day}日 ${weekday}`;
+      setDateHeaderText((prev) => (prev === nextDate ? prev : nextDate));
+      setTimeHeaderText(`${hh}:${min}:${ss}`);
+    };
+    updateClock();
+    const timer = setInterval(updateClock, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="border-b border-[#5A606D] px-4 py-3 text-center bg-[#111318] shrink-0">
+      <div className="text-[20px] font-bold tracking-wider text-white leading-snug">
+        {dateHeaderText}
+      </div>
+      <div
+        data-testid="live-digital-clock"
+        className="text-[42px] font-mono font-bold tracking-wider text-white leading-none mt-1"
+      >
+        {timeHeaderText}
+      </div>
+    </div>
+  );
+});
+
 export default function App() {
   const [data, setData] = useState<MonitorDataBundle>(INITIAL_BUNDLE);
   // Start on 'warnings' so the NERV choropleth map is immediately visible, then rotate through normal loop scenes
@@ -155,51 +193,48 @@ export default function App() {
   );
   const [isRefreshingXml, setIsRefreshingXml] = useState<boolean>(false);
 
-  // Live JST Clock (matches NERV防災ライブ top-left clock)
-  const [dateHeaderText, setDateHeaderText] = useState<string>('11月5日 木曜日');
-  const [timeHeaderText, setTimeHeaderText] = useState<string>('13:43:07');
-  const [fullUpdateDateText, setFullUpdateDateText] =
-    useState<string>('2026年11月5日 13:43 更新');
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  const fullUpdateDateText = useMemo(() => {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const day = now.getDate();
+    const hm = (data.lastXmlFetchTime || '13:43').slice(0, 5);
+    return `${yyyy}年${month}月${day}日 ${hm} 更新`;
+  }, [data.lastXmlFetchTime]);
 
   const latestEqIdRef = useRef<string>(INITIAL_EARTHQUAKES[0].id);
   const latestVolcanoXmlIdRef = useRef<string>('');
 
-  // Bottom XML Ticker refs (uses tiled scrollLeft instead of GPU-texture-limited translate3d)
+  // Bottom XML Ticker refs (uses tiled scrollLeft with cached copyWidth so it never triggers forced layout reflows)
   const tickerContainerRef = useRef<HTMLDivElement | null>(null);
   const tickerFirstCopyRef = useRef<HTMLDivElement | null>(null);
+  const tickerCopyWidthRef = useRef<number>(0);
   const isTickerHoveredRef = useRef<boolean>(false);
 
-  // Update clock every second
+  // Smooth scrollLeft-based bottom XML ticker with cached width (zero layout thrashing)
   useEffect(() => {
-    const updateClock = () => {
-      const now = new Date();
-      const yyyy = now.getFullYear();
-      const month = now.getMonth() + 1;
-      const day = now.getDate();
-      const weekday = WEEKDAYS_JA[now.getDay()];
-      const hh = String(now.getHours()).padStart(2, '0');
-      const min = String(now.getMinutes()).padStart(2, '0');
-      const ss = String(now.getSeconds()).padStart(2, '0');
-      setDateHeaderText(`${month}月${day}日 ${weekday}`);
-      setTimeHeaderText(`${hh}:${min}:${ss}`);
-      setFullUpdateDateText(`${yyyy}年${month}月${day}日 ${hh}:${min} 更新`);
+    const measureCopyWidth = () => {
+      if (tickerFirstCopyRef.current) {
+        tickerCopyWidthRef.current = tickerFirstCopyRef.current.offsetWidth;
+      }
     };
-    updateClock();
-    const timer = setInterval(updateClock, 1000);
-    return () => clearInterval(timer);
-  }, []);
+    measureCopyWidth();
+    window.addEventListener('resize', measureCopyWidth);
 
-  // Smooth scrollLeft-based bottom XML ticker (never hits Chromium's 16,384px GPU texture limit)
-  useEffect(() => {
     let subPixelScroll = tickerContainerRef.current?.scrollLeft || 0;
     const speedPxPerTick = 1.9; // ~57px/s at 30fps
 
     const intervalId = setInterval(() => {
       const container = tickerContainerRef.current;
-      const firstCopy = tickerFirstCopyRef.current;
-      if (container && firstCopy && !isTickerHoveredRef.current) {
-        const copyWidth = firstCopy.offsetWidth;
+      if (container && !isTickerHoveredRef.current) {
+        const copyWidth =
+          tickerCopyWidthRef.current ||
+          (tickerFirstCopyRef.current
+            ? (tickerCopyWidthRef.current =
+                tickerFirstCopyRef.current.offsetWidth)
+            : 0);
         if (copyWidth > 0) {
           subPixelScroll += speedPxPerTick;
           if (subPixelScroll >= copyWidth) {
@@ -210,7 +245,10 @@ export default function App() {
       }
     }, 33);
 
-    return () => clearInterval(intervalId);
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('resize', measureCopyWidth);
+    };
   }, [data.xmlEntries]);
 
   // Low-frequency JMA XML & JSON fetch (on mount + every 5 minutes)
@@ -324,10 +362,10 @@ export default function App() {
               latestEqIdRef.current = report.id;
               setData((prev) => ({
                 ...prev,
-                earthquakes: [
+                earthquakes: sortEarthquakesByNewest([
                   report,
                   ...prev.earthquakes.filter((e) => e.id !== report.id),
-                ].slice(0, 20),
+                ]).slice(0, 20),
               }));
               setSelectedEarthquake(report);
               setInterruptKind('earthquake');
@@ -614,14 +652,21 @@ export default function App() {
     }
   };
 
-  // Sort earthquake list so the largest seismic intensity (`maxScaleCode`) is always at the top
-  const sortedEarthquakes = useMemo(() => {
-    return [...data.earthquakes].sort(
-      (a, b) =>
-        b.maxScaleCode - a.maxScaleCode ||
-        b.occurrenceTime.localeCompare(a.occurrenceTime)
-    );
-  }, [data.earthquakes]);
+  // Sort earthquake list in reverse chronological order (most recently occurred first / 最近発生した順)
+  const sortedEarthquakes = useMemo(
+    () => sortEarthquakesByNewest(data.earthquakes),
+    [data.earthquakes]
+  );
+
+  const handleSelectEarthquakeFromPanel = useCallback((eq: EarthquakeReport) => {
+    setSelectedEarthquake(eq);
+    setActiveScene('earthquake');
+  }, []);
+
+  const handleSelectTyphoonFromPanel = useCallback((ty: TyphoonReport) => {
+    setSelectedTyphoon(ty);
+    setActiveScene('typhoon');
+  }, []);
 
   const activeRegionConfig = useMemo(() => {
     const targetId = regionScope === 'auto' ? patrolRegionId : regionScope;
@@ -651,18 +696,8 @@ export default function App() {
           aria-label="時計および履歴タイムライン"
           className="w-[264px] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden"
         >
-          {/* Top Clock Box (Exact NERV防災ライブ style) */}
-          <div className="border-b border-[#5A606D] px-4 py-3 text-center bg-[#111318] shrink-0">
-            <div className="text-[20px] font-bold tracking-wider text-white leading-snug">
-              {dateHeaderText}
-            </div>
-            <div
-              data-testid="live-digital-clock"
-              className="text-[42px] font-mono font-bold tracking-wider text-white leading-none mt-1"
-            >
-              {timeHeaderText}
-            </div>
-          </div>
+          {/* Top Clock Box (Isolated memoized component so 1s ticks never re-render the map or panels) */}
+          <LiveClockBox />
 
           {/* Left Column Mode Header: Switches to Earthquake History ONLY when effectiveScene === 'earthquake' */}
           <div
@@ -896,14 +931,8 @@ export default function App() {
                 isTsunamiDemo={isTsunamiDemo}
                 amedasMetric={amedasMetric}
                 onChangeAmedasMetric={setAmedasMetric}
-                onSelectEarthquake={(eq) => {
-                  setSelectedEarthquake(eq);
-                  setActiveScene('earthquake');
-                }}
-                onSelectTyphoon={(ty) => {
-                  setSelectedTyphoon(ty);
-                  setActiveScene('typhoon');
-                }}
+                onSelectEarthquake={handleSelectEarthquakeFromPanel}
+                onSelectTyphoon={handleSelectTyphoonFromPanel}
                 interruptKind={interruptKind}
                 onDismissInterrupt={handleDismissInterrupt}
                 isLoopPaused={isLoopPaused}

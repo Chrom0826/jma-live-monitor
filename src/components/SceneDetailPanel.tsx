@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AmedasMetric,
   AmedasStationData,
@@ -82,7 +82,7 @@ function renderSeverityDot(severity: WarningSeverity) {
   );
 }
 
-export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
+export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   activeScene,
   activeRegionConfig,
   activeWarningDivision = null,
@@ -110,6 +110,54 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
   const [eewAnimNow, setEewAnimNow] = useState<number>(Date.now());
+
+  const amedasRankings = useMemo(
+    () => computeAmedasTop5Rankings(data.amedas),
+    [data.amedas]
+  );
+
+  const radarRainStations = useMemo(
+    () =>
+      data.amedas
+        .filter((a) => a.precip1h > 0 || a.windSpeed >= 12)
+        .slice(0, 18),
+    [data.amedas]
+  );
+
+  const groupedEarthquakeStations = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        prefecture: string;
+        scaleCode: number;
+        scaleLabel: string;
+        names: string[];
+        totalCount: number;
+      }
+    >();
+    for (const st of selectedEarthquake.stations) {
+      const key = `${st.prefecture}-${st.scaleCode}`;
+      const labelName = st.stationName || st.city;
+      const existing = grouped.get(key);
+      if (!existing) {
+        grouped.set(key, {
+          prefecture: st.prefecture,
+          scaleCode: st.scaleCode,
+          scaleLabel: st.scaleLabel,
+          names: [labelName],
+          totalCount: 1,
+        });
+      } else {
+        existing.totalCount += 1;
+        if (existing.names.length < 4 && !existing.names.includes(labelName)) {
+          existing.names.push(labelName);
+        }
+      }
+    }
+    return Array.from(grouped.values()).sort(
+      (a, b) => b.scaleCode - a.scaleCode || b.totalCount - a.totalCount
+    );
+  }, [selectedEarthquake]);
 
   useEffect(() => {
     onSceneCompleteRef.current = onSceneComplete;
@@ -251,14 +299,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
 
       startDelayTimer = setTimeout(() => {
         if (cancelled) return;
+        const initialContainer = scrollContainerRef.current;
+        const cachedMax = initialContainer
+          ? Math.max(0, initialContainer.scrollHeight - initialContainer.clientHeight)
+          : maxScroll;
 
         scrollIntervalId = setInterval(() => {
           if (cancelled) return;
           const container = scrollContainerRef.current;
           if (!container) return;
 
-          const currentMax = container.scrollHeight - container.clientHeight;
-          if (currentMax <= 4) {
+          if (cachedMax <= 4) {
             if (scrollIntervalId) clearInterval(scrollIntervalId);
             const remainingHoldMs = Math.max(
               2000,
@@ -271,12 +322,12 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
           }
 
           virtualScrollTop = Math.min(
-            currentMax,
+            cachedMax,
             virtualScrollTop + scrollSpeedPxPerTick
           );
           container.scrollTop = virtualScrollTop;
 
-          if (virtualScrollTop >= currentMax - 1.5) {
+          if (virtualScrollTop >= cachedMax - 1.5) {
             if (scrollIntervalId) clearInterval(scrollIntervalId);
             const remainingHoldMs = Math.max(
               2000,
@@ -553,10 +604,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
                 </div>
               </div>
             </div>
-            {data.amedas
-              .filter((a) => a.precip1h > 0 || a.windSpeed >= 12)
-              .slice(0, 18)
-              .map((st) => (
+            {radarRainStations.map((st) => (
                 <div key={st.id} className="pb-1.5">
                   <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
                     <span>{st.stationName}</span>
@@ -580,7 +628,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
         {/* ==================== AMEDAS (Nationwide Top-5 Rankings Fixed: Temp High 5 + Low 5 / Precip Top 5 / Wind Top 5 / Snow Top 5) ==================== */}
         {effectiveScene === 'amedas' &&
           (() => {
-            const rankings = computeAmedasTop5Rankings(data.amedas);
+            const rankings = amedasRankings;
 
             const renderRankingCard = (
               st: AmedasStationData,
@@ -1181,45 +1229,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
                 </div>
               </div>
             </div>
-            {(() => {
-              const grouped = new Map<
-                string,
-                {
-                  prefecture: string;
-                  scaleCode: number;
-                  scaleLabel: string;
-                  names: string[];
-                  totalCount: number;
-                }
-              >();
-              for (const st of selectedEarthquake.stations) {
-                const key = `${st.prefecture}-${st.scaleCode}`;
-                const labelName = st.stationName || st.city;
-                const existing = grouped.get(key);
-                if (!existing) {
-                  grouped.set(key, {
-                    prefecture: st.prefecture,
-                    scaleCode: st.scaleCode,
-                    scaleLabel: st.scaleLabel,
-                    names: [labelName],
-                    totalCount: 1,
-                  });
-                } else {
-                  existing.totalCount += 1;
-                  if (
-                    existing.names.length < 4 &&
-                    !existing.names.includes(labelName)
-                  ) {
-                    existing.names.push(labelName);
-                  }
-                }
-              }
-              return Array.from(grouped.values())
-                .sort(
-                  (a, b) =>
-                    b.scaleCode - a.scaleCode || b.totalCount - a.totalCount
-                )
-                .map((grp, idx) => {
+            {groupedEarthquakeStations.map((grp, idx) => {
                 const style = getSeismicScaleStyle(grp.scaleCode);
                 const extraCount = grp.totalCount - grp.names.length;
                 return (
@@ -1245,8 +1255,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
                     </div>
                   </div>
                 );
-              });
-            })()}
+              })}
           </>
         )}
       </div>
@@ -1442,4 +1451,4 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = ({
       </div>
     </aside>
   );
-};
+});

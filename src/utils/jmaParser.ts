@@ -1636,7 +1636,7 @@ export function getAmedasWindColor(ms: number): string {
   if (ms >= 15) return '#F97316'; // orange (gale)
   if (ms >= 10) return '#FACC15'; // yellow (strong wind)
   if (ms >= 5) return '#22C55E';  // emerald green
-  return '#64748B';               // calm slate
+  return '#94A3B8';               // crisp light slate (<5m/s)
 }
 
 export function getAmedasSnowColor(cm: number): string {
@@ -1736,29 +1736,30 @@ export function selectNonOverlappingAmedasStations(
   stations: AmedasStationData[],
   metric: AmedasMetric,
   zoom: number,
-  projectFn: (lat: number, lon: number) => { x: number; y: number }
+  projectFn: (lat: number, lon: number) => { x: number; y: number },
+  preSorted = false
 ): AmedasStationData[] {
-  const candidates = stations.filter((st) => {
-    if (metric === 'precip') return st.precip1h > 0;
-    if (metric === 'snow') return (st.snowCm ?? 0) > 0;
-    if (metric === 'wind') return st.windSpeed > 0;
-    return st.hasTemp !== false && !Number.isNaN(st.temp);
-  });
-
-  // Deterministic ordering so the selected subset remains stable across continuous zoom frames:
-  // For wind/precip/snow, prioritize higher observed values first so significant weather is always visible.
-  const ordered = [...candidates].sort((a, b) => {
-    if (metric === 'wind') {
-      if (b.windSpeed !== a.windSpeed) return b.windSpeed - a.windSpeed;
-    } else if (metric === 'precip') {
-      if (b.precip1h !== a.precip1h) return b.precip1h - a.precip1h;
-    } else if (metric === 'snow') {
-      const snowA = a.snowCm ?? 0;
-      const snowB = b.snowCm ?? 0;
-      if (snowB !== snowA) return snowB - snowA;
-    }
-    return a.id.localeCompare(b.id);
-  });
+  const ordered = preSorted
+    ? stations
+    : stations
+        .filter((st) => {
+          if (metric === 'precip') return st.precip1h > 0;
+          if (metric === 'snow') return (st.snowCm ?? 0) > 0;
+          if (metric === 'wind') return st.windSpeed > 0;
+          return st.hasTemp !== false && !Number.isNaN(st.temp);
+        })
+        .sort((a, b) => {
+          if (metric === 'wind') {
+            if (b.windSpeed !== a.windSpeed) return b.windSpeed - a.windSpeed;
+          } else if (metric === 'precip') {
+            if (b.precip1h !== a.precip1h) return b.precip1h - a.precip1h;
+          } else if (metric === 'snow') {
+            const snowA = a.snowCm ?? 0;
+            const snowB = b.snowCm ?? 0;
+            if (snowB !== snowA) return snowB - snowA;
+          }
+          return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+        });
 
   if (zoom >= 8.2) {
     return ordered;
@@ -1780,6 +1781,64 @@ export function selectNonOverlappingAmedasStations(
   const t = Math.max(0, Math.min(1, (zoom - 5.5) / (8.2 - 5.5)));
   const minDistPx = radius * (1.92 - t * 0.55);
   return filterNonOverlappingPoints(ordered, projectFn, minDistPx);
+}
+
+/**
+ * Parses an earthquake occurrence or issue time string (`"2026/11/05 13:39 頃発生"`,
+ * `"2026/11/06 19:56:15 頃発生"`, or ISO `"2026-11-06T03:05:00+09:00"`) into epoch milliseconds.
+ */
+export function parseEarthquakeTimeMs(
+  timeStr: string | undefined | null
+): number {
+  if (!timeStr) return 0;
+  const cleaned = String(timeStr)
+    .replace(/\s*(頃発生|発表).*$/, '')
+    .trim();
+  if (!cleaned) return 0;
+  if (cleaned.includes('T')) {
+    const t = Date.parse(cleaned);
+    if (!Number.isNaN(t)) return t;
+  }
+  const m =
+    /^(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?/.exec(
+      cleaned
+    );
+  if (m) {
+    const [, y, mo, d, h, mi, se, ms] = m;
+    return Date.UTC(
+      Number(y),
+      Number(mo) - 1,
+      Number(d),
+      Number(h) - 9,
+      Number(mi),
+      Number(se || 0),
+      Number((ms || '0').padEnd(3, '0').slice(0, 3))
+    );
+  }
+  return 0;
+}
+
+/**
+ * Sorts earthquake history reports strictly in reverse chronological order
+ * (most recently occurred first / 最近発生した順), NOT by largest seismic intensity (`maxScaleCode`).
+ */
+export function sortEarthquakesByNewest(
+  earthquakes: EarthquakeReport[]
+): EarthquakeReport[] {
+  return [...earthquakes].sort((a, b) => {
+    const tA =
+      parseEarthquakeTimeMs(a.occurrenceTime) ||
+      parseEarthquakeTimeMs(a.issueTime);
+    const tB =
+      parseEarthquakeTimeMs(b.occurrenceTime) ||
+      parseEarthquakeTimeMs(b.issueTime);
+    if (tB !== tA) {
+      return tB - tA;
+    }
+    const cmp = b.occurrenceTime.localeCompare(a.occurrenceTime);
+    if (cmp !== 0) return cmp;
+    return b.maxScaleCode - a.maxScaleCode;
+  });
 }
 
 export type WarningMapZoomTier = 'prefecture' | 'division' | 'municipality';
@@ -1867,8 +1926,8 @@ export function dissolveGeoJsonByGroup(
     list.push(f);
   }
 
-  const keyPt = (pt: number[]) =>
-    `${Number(pt[0]).toFixed(6)},${Number(pt[1]).toFixed(6)}`;
+  const keyPt = (lon: number, lat: number) =>
+    `${Math.round(lon * 1e6)},${Math.round(lat * 1e6)}`;
 
   const outFeatures: Array<{
     type: 'Feature';
@@ -1900,25 +1959,33 @@ export function dissolveGeoJsonByGroup(
         // Use only exterior ring `poly[0]` to avoid interior lake hole artifacts
         const ring = poly[0];
         if (!Array.isArray(ring) || ring.length < 4) continue;
-        for (let i = 0; i < ring.length - 1; i++) {
-          const p0 = ring[i];
-          const p1 = ring[i + 1];
-          if (!Array.isArray(p0) || !Array.isArray(p1)) continue;
-          const a = keyPt(p0);
-          const b = keyPt(p1);
-          if (a === b) continue;
-          const revKey = `${b}->${a}`;
-          const fwdKey = `${a}->${b}`;
-          if (edgeMap.has(revKey)) {
-            edgeMap.delete(revKey);
-          } else {
-            edgeMap.set(fwdKey, {
-              fromKey: a,
-              toKey: b,
-              fromPt: [Number(p0[0]), Number(p0[1])],
-              toPt: [Number(p1[0]), Number(p1[1])],
-            });
+        let prevLon = Number(ring[0][0]);
+        let prevLat = Number(ring[0][1]);
+        let prevKey = keyPt(prevLon, prevLat);
+
+        for (let i = 1; i < ring.length; i++) {
+          const p1 = ring[i];
+          if (!Array.isArray(p1)) continue;
+          const nextLon = Number(p1[0]);
+          const nextLat = Number(p1[1]);
+          const nextKey = keyPt(nextLon, nextLat);
+          if (prevKey !== nextKey) {
+            const revKey = `${nextKey}->${prevKey}`;
+            const fwdKey = `${prevKey}->${nextKey}`;
+            if (edgeMap.has(revKey)) {
+              edgeMap.delete(revKey);
+            } else {
+              edgeMap.set(fwdKey, {
+                fromKey: prevKey,
+                toKey: nextKey,
+                fromPt: [prevLon, prevLat],
+                toPt: [nextLon, nextLat],
+              });
+            }
           }
+          prevLon = nextLon;
+          prevLat = nextLat;
+          prevKey = nextKey;
         }
       }
     }
@@ -1978,6 +2045,7 @@ export function dissolveGeoJsonByGroup(
     features: outFeatures,
   };
 }
+
 
 /**
  * Computes Top-5 station rankings for the AMeDAS right-side panel:
@@ -2192,9 +2260,9 @@ export function resolveLabelBoxCollisions(
 }
 
 /**
- * Filters a list of geographic points so that no two accepted points are closer
- * than `minDistancePx` in projected screen space (`projectFn(lat, lon)`).
- * Guarantees that AMeDAS circles never overlap each other at any zoom level.
+ * Filters a list of geographic points in $O(N)$ using a 2D spatial hash grid
+ * so that no two accepted points are closer than `minDistancePx` in projected screen space (`projectFn(lat, lon)`).
+ * Guarantees that AMeDAS circles/arrows never overlap each other at any zoom level.
  */
 export function filterNonOverlappingPoints<
   T extends { lat: number; lon: number },
@@ -2203,24 +2271,48 @@ export function filterNonOverlappingPoints<
   projectFn: (lat: number, lon: number) => { x: number; y: number },
   minDistancePx: number
 ): T[] {
+  if (minDistancePx <= 0 || items.length <= 1) {
+    return items.slice();
+  }
   const accepted: T[] = [];
-  const acceptedPts: Array<{ x: number; y: number }> = [];
+  const cellSize = Math.max(1, minDistancePx);
   const minDistSq = minDistancePx * minDistancePx;
+  const grid = new Map<number, Array<{ x: number; y: number }>>();
 
-  for (const item of items) {
+  const getCellKey = (cx: number, cy: number) =>
+    ((cx & 0xffff) << 16) | (cy & 0xffff);
+
+  for (let idx = 0; idx < items.length; idx++) {
+    const item = items[idx];
     const pt = projectFn(item.lat, item.lon);
+    const cx = Math.floor(pt.x / cellSize);
+    const cy = Math.floor(pt.y / cellSize);
+
     let collides = false;
-    for (let i = 0; i < acceptedPts.length; i++) {
-      const dx = pt.x - acceptedPts[i].x;
-      const dy = pt.y - acceptedPts[i].y;
-      if (dx * dx + dy * dy < minDistSq) {
-        collides = true;
-        break;
+    for (let dx = -1; dx <= 1 && !collides; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = grid.get(getCellKey(cx + dx, cy + dy));
+        if (!bucket) continue;
+        for (let i = 0; i < bucket.length; i++) {
+          const dpx = pt.x - bucket[i].x;
+          const dpy = pt.y - bucket[i].y;
+          if (dpx * dpx + dpy * dpy < minDistSq) {
+            collides = true;
+            break;
+          }
+        }
       }
     }
+
     if (!collides) {
       accepted.push(item);
-      acceptedPts.push(pt);
+      const key = getCellKey(cx, cy);
+      let bucket = grid.get(key);
+      if (!bucket) {
+        bucket = [];
+        grid.set(key, bucket);
+      }
+      bucket.push(pt);
     }
   }
 
@@ -2330,6 +2422,7 @@ export const AMEDAS_PATROL_STOPS: AmedasPatrolStop[] = [
   { id: 'okinawa', label: '沖縄', center: [26.2, 127.6], zoom: 7.5 },
   { id: 'national_end', label: '全国表示', center: [36.8, 137.5], zoom: 5 },
 ];
+
 
 
 

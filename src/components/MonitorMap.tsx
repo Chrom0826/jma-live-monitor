@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import {
   AmedasMetric,
+  AmedasStationData,
   EarthquakeReport,
   EewReport,
   InterruptKind,
@@ -17,6 +18,7 @@ import {
   VolcanoStatusItem,
   WarningSeverity,
 } from '../types/jma';
+import { fetchSharedJmaAreaConst } from '../services/jmaClient';
 import {
   AMEDAS_PATROL_STOPS,
   computeTyphoonConeEnvelope,
@@ -108,9 +110,7 @@ function loadJmaMunicipalityGeoJson(): Promise<{
     fetch('https://www.jma.go.jp/bosai/common/const/geojson/class10s.json')
       .then((r) => (r.ok ? r.json() : null))
       .catch(() => null),
-    fetch('https://www.jma.go.jp/bosai/common/const/area.json')
-      .then((r) => (r.ok ? r.json() : null))
-      .catch(() => null),
+    fetchSharedJmaAreaConst(),
   ]).then(([c20Parts, c10Json, areaJson]) => {
     const validParts = c20Parts.filter(
       (p) => p && Array.isArray(p.features)
@@ -148,7 +148,7 @@ function loadJmaMunicipalityGeoJson(): Promise<{
       // so every prefecture and Hokkaido division is 100% unified with zero internal sub-boundaries!
       cachedDissolvedDivisionsGeoJson = dissolveGeoJsonByGroup(
         c10Json.features,
-        (f: any) => {
+        (f) => {
           const code = String(f?.properties?.code || '');
           if (!code) return null;
           if (code === 'hoppo') return 'hoppo';
@@ -421,7 +421,7 @@ const SCENE_CAMERA_TARGETS: Record<
   earthquake: { center: [36.4, 140.8], zoom: 7 },
 };
 
-export const MonitorMap: React.FC<MonitorMapProps> = ({
+export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   activeScene,
   activeRegionConfig,
   activeWarningDivision,
@@ -455,6 +455,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
   const warningZoomTierRef = useRef<WarningMapZoomTier>('prefecture');
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
   const onViewportChangeRef = useRef<typeof onViewportChange>(onViewportChange);
+  const lastMuniSeveritySigRef = useRef<string>('');
+  const viewportSizeRef = useRef<{ width: number; height: number; dpr: number }>({
+    width: 1280,
+    height: 720,
+    dpr: 1,
+  });
 
   // Pre-compiled normalized Web Mercator geometry refs for 60fps razor-sharp Canvas rendering
   const worldCompiledRef = useRef<CompiledGeoShape[]>([]);
@@ -586,12 +592,27 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       return;
     }
     const muniMap = data.muniSeverityMap || {};
+    const sigEntries: string[] = [];
+    for (const [k, v] of Object.entries(muniMap)) {
+      if (v && v !== 'normal') {
+        sigEntries.push(`${k}:${v}`);
+      }
+    }
+    sigEntries.sort();
+    const nextSig = `${class20GeoJsonData.features.length}|${sigEntries.join(',')}`;
+    if (
+      nextSig === lastMuniSeveritySigRef.current &&
+      dissolvedWarningFillCompiledRef.current.length > 0
+    ) {
+      return;
+    }
+    lastMuniSeveritySigRef.current = nextSig;
 
     // Topologically dissolve adjacent municipalities with the same `(divisionCode, severity)`
     // so nationwide (`zoom < 5.5`) and regional (`5.5 <= zoom < 6.8`) views have ZERO internal seams or black noise (`黒いノイズ`)!
     const dissolvedFillGeoJson = dissolveGeoJsonByGroup(
       class20GeoJsonData.features,
-      (f: any) => {
+      (f) => {
         const code = String(f?.properties?.code || '');
         const divCode = String(f?.properties?.divisionCode || '');
         if (!divCode) return null;
@@ -617,10 +638,99 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     setCompiledVersion((v) => v + 1);
   }, [class20GeoJsonData, data.muniSeverityMap]);
 
+  // Pre-compile and pre-sort AMeDAS stations when `data.amedas` or `amedasMetric` changes
+  // Eliminates 1,300+ filter/sort/trigonometric calls on every 60fps animation frame!
+  const preCompiledAmedas = useMemo(() => {
+    const candidates = data.amedas.filter((st) => {
+      if (amedasMetric === 'temp') return st.hasTemp !== false;
+      if (amedasMetric === 'snow') return (st.snowCm ?? 0) > 0;
+      return true;
+    });
+
+    candidates.sort((a, b) => {
+      if (amedasMetric === 'wind') {
+        if (b.windSpeed !== a.windSpeed) return b.windSpeed - a.windSpeed;
+      } else if (amedasMetric === 'precip') {
+        if (b.precip1h !== a.precip1h) return b.precip1h - a.precip1h;
+      } else if (amedasMetric === 'snow') {
+        const sa = a.snowCm ?? 0;
+        const sb = b.snowCm ?? 0;
+        if (sb !== sa) return sb - sa;
+      } else {
+        const devA = Math.abs(a.temp - 15);
+        const devB = Math.abs(b.temp - 15);
+        if (devB !== devA) return devB - devA;
+      }
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+
+    const metaByStation = new WeakMap<
+      AmedasStationData,
+      { normX: number; normY: number; dotColor: string; windRotRad: number }
+    >();
+    const coordByLatLon = new Map<string, { normX: number; normY: number }>();
+
+    for (let i = 0; i < candidates.length; i++) {
+      const st = candidates[i];
+      const { normX, normY } = latLonToNormMercator(st.lat, st.lon);
+      metaByStation.set(st, {
+        normX,
+        normY,
+        dotColor: getAmedasMetricColor(st, amedasMetric),
+        windRotRad:
+          (getWindDirectionRotationDeg(st.windDirection) * Math.PI) / 180,
+      });
+      coordByLatLon.set(`${st.lat},${st.lon}`, { normX, normY });
+    }
+
+    return { sortedCandidates: candidates, metaByStation, coordByLatLon };
+  }, [data.amedas, amedasMetric]);
+
+  // Pre-compile and pre-sort municipality warning labels once when `data.municipalityWarnings` or `compiledVersion` updates
+  const preCompiledMunicipalityLabels = useMemo(() => {
+    const muniList = data.municipalityWarnings || [];
+    const rank: Record<WarningSeverity, number> = {
+      special: 3,
+      warning: 2,
+      advisory: 1,
+      normal: 0,
+    };
+    return [...muniList]
+      .map((m) => {
+        const exactCoord = m.muniCode
+          ? cachedClass20LabelPoints[m.muniCode]
+          : undefined;
+        const lat = exactCoord ? exactCoord[0] : m.lat;
+        const lon = exactCoord ? exactCoord[1] : m.lon;
+        const { normX, normY } = latLonToNormMercator(lat, lon);
+        const resolved = exactCoord ? { ...m, lat, lon } : m;
+        return {
+          muni: resolved,
+          labelText: formatMunicipalityMapLabel(resolved),
+          normX,
+          normY,
+        };
+      })
+      .sort((a, b) => rank[b.muni.severity] - rank[a.muni.severity]);
+  }, [data.municipalityWarnings, compiledVersion]);
+
+  // Pre-compile warning division label normalized Mercator coordinates once
+  const preCompiledDivisionLabels = useMemo(() => {
+    return Object.values(WARNING_DIVISIONS).map((div) => {
+      const { normX, normY } = latLonToNormMercator(div.lat, div.lon);
+      return {
+        div,
+        labelText: formatWarningDivisionMapLabel(div),
+        normX,
+        normY,
+      };
+    });
+  }, []);
+
   // Keep 60fps High-DPI Base-Map Canvas & Interactive Overlay Canvas renderer function up to date
   // Draws both:
   // 1) `baseMapCanvasRef` (`z-[5]`): World Map, Japan Base Map (`白地図`), Warning Choropleth, 3-Stage Borders, and Blue Focus Border at native HiDPI resolution (never blurs during or after zoom!)
-  // 2) `interactiveCanvasRef` (`z-[20]`): AMeDAS dots/wind arrows & Warning 3-Stage Hierarchy Labels
+  // 2) `interactiveCanvasRef` (`z-[390]`): AMeDAS dots/wind arrows & Warning 3-Stage Hierarchy Labels
   useEffect(() => {
     renderInteractiveCanvasRef.current = (overrideCenter, overrideZoom) => {
       const baseCanvas = baseMapCanvasRef.current;
@@ -628,10 +738,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       const map = mapInstanceRef.current;
       if (!canvas || !map) return;
 
-      const container = map.getContainer();
-      const width = container.clientWidth || 1280;
-      const height = container.clientHeight || 720;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      let { width, height, dpr } = viewportSizeRef.current;
+      if (width <= 0 || height <= 0) {
+        const container = map.getContainer();
+        width = container.clientWidth || 1280;
+        height = container.clientHeight || 720;
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        viewportSizeRef.current = { width, height, dpr };
+      }
 
       const currentZoom =
         typeof overrideZoom === 'number' ? overrideZoom : map.getZoom();
@@ -658,6 +772,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         lat: number,
         lon: number
       ): { x: number; y: number } => {
+        const cached = preCompiledAmedas.coordByLatLon.get(`${lat},${lon}`);
+        if (cached) {
+          return {
+            x: cached.normX * worldScale - originX,
+            y: cached.normY * worldScale - originY,
+          };
+        }
         const pt = projectLatLonToWorldPx(lat, lon, worldScale);
         return {
           x: pt.x - originX,
@@ -667,12 +788,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
 
       // ==================== A. RENDER 60FPS HIGH-DPI BASE MAP (`baseMapCanvasRef`) ====================
       if (baseCanvas) {
-        if (
-          baseCanvas.width !== Math.round(width * dpr) ||
-          baseCanvas.height !== Math.round(height * dpr)
-        ) {
-          baseCanvas.width = Math.round(width * dpr);
-          baseCanvas.height = Math.round(height * dpr);
+        const targetW = Math.round(width * dpr);
+        const targetH = Math.round(height * dpr);
+        if (baseCanvas.width !== targetW || baseCanvas.height !== targetH) {
+          baseCanvas.width = targetW;
+          baseCanvas.height = targetH;
         }
         const bCtx = baseCanvas.getContext('2d');
         if (bCtx) {
@@ -683,6 +803,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
           bCtx.lineJoin = 'round';
           bCtx.lineCap = 'round';
 
+          // Screen-space sub-pixel vertex decimation (`< 0.65px`) eliminates ~85% of redundant
+          // sub-pixel `lineTo` calls at overview zooms while keeping zoomed-in coastlines 100% razor-sharp!
           const traceShapePath = (
             ctx2d: CanvasRenderingContext2D,
             shape: CompiledGeoShape,
@@ -690,17 +812,28 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
           ) => {
             for (let r = 0; r < shape.rings.length; r++) {
               const coords = shape.rings[r].normCoords;
-              if (coords.length < 6) continue;
-              ctx2d.moveTo(
-                (coords[0] + worldWrapOffsetNormX) * worldScale - originX,
-                coords[1] * worldScale - originY
-              );
-              for (let i = 2; i < coords.length; i += 2) {
-                ctx2d.lineTo(
-                  (coords[i] + worldWrapOffsetNormX) * worldScale - originX,
-                  coords[i + 1] * worldScale - originY
-                );
+              const len = coords.length;
+              if (len < 6) continue;
+              let prevX =
+                (coords[0] + worldWrapOffsetNormX) * worldScale - originX;
+              let prevY = coords[1] * worldScale - originY;
+              ctx2d.moveTo(prevX, prevY);
+              const lastIdx = len - 2;
+              for (let i = 2; i < lastIdx; i += 2) {
+                const px =
+                  (coords[i] + worldWrapOffsetNormX) * worldScale - originX;
+                const py = coords[i + 1] * worldScale - originY;
+                if (Math.abs(px - prevX) + Math.abs(py - prevY) < 0.65) {
+                  continue;
+                }
+                ctx2d.lineTo(px, py);
+                prevX = px;
+                prevY = py;
               }
+              ctx2d.lineTo(
+                (coords[lastIdx] + worldWrapOffsetNormX) * worldScale - originX,
+                coords[lastIdx + 1] * worldScale - originY
+              );
               ctx2d.closePath();
             }
           };
@@ -765,38 +898,67 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
               }
             }
 
-            // 2a. Solid 57-Division Underfill (guarantees interior lakes like 洞爺湖 / 支笏湖 / 十和田湖 have ZERO black holes!)
+            // 2a. Batched Solid 57-Division Underfill (2 draw calls instead of 57!)
+            // Guarantees interior lakes like 洞爺湖 / 支笏湖 / 十和田湖 have ZERO black holes
+            const underfillGrayShapes: CompiledGeoShape[] = [];
+            const underfillYellowShapes: CompiledGeoShape[] = [];
             for (let i = 0; i < divShapes.length; i++) {
               const sh = divShapes[i];
               if (!isShapeVisible(sh)) continue;
-              let baseColor = '#374151';
+              let isYellow = false;
               if (!focusedDivCode || sh.divisionCode === focusedDivCode) {
                 const divSev =
                   divHasActiveWarning.get(sh.divisionCode) ||
                   data.prefSeverityMap[sh.prefId] ||
                   'normal';
-                // Use yellow `#FACC15` underfill for divisions with warnings/advisories so inland lakes blend seamlessly
-                baseColor =
+                isYellow =
                   divSev === 'special' ||
                   divSev === 'warning' ||
-                  divSev === 'advisory'
-                    ? '#FACC15'
-                    : '#374151';
+                  divSev === 'advisory';
               }
+              if (isYellow) {
+                underfillYellowShapes.push(sh);
+              } else {
+                underfillGrayShapes.push(sh);
+              }
+            }
+
+            if (underfillGrayShapes.length > 0) {
               bCtx.beginPath();
-              traceShapePath(bCtx, sh);
-              bCtx.fillStyle = baseColor;
+              for (let i = 0; i < underfillGrayShapes.length; i++) {
+                traceShapePath(bCtx, underfillGrayShapes[i]);
+              }
+              bCtx.fillStyle = '#374151';
               bCtx.fill();
-              bCtx.strokeStyle = baseColor;
+              bCtx.strokeStyle = '#374151';
+              bCtx.lineWidth = 0.8;
+              bCtx.stroke();
+            }
+            if (underfillYellowShapes.length > 0) {
+              bCtx.beginPath();
+              for (let i = 0; i < underfillYellowShapes.length; i++) {
+                traceShapePath(bCtx, underfillYellowShapes[i]);
+              }
+              bCtx.fillStyle = '#FACC15';
+              bCtx.fill();
+              bCtx.strokeStyle = '#FACC15';
               bCtx.lineWidth = 0.8;
               bCtx.stroke();
             }
 
-            // 2b. Warning Choropleth Fill
-            // In 'prefecture' (< 5.5) and 'division' (5.5..6.8) tiers (when not focused on a single division),
-            // draw topologically dissolved shapes (`dissolvedWarningFillCompiledRef`) so there are ZERO internal seams or black noise (`黒いノイズ`)!
+            // 2b. Batched Warning Choropleth Fill (at most 4 draw calls by severity color instead of 100..1,900!)
             let coloredMuniCount = 0;
             let uncoloredOtherDivMuniCount = 0;
+
+            const bucketBySeverity: Record<
+              WarningSeverity,
+              CompiledGeoShape[]
+            > = {
+              normal: [],
+              advisory: [],
+              warning: [],
+              special: [],
+            };
 
             if (
               tier !== 'municipality' &&
@@ -808,9 +970,22 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
                 const sh = dissolvedShapes[i];
                 if (sh.severity !== 'normal') coloredMuniCount++;
                 if (!isShapeVisible(sh)) continue;
-                const fillColor = severityToFillColor(sh.severity);
+                bucketBySeverity[sh.severity].push(sh);
+              }
+
+              for (const sev of [
+                'normal',
+                'advisory',
+                'warning',
+                'special',
+              ] as const) {
+                const bucket = bucketBySeverity[sev];
+                if (bucket.length === 0) continue;
+                const fillColor = severityToFillColor(sev);
                 bCtx.beginPath();
-                traceShapePath(bCtx, sh);
+                for (let i = 0; i < bucket.length; i++) {
+                  traceShapePath(bCtx, bucket[i]);
+                }
                 bCtx.fillStyle = fillColor;
                 bCtx.fill();
                 bCtx.strokeStyle = fillColor;
@@ -819,6 +994,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
               }
             } else if (class20CompiledRef.current.length > 0) {
               const c20Shapes = class20CompiledRef.current;
+              const innerBorderShapes: CompiledGeoShape[] = [];
               for (let i = 0; i < c20Shapes.length; i++) {
                 const sh = c20Shapes[i];
                 if (focusedDivCode && sh.divisionCode !== focusedDivCode) {
@@ -837,17 +1013,44 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
                   coloredMuniCount++;
                 }
                 if (!isShapeVisible(sh)) continue;
-                const fillColor = severityToFillColor(effSev);
-                const showInnerMuniBorder =
+                bucketBySeverity[effSev].push(sh);
+                if (
                   tier === 'municipality' &&
-                  (!focusedDivCode || sh.divisionCode === focusedDivCode);
+                  (!focusedDivCode || sh.divisionCode === focusedDivCode)
+                ) {
+                  innerBorderShapes.push(sh);
+                }
+              }
 
+              for (const sev of [
+                'normal',
+                'advisory',
+                'warning',
+                'special',
+              ] as const) {
+                const bucket = bucketBySeverity[sev];
+                if (bucket.length === 0) continue;
+                const fillColor = severityToFillColor(sev);
                 bCtx.beginPath();
-                traceShapePath(bCtx, sh);
+                for (let i = 0; i < bucket.length; i++) {
+                  traceShapePath(bCtx, bucket[i]);
+                }
                 bCtx.fillStyle = fillColor;
                 bCtx.fill();
-                bCtx.strokeStyle = showInnerMuniBorder ? '#1E293B' : fillColor;
-                bCtx.lineWidth = showInnerMuniBorder ? 0.85 : 0.65;
+                if (tier !== 'municipality') {
+                  bCtx.strokeStyle = fillColor;
+                  bCtx.lineWidth = 0.65;
+                  bCtx.stroke();
+                }
+              }
+
+              if (innerBorderShapes.length > 0) {
+                bCtx.beginPath();
+                for (let i = 0; i < innerBorderShapes.length; i++) {
+                  traceShapePath(bCtx, innerBorderShapes[i]);
+                }
+                bCtx.strokeStyle = '#1E293B';
+                bCtx.lineWidth = 0.85;
                 bCtx.stroke();
               }
             }
@@ -901,7 +1104,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             baseCanvas.dataset.warningZoomTier = tier;
           } else {
             // Crisp Blank Map (`白地図`) for `radar`, `amedas`, `typhoon`, `forecast`, `earthquake`, `volcano`, `tsunami`
-            // Re-projected at native Retina/HiDPI pixel resolution on every frame so outlines NEVER blur when zooming in!
             const isTsunami = effectiveScene === 'tsunami';
             const fillCol = isTsunami ? '#28303D' : '#232731';
             const borderCol = isTsunami ? '#151922' : '#4B5563';
@@ -930,12 +1132,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       }
 
       // ==================== B. RENDER 60FPS HIGH-DPI INTERACTIVE OVERLAY (`interactiveCanvasRef`) ====================
+      const targetOverlayW = Math.round(width * dpr);
+      const targetOverlayH = Math.round(height * dpr);
       if (
-        canvas.width !== Math.round(width * dpr) ||
-        canvas.height !== Math.round(height * dpr)
+        canvas.width !== targetOverlayW ||
+        canvas.height !== targetOverlayH
       ) {
-        canvas.width = Math.round(width * dpr);
-        canvas.height = Math.round(height * dpr);
+        canvas.width = targetOverlayW;
+        canvas.height = targetOverlayH;
       }
 
       const ctx = canvas.getContext('2d');
@@ -950,36 +1154,51 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       // 1. AMeDAS Interactive High-Density Non-Overlapping Rendering
       if (effectiveScene === 'amedas') {
         const visibleStations = selectNonOverlappingAmedasStations(
-          data.amedas,
+          preCompiledAmedas.sortedCandidates,
           amedasMetric,
           currentZoom,
-          projectToScreen
+          projectToScreen,
+          true
         );
 
         let drawnCount = 0;
 
         if (amedasMetric === 'wind') {
           const arrowSize = getAmedasWindArrowSizeForZoom(currentZoom);
+          const s = arrowSize / 24;
+          const strokeW = Math.max(1.5, 1.8 / Math.max(0.55, s));
+          ctx.lineWidth = strokeW;
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = '#0B0D12';
 
-          for (const st of visibleStations) {
-            const pos = projectToScreen(st.lat, st.lon);
+          for (let i = 0; i < visibleStations.length; i++) {
+            const st = visibleStations[i];
+            const meta = preCompiledAmedas.metaByStation.get(st);
+            const posX = meta
+              ? meta.normX * worldScale - originX
+              : projectToScreen(st.lat, st.lon).x;
+            const posY = meta
+              ? meta.normY * worldScale - originY
+              : projectToScreen(st.lat, st.lon).y;
+
             if (
-              pos.x < -arrowSize ||
-              pos.x > width + arrowSize ||
-              pos.y < -arrowSize ||
-              pos.y > height + arrowSize
+              posX < -arrowSize ||
+              posX > width + arrowSize ||
+              posY < -arrowSize ||
+              posY > height + arrowSize
             ) {
               continue;
             }
             drawnCount++;
-            const dotColor = getAmedasMetricColor(st, amedasMetric);
+            const dotColor =
+              meta?.dotColor || getAmedasMetricColor(st, amedasMetric);
             const rotRad =
+              meta?.windRotRad ??
               (getWindDirectionRotationDeg(st.windDirection) * Math.PI) / 180;
 
             ctx.save();
-            ctx.translate(pos.x, pos.y);
+            ctx.translate(posX, posY);
             ctx.rotate(rotRad);
-            const s = arrowSize / 24;
             ctx.scale(s, s);
 
             ctx.beginPath();
@@ -991,35 +1210,57 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
 
             ctx.fillStyle = dotColor;
             ctx.fill();
-            ctx.lineWidth = Math.max(1.5, 1.8 / Math.max(0.55, s));
-            ctx.lineJoin = 'round';
-            ctx.strokeStyle = '#0B0D12';
             ctx.stroke();
             ctx.restore();
           }
         } else {
           const radius = getAmedasPointRadiusForZoom(currentZoom);
           const strokeWidth = currentZoom >= 6 ? 1.0 : 0.7;
+          const colorBatches = new Map<
+            string,
+            Array<{ x: number; y: number }>
+          >();
 
-          for (const st of visibleStations) {
-            const pos = projectToScreen(st.lat, st.lon);
+          for (let i = 0; i < visibleStations.length; i++) {
+            const st = visibleStations[i];
+            const meta = preCompiledAmedas.metaByStation.get(st);
+            const posX = meta
+              ? meta.normX * worldScale - originX
+              : projectToScreen(st.lat, st.lon).x;
+            const posY = meta
+              ? meta.normY * worldScale - originY
+              : projectToScreen(st.lat, st.lon).y;
+
             if (
-              pos.x < -radius * 2 ||
-              pos.x > width + radius * 2 ||
-              pos.y < -radius * 2 ||
-              pos.y > height + radius * 2
+              posX < -radius * 2 ||
+              posX > width + radius * 2 ||
+              posY < -radius * 2 ||
+              posY > height + radius * 2
             ) {
               continue;
             }
             drawnCount++;
-            const dotColor = getAmedasMetricColor(st, amedasMetric);
+            const dotColor =
+              meta?.dotColor || getAmedasMetricColor(st, amedasMetric);
+            let group = colorBatches.get(dotColor);
+            if (!group) {
+              group = [];
+              colorBatches.set(dotColor, group);
+            }
+            group.push({ x: posX, y: posY });
+          }
 
+          ctx.lineWidth = strokeWidth;
+          ctx.strokeStyle = '#0B0D12';
+          for (const [dotColor, pts] of colorBatches.entries()) {
             ctx.beginPath();
-            ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+            for (let i = 0; i < pts.length; i++) {
+              const p = pts[i];
+              ctx.moveTo(p.x + radius, p.y);
+              ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+            }
             ctx.fillStyle = dotColor;
             ctx.fill();
-            ctx.lineWidth = strokeWidth;
-            ctx.strokeStyle = '#0B0D12';
             ctx.stroke();
           }
         }
@@ -1052,6 +1293,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             '800 12px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
+          ctx.lineWidth = 3.4;
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = '#0B0D12';
+          ctx.fillStyle = '#FFFFFF';
 
           const placedBoxes: Array<{
             x: number;
@@ -1060,19 +1305,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             h: number;
           }> = [];
 
-          for (const div of Object.values(WARNING_DIVISIONS)) {
-            if (focusedDivCode && div.code !== focusedDivCode) continue;
-            const pos = projectToScreen(div.lat, div.lon);
-            const labelText = formatWarningDivisionMapLabel(div);
+          for (let idx = 0; idx < preCompiledDivisionLabels.length; idx++) {
+            const entry = preCompiledDivisionLabels[idx];
+            if (focusedDivCode && entry.div.code !== focusedDivCode) continue;
+            const labelText = entry.labelText;
             if (!labelText) continue;
+            const posX = entry.normX * worldScale - originX;
+            const posY = entry.normY * worldScale - originY;
             const boxW = Math.max(44, labelText.length * 12 + 6);
             const boxH = 18;
 
             if (
-              pos.x - boxW / 2 < minSafeX ||
-              pos.x + boxW / 2 > maxSafeX ||
-              pos.y - boxH / 2 < minSafeY ||
-              pos.y + boxH / 2 > maxSafeY
+              posX - boxW / 2 < minSafeX ||
+              posX + boxW / 2 > maxSafeX ||
+              posY - boxH / 2 < minSafeY ||
+              posY + boxH / 2 > maxSafeY
             ) {
               continue;
             }
@@ -1081,52 +1328,29 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             for (let i = 0; i < placedBoxes.length; i++) {
               const b = placedBoxes[i];
               if (
-                Math.abs(pos.x - b.x) < (boxW + b.w) / 2 + 2 &&
-                Math.abs(pos.y - b.y) < (boxH + b.h) / 2 + 2
+                Math.abs(posX - b.x) < (boxW + b.w) / 2 + 2 &&
+                Math.abs(posY - b.y) < (boxH + b.h) / 2 + 2
               ) {
                 overlaps = true;
                 break;
               }
             }
             if (overlaps) continue;
-            placedBoxes.push({ x: pos.x, y: pos.y, w: boxW, h: boxH });
+            placedBoxes.push({ x: posX, y: posY, w: boxW, h: boxH });
             drawnLabels.push(labelText);
 
-            ctx.lineWidth = 3.4;
-            ctx.lineJoin = 'round';
-            ctx.strokeStyle = '#0B0D12';
-            ctx.strokeText(labelText, pos.x, pos.y);
-            ctx.fillStyle = '#FFFFFF';
-            ctx.fillText(labelText, pos.x, pos.y);
+            ctx.strokeText(labelText, posX, posY);
+            ctx.fillText(labelText, posX, posY);
           }
         } else if (tier === 'municipality') {
           ctx.font =
             '800 11px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-
-          const muniList = data.municipalityWarnings || [];
-          const sortedMunis = [...muniList]
-            .filter(
-              (m) => !focusedDivCode || m.divisionCode === focusedDivCode
-            )
-            .map((m) => {
-              const exactCoord = m.muniCode
-                ? cachedClass20LabelPoints[m.muniCode]
-                : undefined;
-              return exactCoord
-                ? { ...m, lat: exactCoord[0], lon: exactCoord[1] }
-                : m;
-            })
-            .sort((a, b) => {
-              const rank: Record<WarningSeverity, number> = {
-                special: 3,
-                warning: 2,
-                advisory: 1,
-                normal: 0,
-              };
-              return rank[b.severity] - rank[a.severity];
-            });
+          ctx.lineWidth = 3.2;
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = '#0B0D12';
+          ctx.fillStyle = '#FFFFFF';
 
           const placedMuniBoxes: Array<{
             x: number;
@@ -1135,18 +1359,26 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             h: number;
           }> = [];
 
-          for (const muni of sortedMunis) {
-            const pos = projectToScreen(muni.lat, muni.lon);
-            const labelText = formatMunicipalityMapLabel(muni);
+          for (let idx = 0; idx < preCompiledMunicipalityLabels.length; idx++) {
+            const entry = preCompiledMunicipalityLabels[idx];
+            if (
+              focusedDivCode &&
+              entry.muni.divisionCode !== focusedDivCode
+            ) {
+              continue;
+            }
+            const labelText = entry.labelText;
             if (!labelText) continue;
+            const posX = entry.normX * worldScale - originX;
+            const posY = entry.normY * worldScale - originY;
             const boxW = Math.max(38, labelText.length * 11 + 4);
             const boxH = 16;
 
             if (
-              pos.x - boxW / 2 < minSafeX ||
-              pos.x + boxW / 2 > maxSafeX ||
-              pos.y - boxH / 2 < minSafeY ||
-              pos.y + boxH / 2 > maxSafeY
+              posX - boxW / 2 < minSafeX ||
+              posX + boxW / 2 > maxSafeX ||
+              posY - boxH / 2 < minSafeY ||
+              posY + boxH / 2 > maxSafeY
             ) {
               continue;
             }
@@ -1155,23 +1387,19 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
             for (let i = 0; i < placedMuniBoxes.length; i++) {
               const b = placedMuniBoxes[i];
               if (
-                Math.abs(pos.x - b.x) < (boxW + b.w) / 2 + 3 &&
-                Math.abs(pos.y - b.y) < (boxH + b.h) / 2 + 3
+                Math.abs(posX - b.x) < (boxW + b.w) / 2 + 3 &&
+                Math.abs(posY - b.y) < (boxH + b.h) / 2 + 3
               ) {
                 overlaps = true;
                 break;
               }
             }
             if (overlaps) continue;
-            placedMuniBoxes.push({ x: pos.x, y: pos.y, w: boxW, h: boxH });
+            placedMuniBoxes.push({ x: posX, y: posY, w: boxW, h: boxH });
             drawnLabels.push(labelText);
 
-            ctx.lineWidth = 3.2;
-            ctx.lineJoin = 'round';
-            ctx.strokeStyle = '#0B0D12';
-            ctx.strokeText(labelText, pos.x, pos.y);
-            ctx.fillStyle = '#FFFFFF';
-            ctx.fillText(labelText, pos.x, pos.y);
+            ctx.strokeText(labelText, posX, posY);
+            ctx.fillText(labelText, posX, posY);
           }
         }
 
@@ -1191,9 +1419,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     renderInteractiveCanvasRef.current();
   }, [
     effectiveScene,
-    data.amedas,
+    preCompiledAmedas,
+    preCompiledMunicipalityLabels,
+    preCompiledDivisionLabels,
     data.warnings,
-    data.municipalityWarnings,
     data.muniSeverityMap,
     data.prefSeverityMap,
     amedasMetric,
@@ -1406,8 +1635,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     overlayGroupRef.current = overlayGroup;
 
     let zoomAnimRaf = 0;
+    let frameRenderRaf = 0;
+    let lastEmitTime = 0;
 
-    const handleFrameUpdate = () => {
+    const syncViewportSize = () => {
+      const container = map.getContainer();
+      viewportSizeRef.current = {
+        width: container.clientWidth || 1280,
+        height: container.clientHeight || 720,
+        dpr: Math.min(window.devicePixelRatio || 1, 2),
+      };
+    };
+    syncViewportSize();
+
+    const flushFrameUpdate = () => {
+      frameRenderRaf = 0;
       const z = map.getZoom();
       const nextTier = getWarningMapZoomTier(z);
       if (nextTier !== warningZoomTierRef.current) {
@@ -1415,6 +1657,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
         setWarningZoomTier(nextTier);
       }
       renderInteractiveCanvasRef.current();
+    };
+
+    const handleFrameUpdate = () => {
+      if (frameRenderRaf !== 0) return;
+      frameRenderRaf = requestAnimationFrame(flushFrameUpdate);
+    };
+
+    const handleResize = () => {
+      syncViewportSize();
+      flushFrameUpdate();
     };
 
     const handleZoomAnim = (e: L.ZoomAnimEvent) => {
@@ -1458,8 +1710,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
 
     const emitViewport = () => {
       cancelAnimationFrame(zoomAnimRaf);
+      if (frameRenderRaf !== 0) {
+        cancelAnimationFrame(frameRenderRaf);
+        frameRenderRaf = 0;
+      }
+      const now = performance.now();
+      if (now - lastEmitTime < 12) {
+        return;
+      }
+      lastEmitTime = now;
+
       (overlayRendererRef.current as any)?._reset?.();
-      handleFrameUpdate();
+      flushFrameUpdate();
       setMapZoomVersion((v) => v + 1);
       if (onViewportChangeRef.current) {
         const c = map.getCenter();
@@ -1481,8 +1743,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
     map.on('move', handleFrameUpdate);
     map.on('zoom', handleFrameUpdate);
     map.on('zoomanim', handleZoomAnim);
-    map.on('viewreset', handleFrameUpdate);
-    map.on('resize', handleFrameUpdate);
+    map.on('viewreset', flushFrameUpdate);
+    map.on('resize', handleResize);
     map.on('zoomend', emitViewport);
     map.on('moveend', emitViewport);
 
@@ -1491,6 +1753,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
 
     return () => {
       cancelAnimationFrame(zoomAnimRaf);
+      cancelAnimationFrame(frameRenderRaf);
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -2910,5 +3173,5 @@ export const MonitorMap: React.FC<MonitorMapProps> = ({
       )}
     </div>
   );
-};
+});
 

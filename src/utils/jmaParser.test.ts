@@ -1062,6 +1062,48 @@ test('getEffectiveMunicipalitySeverity suppresses colors outside activeWarningDi
   assert.equal(dissolved.features[0].geometry.coordinates[0][0].length, 7);
 });
 
+test('sortEarthquakesByNewest sorts earthquake history strictly by occurrenceTime (most recently occurred first) instead of maxScaleCode', async () => {
+  const { sortEarthquakesByNewest, parseEarthquakeTimeMs } = await import(
+    './jmaParser'
+  );
+  const { INITIAL_EARTHQUAKES } = await import('../data/fallbackData');
 
+  const t1 = parseEarthquakeTimeMs('2026/11/05 09:14 頃発生');
+  const t2 = parseEarthquakeTimeMs('2026/11/05 13:39 頃発生');
+  assert.ok(t2 > t1);
+
+  const sampleQuakes = [
+    {
+      ...INITIAL_EARTHQUAKES[0],
+      id: 'older-huge-quake',
+      occurrenceTime: '2026/11/05 03:08 頃発生',
+      issueTime: '2026/11/05 03:12 発表',
+      maxScaleCode: 60, // 震度6強 (older)
+      maxScaleLabel: '6+',
+    },
+    {
+      ...INITIAL_EARTHQUAKES[0],
+      id: 'newest-small-quake',
+      occurrenceTime: '2026/11/06 14:20 頃発生',
+      issueTime: '2026/11/06 14:23 発表',
+      maxScaleCode: 20, // 震度2 (most recent)
+      maxScaleLabel: '2',
+    },
+    {
+      ...INITIAL_EARTHQUAKES[0],
+      id: 'middle-moderate-quake',
+      occurrenceTime: '2026/11/05 18:45 頃発生',
+      issueTime: '2026/11/05 18:48 発表',
+      maxScaleCode: 40, // 震度4 (middle)
+      maxScaleLabel: '4',
+    },
+  ];
+
+  const sorted = sortEarthquakesByNewest(sampleQuakes);
+  assert.deepEqual(
+    sorted.map((q) => q.id),
+    ['newest-small-quake', 'middle-moderate-quake', 'older-huge-quake']
+  );
+});
 
 
