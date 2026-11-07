@@ -15,6 +15,8 @@ import {
 import {
   AMEDAS_PATROL_STOPS,
   AUTO_PATROL_SEQUENCE,
+  decideIncomingEarthquake,
+  isSameEarthquakeEvent,
   classifyXmlEntryScene,
   computeAmedasTop5Rankings,
   computeTyphoonConeEnvelope,
@@ -1305,4 +1307,25 @@ test('r8 level-4 危険警報 codes (43/48/49) are parsed as danger and count as
   assert.ok(kochi?.badgeItems.some((b) => b.name === '高潮' && b.severity === 'danger'));
   assert.equal(getActiveSevereWarningDivisions(parsed.warnings).length, 1);
   assert.equal(computeWarningSummary(parsed.warnings).dangerCount, 1);
+});
+
+test('earthquake events are matched across feeds by origin time (P2P vs 気象庁 ids differ)', () => {
+  const p2p = { occurrenceTime: '2026/11/07 20:12:00 頃発生', issueTime: '2026/11/07 20:14:00 発表' };
+  const jma = { occurrenceTime: '2026-11-07T20:11:47+09:00', issueTime: '2026-11-07T20:16:00+09:00' };
+  const other = { occurrenceTime: '2026/11/07 20:40:00 頃発生', issueTime: '2026/11/07 20:42:00 発表' };
+  assert.equal(isSameEarthquakeEvent(p2p, jma), true);
+  assert.equal(isSameEarthquakeEvent(p2p, other), false);
+});
+
+test('decideIncomingEarthquake: newer event interrupts, follow-ups update, older/stale are ignored', () => {
+  const now = Date.parse('2026-11-07T20:20:00+09:00');
+  const shown = { occurrenceTime: '2026/11/07 20:12:00 頃発生', issueTime: '2026/11/07 20:14:00 発表' };
+  const followUp = { occurrenceTime: '2026-11-07T20:11:47+09:00', issueTime: '2026-11-07T20:16:00+09:00' };
+  const newer = { occurrenceTime: '2026/11/07 20:18:30 頃発生', issueTime: '2026/11/07 20:19:30 発表' };
+  const older = { occurrenceTime: '2026/11/07 19:00:00 頃発生', issueTime: '2026/11/07 19:02:00 発表' };
+  assert.equal(decideIncomingEarthquake(newer, shown, now), 'interrupt');
+  assert.equal(decideIncomingEarthquake(followUp, shown, now), 'update');
+  assert.equal(decideIncomingEarthquake(older, shown, now), 'ignore');
+  assert.equal(decideIncomingEarthquake(newer, null, now), 'interrupt');
+  assert.equal(decideIncomingEarthquake(older, null, now, 10 * 60 * 1000), 'ignore');
 });

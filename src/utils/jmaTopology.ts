@@ -295,7 +295,6 @@ export function decodeJmaTopology(file: JmaTopoFile): JmaTopology {
 export interface PathSink {
   moveTo(x: number, y: number): void;
   lineTo(x: number, y: number): void;
-  closePath(): void;
 }
 
 export interface TopoViewport {
@@ -336,6 +335,8 @@ export function traceTopoShape(
     if (r > 0 && shape.ringSpans[r] < vp.minSpanNorm) break; // rings sorted by span desc
     const refs = shape.rings[r];
     let started = false;
+    let sx = 0;
+    let sy = 0;
     for (let k = 0; k < refs.length; k++) {
       const ref = refs[k];
       const reversed = ref < 0;
@@ -348,6 +349,8 @@ export function traceTopoShape(
           const y = c[2 * i + 1] * s - oy;
           if (!started) {
             ctx.moveTo(x, y);
+            sx = x;
+            sy = y;
             started = true;
           } else ctx.lineTo(x, y);
         }
@@ -357,13 +360,18 @@ export function traceTopoShape(
           const y = c[2 * i + 1] * s - oy;
           if (!started) {
             ctx.moveTo(x, y);
+            sx = x;
+            sy = y;
             started = true;
           } else ctx.lineTo(x, y);
         }
       }
       pts += n;
     }
-    if (started) ctx.closePath();
+    // NOTE: never call closePath() here. Chromium's CanvasPath::closePath walks the whole accumulated
+    // path, so closing thousands of rings in one batched path is O(n^2) (~400ms for 6k rings). fill()
+    // closes sub-paths implicitly; an explicit lineTo back to the start keeps strokes closed too.
+    if (started) ctx.lineTo(sx, sy);
   }
   return pts;
 }

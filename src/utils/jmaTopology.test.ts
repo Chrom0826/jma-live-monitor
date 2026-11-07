@@ -55,12 +55,11 @@ test('LOD levels keep arc endpoints, so neighbouring polygons stay closed and se
   assert.ok(low < high * 0.3, `nationwide LOD should be much lighter (${low} vs ${high})`);
 });
 
-test('traceTopoShape emits closed rings and topologyToGeoJson round-trips label points', () => {
+test('traceTopoShape emits rings without closePath and topologyToGeoJson round-trips label points', () => {
   const calls: string[] = [];
   const sink: PathSink = {
     moveTo: () => calls.push('M'),
     lineTo: () => calls.push('L'),
-    closePath: () => calls.push('Z'),
   };
   const sh = topo.shapeById.get('0620100')!;
   traceTopoShape(sink, sh, topo.getArcsAtLevel(topo.levelForZoom(8)), {
@@ -74,7 +73,8 @@ test('traceTopoShape emits closed rings and topologyToGeoJson round-trips label 
     minSpanNorm: 0,
   });
   assert.equal(calls[0], 'M');
-  assert.equal(calls.filter((c) => c === 'M').length, calls.filter((c) => c === 'Z').length);
+  assert.ok(calls.filter((c) => c === 'M').length >= 1);
+  assert.ok(!calls.includes('Z'), 'closePath must not be used (O(n^2) in Chromium batched paths)');
   const geo = topologyToGeoJson(topo);
   const f = geo.features.find((x: any) => x.properties.code === '0620100');
   assert.equal(f.geometry.type, 'MultiPolygon');

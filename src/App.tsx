@@ -28,6 +28,7 @@ import {
   convertP2PQuakeItem,
   fetchMonitorDataBundle,
 } from './services/jmaClient';
+import { connectP2PQuakeSocket } from './services/p2pQuakeSocket';
 import {
   AmedasMetric,
   EarthquakeReport,
@@ -51,6 +52,9 @@ import {
   getSeismicScaleStyle,
   REGION_CONFIGS,
   SCENE_LIST,
+  decideIncomingEarthquake,
+  isSameEarthquakeEvent,
+  parseEarthquakeTimeMs,
   sortEarthquakesByNewest,
 } from './utils/jmaParser';
 import {
@@ -204,7 +208,10 @@ export default function App() {
     return `${yyyy}年${month}月${day}日 ${hm} 更新`;
   }, [data.lastXmlFetchTime]);
 
-  const latestEqIdRef = useRef<string>(INITIAL_EARTHQUAKES[0].id);
+  // Newest earthquake event known to the app (compared by origin time, never by id: P2P and 気象庁 ids differ)
+  const latestEqRef = useRef<EarthquakeReport | null>(null);
+  // Reports received by push (P2P WebSocket) that the 60s 気象庁 list may not contain yet
+  const pushedEqRef = useRef<EarthquakeReport[]>([]);
   const latestVolcanoXmlIdRef = useRef<string>('');
 
   // Bottom XML Ticker refs (uses tiled scrollLeft with cached copyWidth so it never triggers forced layout reflows)
@@ -251,32 +258,79 @@ export default function App() {
     };
   }, [data.xmlEntries]);
 
-  // Low-frequency JMA XML & JSON fetch (on mount + every 5 minutes)
+  /**
+   * Single entry point for every earthquake report (P2P push, P2P history back-fill, 気象庁 list poll).
+   * A newer event switches to the 地震情報 scene immediately; follow-up reports of the event on screen
+   * (震度速報 -> 震源に関する情報 -> 各地の震度) update it in place without restarting the scene.
+   */
+  const handleIncomingEarthquake = useCallback(
+    (report: EarthquakeReport, via: 'push' | 'history' | 'poll') => {
+      const latest = latestEqRef.current;
+      // First data after start-up: remember it, but don't interrupt for an earthquake that already happened
+      if (!latest && via !== 'push') {
+        latestEqRef.current = report;
+        setSelectedEarthquake((prev) => (prev.isTest ? prev : report));
+        return;
+      }
+      // Pushed reports are real-time; back-filled / polled ones only interrupt when they are recent
+      const decision = decideIncomingEarthquake(
+        report,
+        latest,
+        Date.now(),
+        via === 'push' ? 60 * 60 * 1000 : 10 * 60 * 1000
+      );
+      if (decision === 'ignore') return;
+      if (decision === 'update' && latest) {
+        // Keep the most recently issued report of this event (later reports carry more detail)
+        const tNew = parseEarthquakeTimeMs(report.issueTime);
+        const tOld = parseEarthquakeTimeMs(latest.issueTime);
+        if (tNew && tOld && tNew < tOld) return;
+      }
+      latestEqRef.current = report;
+      setSelectedEarthquake((prev) =>
+        decision === 'interrupt' || isSameEarthquakeEvent(prev, report) || !prev.isTest
+          ? report
+          : prev
+      );
+      if (decision === 'interrupt') {
+        setInterruptKind((prev) => (prev === 'eew' ? prev : 'earthquake'));
+        setActiveScene('earthquake');
+      }
+    },
+    []
+  );
+
+  const mergePushedEarthquakes = useCallback(
+    (list: EarthquakeReport[]): EarthquakeReport[] => {
+      const nowMs = Date.now();
+      pushedEqRef.current = pushedEqRef.current.filter(
+        (p) =>
+          nowMs - (parseEarthquakeTimeMs(p.occurrenceTime) || nowMs) < 6 * 3600 * 1000 &&
+          !list.some((e) => isSameEarthquakeEvent(e, p))
+      );
+      if (pushedEqRef.current.length === 0) return list;
+      return sortEarthquakesByNewest([...pushedEqRef.current, ...list]).slice(0, 20);
+    },
+    []
+  );
+
+  // JMA XML & JSON bundle fetch (on mount + every 60 s). Kept identity-stable so the push socket below
+  // is never torn down by unrelated state changes.
   const refreshJmaData = useCallback(async () => {
     setIsRefreshingXml(true);
     try {
       const bundle = await fetchMonitorDataBundle();
-      setData(bundle);
+      const earthquakes = mergePushedEarthquakes(bundle.earthquakes);
+      setData({ ...bundle, earthquakes });
 
       // 0. Sync live typhoon selection
       if (bundle.typhoons.length > 0) {
         setSelectedTyphoon(bundle.typhoons[0]);
       }
 
-      // 1. Check for new earthquake
-      if (bundle.earthquakes.length > 0) {
-        const newest = bundle.earthquakes[0];
-        if (
-          latestEqIdRef.current &&
-          newest.id !== latestEqIdRef.current &&
-          latestEqIdRef.current !== INITIAL_EARTHQUAKES[0].id
-        ) {
-          setSelectedEarthquake(newest);
-          setInterruptKind('earthquake');
-        } else if (interruptKind === 'none') {
-          setSelectedEarthquake(newest);
-        }
-        latestEqIdRef.current = newest.id;
+      // 1. Check for new earthquake (only real data; mock fallback must never interrupt)
+      if (bundle.dataSourceStatus?.p2pQuakeLive !== false && earthquakes.length > 0) {
+        handleIncomingEarthquake(earthquakes[0], 'poll');
       }
 
       // 2. Check for Volcano Alert Level change in eqvol.xml
@@ -302,7 +356,7 @@ export default function App() {
     } finally {
       setIsRefreshingXml(false);
     }
-  }, [interruptKind]);
+  }, [handleIncomingEarthquake, mergePushedEarthquakes]);
 
   useEffect(() => {
     refreshJmaData();
@@ -310,81 +364,70 @@ export default function App() {
     return () => clearInterval(pollTimer);
   }, [refreshJmaData]);
 
-  // Subscribe to P2PQuake WebSocket for low-latency earthquake / EEW / Tsunami push delivery
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket('wss://api.p2pquake.net/v2/ws');
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (!payload || typeof payload.code !== 'number') return;
+  const refreshJmaDataRef = useRef(refreshJmaData);
+  refreshJmaDataRef.current = refreshJmaData;
 
-          // 1. EEW (緊急地震速報（警報） code: 556)
-          if (payload.code === 556) {
-            const eew = parseP2PEew(payload);
-            if (eew) {
-              setActiveEew((prev) => {
-                if (shouldReplaceEew(prev, eew)) {
-                  return eew;
-                }
-                return prev;
-              });
-              setInterruptKind('eew');
-              setActiveScene('earthquake');
-              // Immediately trigger low-latency refresh of earthquake data
-              refreshJmaData();
-            }
+  // P2P地震情報 WebSocket (push): earthquake / EEW / tsunami with auto-reconnect, id de-duplication,
+  // history back-fill after reconnects and 15 s polling fallback while disconnected.
+  useEffect(() => {
+    return connectP2PQuakeSocket({
+      onMessage: (payload, via) => {
+        // 1. EEW (緊急地震速報（警報） code: 556)
+        if (payload.code === 556) {
+          // Never replay an old EEW from the history back-fill
+          if (via === 'history') {
+            const t = parseEarthquakeTimeMs(String(payload.time || ''));
+            if (!t || Date.now() - t > 3 * 60 * 1000) return;
           }
-          // 2. EEW Announcement Detection (NHKチャイム検出 code: 554)
-          else if (payload.code === 554) {
+          const eew = parseP2PEew(payload);
+          if (eew) {
+            setActiveEew((prev) => (shouldReplaceEew(prev, eew) ? eew : prev));
+            setInterruptKind('eew');
             setActiveScene('earthquake');
-            refreshJmaData();
+            refreshJmaDataRef.current();
           }
-          // 3. Tsunami forecast (津波予報 code: 552)
-          else if (payload.code === 552) {
-            const tsunami = parseP2PTsunami(payload);
-            if (tsunami) {
-              setData((prev) => ({
-                ...prev,
-                tsunamiForecast: tsunami,
-              }));
-              const sev = getTsunamiAlertSeverity(tsunami);
-              if (sev === 'warning_or_above') {
-                setActiveScene('tsunami');
-              }
-            }
-          }
-          // 4. Earthquake detail (各地の震度・震源情報 code: 551)
-          else if (payload.code === 551) {
-            const report = convertP2PQuakeItem(payload);
-            if (report && report.id !== latestEqIdRef.current) {
-              latestEqIdRef.current = report.id;
-              setData((prev) => ({
-                ...prev,
-                earthquakes: sortEarthquakesByNewest([
-                  report,
-                  ...prev.earthquakes.filter((e) => e.id !== report.id),
-                ]).slice(0, 20),
-              }));
-              setSelectedEarthquake(report);
-              setInterruptKind('earthquake');
-              setActiveScene('earthquake');
-            }
-          }
-        } catch {
-          // Ignore malformed WS message
         }
-      };
-    } catch {
-      // Ignore WS connection failure
-    }
-    return () => {
-      if (ws && ws.readyState <= 1) {
-        ws.close();
-      }
-    };
-  }, [refreshJmaData]);
+        // 2. EEW Announcement Detection (NHKチャイム検出 code: 554)
+        else if (payload.code === 554) {
+          if (via === 'push') {
+            setActiveScene('earthquake');
+            refreshJmaDataRef.current();
+          }
+        }
+        // 3. Tsunami forecast (津波予報 code: 552)
+        else if (payload.code === 552) {
+          const tsunami = parseP2PTsunami(payload);
+          if (tsunami) {
+            setData((prev) => ({ ...prev, tsunamiForecast: tsunami }));
+            if (getTsunamiAlertSeverity(tsunami) === 'warning_or_above') {
+              setActiveScene('tsunami');
+            }
+          }
+        }
+        // 4. Earthquake information (震度速報 / 震源 / 各地の震度 code: 551)
+        else if (payload.code === 551) {
+          const report = convertP2PQuakeItem(payload);
+          if (!report) return;
+          pushedEqRef.current = [
+            report,
+            ...pushedEqRef.current.filter((e) => !isSameEarthquakeEvent(e, report)),
+          ].slice(0, 20);
+          setData((prev) => ({
+            ...prev,
+            earthquakes: sortEarthquakesByNewest([
+              report,
+              ...prev.earthquakes.filter(
+                (e) => e.id !== report.id && !isSameEarthquakeEvent(e, report)
+              ),
+            ]).slice(0, 20),
+          }));
+          handleIncomingEarthquake(report, via);
+          // Pull the 気象庁 detail (exact intensity station coordinates) shortly after
+          if (via === 'push') setTimeout(() => refreshJmaDataRef.current(), 20000);
+        }
+      },
+    });
+  }, [handleIncomingEarthquake]);
 
   // Divisions (out of the 57 JMA divisions) that currently have 警報 (warning) or 特別警報 (special), ordered North to South
   const severeWarningDivisions = useMemo(
