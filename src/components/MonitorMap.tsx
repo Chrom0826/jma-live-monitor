@@ -598,10 +598,10 @@ const SCENE_CAMERA_TARGETS: Record<
 
 
 // AMeDAS 地点の出現・退出アニメーション: 点は常に本来の位置に描画し（移動・拡大なし）、
-// 北（画面上）から南へ順番に短いフェードで現れ、退出時も同じ順で消える。
+// 北（画面上）から南へ順番にフェードなしで一発で現れ、退出時も同じ順で一発で消える。
 const AMEDAS_ENTER_TOTAL_MS = 1600;
 const AMEDAS_EXIT_TOTAL_MS = 1300;
-const AMEDAS_FADE_MS = 140;
+const AMEDAS_FADE_MS = 1; // per-point timing slot (no fade)
 function getAmedasDropFrame(
   phase: 'waiting_camera' | 'entering' | 'steady' | 'exiting' | 'transitioning',
   elapsedMs: number,
@@ -613,8 +613,9 @@ function getAmedasDropFrame(
   const total = phase === 'entering' ? AMEDAS_ENTER_TOTAL_MS : AMEDAS_EXIT_TOTAL_MS;
   const start = latNorm * (total - AMEDAS_FADE_MS);
   const t = Math.max(0, Math.min(1, (elapsedMs - start) / AMEDAS_FADE_MS));
-  if (phase === 'entering') return t <= 0 ? null : { alpha: t, offsetY: 0 };
-  return t >= 1 ? null : { alpha: 1 - t, offsetY: 0 };
+  // No fade: each point pops in (and out) instantly at its own turn
+  if (phase === 'entering') return t <= 0 ? null : { alpha: 1, offsetY: 0 };
+  return t > 0 ? null : { alpha: 1, offsetY: 0 };
 }
 
 export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
