@@ -573,6 +573,26 @@ export const INITIAL_MUNI_SEVERITY_MAP: Record<string, WarningSeverity> = {
   '0120300': 'advisory', // 小樽市
   '0120400': 'advisory', // 旭川市
   '0120500': 'advisory', // 室蘭市
+  // 青森県
+  '0220100': 'warning',  // 青森市
+  '0220200': 'warning',  // 弘前市
+  '0220500': 'warning',  // 八戸市
+  // 新潟県
+  '1522400': 'warning',  // 佐渡市
+  '1510000': 'advisory', // 新潟市
+  '1521200': 'advisory', // 村上市
+  '1522700': 'advisory', // 胎内市
+  '1520600': 'advisory', // 新発田市
+  '1558600': 'advisory', // 粟島浦村
+  '1520200': 'advisory', // 長岡市
+  '1522200': 'advisory', // 上越市
+  // 石川県
+  '1720100': 'advisory', // 金沢市
+  '1720400': 'warning',  // 輪島市
+  '1720500': 'warning',  // 珠洲市
+  '1720200': 'warning',  // 七尾市
+  '1746300': 'warning',  // 能登町
+  '1746100': 'warning',  // 穴水町
 };
 
 export const INITIAL_MUNICIPALITY_WARNINGS: RegionalWarningItem[] = [

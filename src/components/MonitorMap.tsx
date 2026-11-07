@@ -541,7 +541,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const warningZoomTierRef = useRef<WarningMapZoomTier>('prefecture');
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
   const onViewportChangeRef = useRef<typeof onViewportChange>(onViewportChange);
-  const lastMuniSeveritySigRef = useRef<string>('');
   // True while the camera is moving (flyTo / pan / zoom): enables cheaper draw LOD in the canvas renderer
   const isMovingRef = useRef<boolean>(false);
   const isFlyingRef = useRef<boolean>(false);
@@ -570,7 +569,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const class20ByDivisionRef = useRef<Map<string, CompiledGeoShape[]>>(
     new Map()
   );
-  const dissolvedWarningFillCompiledRef = useRef<CompiledGeoShape[]>([]);
   const earthquakeCompiledRef = useRef<CompiledGeoShape[]>([]);
 
   useEffect(() => {
@@ -703,57 +701,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     setCompiledVersion((v) => v + 1);
   }, [class20GeoJsonData]);
 
-  // Compile topologically dissolved warning fill shapes when class20GeoJsonData or muniSeverityMap updates
-  useEffect(() => {
-    if (!class20GeoJsonData || !Array.isArray(class20GeoJsonData.features)) {
-      return;
-    }
-    const muniMap = data.muniSeverityMap || {};
-    const sigEntries: string[] = [];
-    for (const [k, v] of Object.entries(muniMap)) {
-      if (v && v !== 'normal') {
-        sigEntries.push(`${k}:${v}`);
+  const divHasActiveWarningMap = useMemo(() => {
+    const m = new Map<string, WarningSeverity>();
+    for (const w of data.warnings) {
+      if (w.divisionCode) {
+        m.set(w.divisionCode, w.severity);
       }
     }
-    sigEntries.sort();
-    const nextSig = `${class20GeoJsonData.features.length}|${sigEntries.join(',')}`;
-    if (
-      nextSig === lastMuniSeveritySigRef.current &&
-      dissolvedWarningFillCompiledRef.current.length > 0
-    ) {
-      return;
-    }
-    lastMuniSeveritySigRef.current = nextSig;
+    return m;
+  }, [data.warnings]);
 
-    // Topologically dissolve adjacent municipalities with the same `(divisionCode, severity)`
-    // so nationwide (`zoom < 5.5`) and regional (`5.5 <= zoom < 6.8`) views have ZERO internal seams or black noise (`黒いノイズ`)!
-    const dissolvedFillGeoJson = dissolveGeoJsonByGroup(
-      class20GeoJsonData.features,
-      (f) => {
-        const code = String(f?.properties?.code || '');
-        const divCode = String(f?.properties?.divisionCode || '');
-        if (!divCode) return null;
-        const sev = muniMap[code] || 'normal';
-        return `${divCode}:${sev}`;
-      }
-    );
-
-    dissolvedWarningFillCompiledRef.current = compileGeoJsonShapes(
-      dissolvedFillGeoJson,
-      (f) => {
-        const groupKey = String(f?.properties?.groupKey || '');
-        const [divCode, sevStr] = groupKey.split(':');
-        return {
-          id: groupKey,
-          divisionCode: divCode || '',
-          severity: (sevStr as WarningSeverity) || 'normal',
-        };
-      },
-      true
-    );
-
-    setCompiledVersion((v) => v + 1);
-  }, [class20GeoJsonData, data.muniSeverityMap]);
 
   // Compile 188 JMA earthquake sub-division shapes once when earthquakeGeoJsonData loads
   useEffect(() => {
@@ -878,16 +835,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     }
     return map;
   }, [preCompiledMunicipalityLabels]);
-
-  const divHasActiveWarningMap = useMemo(() => {
-    const m = new Map<string, WarningSeverity>();
-    for (const w of data.warnings) {
-      if (w.divisionCode) {
-        m.set(w.divisionCode, w.severity);
-      }
-    }
-    return m;
-  }, [data.warnings]);
 
   // Pre-compile Earthquake choropleth buckets (188-area & municipality) + station coordinates once per quake
   const preCompiledEarthquake = useMemo(() => {
@@ -1235,7 +1182,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       const originY = centerWorld.y - halfH;
 
       // Normalized Web Mercator viewport bounds for fast frustum culling
-      const padPx = 48;
+      const padPx = 96;
       const viewMinNormX = (originX - padPx) / worldScale;
       const viewMaxNormX = (originX + width + padPx) / worldScale;
       const viewMinNormY = (originY - padPx) / worldScale;
@@ -1279,7 +1226,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           // Multi-resolution (LOD) pre-decimated rings + O(1) micro-island culling:
           // Skips thousands of sub-pixel islets and uses pre-simplified Float64Arrays during zoom/overview,
           // reducing nationwide vertex iterations by ~12x for butter-smooth 60fps zoom-out!
-          const minRingSpanNorm = (moving ? 2.2 : 0.85) / worldScale;
+          const minRingSpanNorm = (moving ? 0.6 : 0.4) / worldScale;
           const useLowLod = currentZoom < 6.2 || (moving && currentZoom < 7.6);
           const useMedLod = !useLowLod && currentZoom < 7.5;
 
@@ -1365,172 +1312,93 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             const focusedDivCode = activeWarningDivision?.divisionCode || null;
             const muniMap = data.muniSeverityMap || {};
 
-            // 2a. Batched Solid 57-Division Underfill
-            // While camera is moving (`moving === true`), fill all visible divisions in a single #374151 path
-            // so Pass 2b can skip 100% of 'normal' municipality polygons for locked 60fps zoom-in/zoom-out!
-            const yellowDivSet = new Set<string>();
-            if (moving) {
-              bCtx.beginPath();
-              let anyVisDiv = false;
-              for (let i = 0; i < divShapes.length; i++) {
-                const sh = divShapes[i];
-                if (!isShapeVisible(sh)) continue;
-                traceShapePath(bCtx, sh);
-                anyVisDiv = true;
-              }
-              if (anyVisDiv) {
-                bCtx.fillStyle = '#374151';
-                bCtx.fill();
-              }
-            } else {
-              // When stationary, use 2-bucket underfill so interior lakes (洞爺湖 / 支笏湖 / 十和田湖) have zero black holes
-              const underfillGrayShapes: CompiledGeoShape[] = [];
-              const underfillYellowShapes: CompiledGeoShape[] = [];
-              for (let i = 0; i < divShapes.length; i++) {
-                const sh = divShapes[i];
-                if (!isShapeVisible(sh)) continue;
-                const divSev =
-                  divHasActiveWarningMap.get(sh.divisionCode) ||
-                  data.prefSeverityMap[sh.prefId] ||
-                  'normal';
-                const isYellow =
-                  divSev === 'special' ||
-                  divSev === 'warning' ||
-                  divSev === 'advisory';
-                if (isYellow) {
-                  underfillYellowShapes.push(sh);
-                  if (sh.divisionCode) yellowDivSet.add(sh.divisionCode);
-                } else {
-                  underfillGrayShapes.push(sh);
-                }
-              }
-
-              if (underfillGrayShapes.length > 0) {
-                bCtx.beginPath();
-                for (let i = 0; i < underfillGrayShapes.length; i++) {
-                  traceShapePath(bCtx, underfillGrayShapes[i]);
-                }
-                bCtx.fillStyle = '#374151';
-                bCtx.fill();
+            // 2a. Batched Solid 57-Division Underfill in Single Draw Call
+            // Uniform dark land fill (#374151) across all visible divisions.
+            // Completely eliminates yellow underfill leaking/halo around red warning polygons,
+            // and guarantees interior lakes (洞爺湖 / 支笏湖 / 十和田湖) have zero black holes!
+            bCtx.beginPath();
+            let anyVisDiv = false;
+            for (let i = 0; i < divShapes.length; i++) {
+              const sh = divShapes[i];
+              if (!isShapeVisible(sh)) continue;
+              traceShapePath(bCtx, sh);
+              anyVisDiv = true;
+            }
+            if (anyVisDiv) {
+              bCtx.fillStyle = '#374151';
+              bCtx.fill();
+              if (!moving) {
                 bCtx.strokeStyle = '#374151';
-                bCtx.lineWidth = 0.8;
-                bCtx.stroke();
-              }
-              if (underfillYellowShapes.length > 0) {
-                bCtx.beginPath();
-                for (let i = 0; i < underfillYellowShapes.length; i++) {
-                  traceShapePath(bCtx, underfillYellowShapes[i]);
-                }
-                bCtx.fillStyle = '#FACC15';
-                bCtx.fill();
-                bCtx.strokeStyle = '#FACC15';
                 bCtx.lineWidth = 0.8;
                 bCtx.stroke();
               }
             }
 
-            // 2b. Batched Warning Choropleth Fill using pre-dissolved shapes (~80 shapes instead of 1,916!)
+            // 2b. Batched Warning Choropleth Fill directly from class20 shapes (100% municipality accuracy, zero polygon drop!)
             let coloredMuniCount = 0;
 
             const bucketBySeverity: Record<
-              WarningSeverity,
+              'advisory' | 'warning' | 'special',
               CompiledGeoShape[]
             > = {
-              normal: [],
               advisory: [],
               warning: [],
               special: [],
             };
 
-            if (dissolvedWarningFillCompiledRef.current.length > 0) {
-              const dissolvedShapes = dissolvedWarningFillCompiledRef.current;
-              for (let i = 0; i < dissolvedShapes.length; i++) {
-                const sh = dissolvedShapes[i];
-                if (sh.severity !== 'normal') coloredMuniCount++;
-                // Skip 'normal' polygons completely during camera flight (already underfilled with #374151 in Pass 2a)
-                // or when stationary inside divisions that didn't use the yellow lake underfill!
-                if (
-                  sh.severity === 'normal' &&
-                  (moving ||
-                    (sh.divisionCode && !yellowDivSet.has(sh.divisionCode)))
-                ) {
-                  continue;
-                }
-                if (!isShapeVisible(sh)) continue;
-                bucketBySeverity[sh.severity].push(sh);
-              }
+            const c20Shapes = class20CompiledRef.current;
+            for (let i = 0; i < c20Shapes.length; i++) {
+              const sh = c20Shapes[i];
+              const effSev =
+                muniMap[sh.id] ||
+                divHasActiveWarningMap.get(sh.divisionCode) ||
+                data.prefSeverityMap[sh.prefId] ||
+                'normal';
+              if (effSev === 'normal') continue; // Pass 2a already painted all land #374151!
+              coloredMuniCount++;
+              if (!isShapeVisible(sh)) continue;
+              bucketBySeverity[effSev].push(sh);
+            }
 
-              for (const sev of [
-                'normal',
-                'advisory',
-                'warning',
-                'special',
-              ] as const) {
-                const bucket = bucketBySeverity[sev];
-                if (bucket.length === 0) continue;
-                const fillColor = severityToFillColor(sev);
+            for (const sev of [
+              'advisory',
+              'warning',
+              'special',
+            ] as const) {
+              const bucket = bucketBySeverity[sev];
+              if (bucket.length === 0) continue;
+              const fillColor = severityToFillColor(sev);
+              bCtx.beginPath();
+              for (let i = 0; i < bucket.length; i++) {
+                traceShapePath(bCtx, bucket[i]);
+              }
+              bCtx.fillStyle = fillColor;
+              bCtx.fill();
+              if (!moving) {
+                bCtx.strokeStyle = fillColor;
+                bCtx.lineWidth = 0.5;
+                bCtx.stroke();
+              }
+            }
+
+            // Draw inner municipality borders ONLY when a specific warning division is focused (`focusedDivCode !== null`)
+            if (tier === 'municipality' && focusedDivCode) {
+              const innerSource =
+                class20ByDivisionRef.current.get(focusedDivCode) || [];
+              if (innerSource.length > 0) {
                 bCtx.beginPath();
-                for (let i = 0; i < bucket.length; i++) {
-                  traceShapePath(bCtx, bucket[i]);
+                let anyInner = false;
+                for (let i = 0; i < innerSource.length; i++) {
+                  const sh = innerSource[i];
+                  if (!isShapeVisible(sh)) continue;
+                  traceShapePath(bCtx, sh);
+                  anyInner = true;
                 }
-                bCtx.fillStyle = fillColor;
-                bCtx.fill();
-                if (tier !== 'municipality' && !moving) {
-                  bCtx.strokeStyle = fillColor;
-                  bCtx.lineWidth = 0.75;
+                if (anyInner) {
+                  bCtx.strokeStyle = '#1E293B';
+                  bCtx.lineWidth = 0.85;
                   bCtx.stroke();
                 }
-              }
-
-              // Draw inner municipality borders ONLY when a specific warning division is focused (`focusedDivCode !== null`)
-              if (tier === 'municipality' && focusedDivCode) {
-                const innerSource =
-                  class20ByDivisionRef.current.get(focusedDivCode) || [];
-                if (innerSource.length > 0) {
-                  bCtx.beginPath();
-                  let anyInner = false;
-                  for (let i = 0; i < innerSource.length; i++) {
-                    const sh = innerSource[i];
-                    if (!isShapeVisible(sh)) continue;
-                    traceShapePath(bCtx, sh);
-                    anyInner = true;
-                  }
-                  if (anyInner) {
-                    bCtx.strokeStyle = '#1E293B';
-                    bCtx.lineWidth = 0.85;
-                    bCtx.stroke();
-                  }
-                }
-              }
-            } else if (class20CompiledRef.current.length > 0) {
-              const c20Shapes = class20CompiledRef.current;
-              for (let i = 0; i < c20Shapes.length; i++) {
-                const sh = c20Shapes[i];
-                const effSev = getEffectiveMunicipalitySeverity(
-                  sh.id,
-                  sh.divisionCode,
-                  muniMap
-                );
-                if (effSev !== 'normal') coloredMuniCount++;
-                if (!isShapeVisible(sh)) continue;
-                bucketBySeverity[effSev].push(sh);
-              }
-
-              for (const sev of [
-                'normal',
-                'advisory',
-                'warning',
-                'special',
-              ] as const) {
-                const bucket = bucketBySeverity[sev];
-                if (bucket.length === 0) continue;
-                const fillColor = severityToFillColor(sev);
-                bCtx.beginPath();
-                for (let i = 0; i < bucket.length; i++) {
-                  traceShapePath(bCtx, bucket[i]);
-                }
-                bCtx.fillStyle = fillColor;
-                bCtx.fill();
               }
             }
 

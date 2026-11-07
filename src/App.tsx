@@ -306,7 +306,7 @@ export default function App() {
 
   useEffect(() => {
     refreshJmaData();
-    const pollTimer = setInterval(refreshJmaData, 300000);
+    const pollTimer = setInterval(refreshJmaData, 60000);
     return () => clearInterval(pollTimer);
   }, [refreshJmaData]);
 
