@@ -71,7 +71,8 @@ export interface LightningPoint {
   validtime?: string;
 }
 
-export type WarningSeverity = 'special' | 'warning' | 'advisory' | 'normal';
+/** special=レベル5 特別警報, danger=レベル4 危険警報, warning=レベル3 警報, advisory=レベル2 注意報 */
+export type WarningSeverity = 'special' | 'danger' | 'warning' | 'advisory' | 'normal';
 
 export interface WarningBadgeItem {
   code: string;

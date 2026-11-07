@@ -1209,3 +1209,100 @@ test('computeEarthquakeAreaScales maps seismic intensity stations to JMA 188-are
 
 
 
+
+test('r8 map.json: municipalities reported as clear stay normal even when their division has a warning (山形市 regression)', () => {
+  // 山形県 is ONE warning division. 庄内 (鶴岡市) has 波浪警報, 置賜 (小国町) has 土砂災害注意報 (new R8 code 29),
+  // 山形市 had 雷注意報 which was lifted (解除) in a later VPWW61 report.
+  const raw = [
+    {
+      reportDatetime: '2026-11-07T01:04:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW59',
+      warning: {
+        class10Items: [{ areaCode: '060030', kinds: [{ code: '07', status: '継続' }] }],
+        class20Items: [
+          { areaCode: '0620100', kinds: [{ status: '発表警報・注意報はなし' }] },
+          { areaCode: '0620300', kinds: [{ code: '07', status: '継続' }] },
+        ],
+      },
+    },
+    {
+      reportDatetime: '2026-11-07T14:56:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW56',
+      warning: {
+        class10Items: [{ areaCode: '060020', kinds: [{ code: '29', status: '発表' }] }],
+        class20Items: [
+          { areaCode: '0620100', kinds: [{ status: '発表警報・注意報はなし' }] },
+          { areaCode: '0636500', kinds: [{ code: '29', status: '発表' }] },
+        ],
+      },
+    },
+    {
+      reportDatetime: '2026-11-07T17:59:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW61',
+      warning: {
+        class10Items: [{ areaCode: '060010', kinds: [{ code: '14', status: '解除' }] }],
+        class20Items: [{ areaCode: '0620100', kinds: [{ code: '14', status: '解除' }] }],
+      },
+    },
+    // Older VPWW61 report for the same office: must be ignored (superseded by the 17:59 report)
+    {
+      reportDatetime: '2026-11-07T09:00:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW61',
+      warning: {
+        class10Items: [{ areaCode: '060010', kinds: [{ code: '14', status: '発表' }] }],
+        class20Items: [{ areaCode: '0620100', kinds: [{ code: '14', status: '発表' }] }],
+      },
+    },
+  ];
+  const parsed = parseJmaWarningMapData(raw);
+  assert.equal(parsed.muniSeverityMap['0620100'], 'normal', '山形市 must be explicitly normal');
+  assert.equal(parsed.muniSeverityMap['0620300'], 'warning', '鶴岡市 波浪警報');
+  assert.equal(parsed.muniSeverityMap['0636500'], 'advisory', '小国町 土砂災害注意報 (code 29)');
+  assert.ok(!parsed.municipalityWarnings.some((m) => m.muniCode === '0620100'));
+  const yamagata = parsed.warnings.find((w) => w.divisionCode === '060000');
+  assert.ok(yamagata);
+  assert.equal(yamagata!.severity, 'warning');
+  assert.ok(yamagata!.badgeItems.some((b) => b.name === '土砂災害' && b.severity === 'advisory'));
+  assert.ok(!yamagata!.badgeItems.some((b) => b.name === '雷'));
+});
+
+test('r8 level-4 危険警報 codes (43/48/49) are parsed as danger and count as warning-or-above', () => {
+  const raw = [
+    {
+      reportDatetime: '2026-11-07T10:00:00+09:00',
+      infoType: '発表',
+      publishingOffice: '高知地方気象台',
+      dataTypeCode: 'VPWW57',
+      warning: {
+        class10Items: [{ areaCode: '390010', kinds: [{ code: '48', status: '発表' }] }],
+        class20Items: [{ areaCode: '3920100', kinds: [{ code: '48', status: '発表' }] }],
+      },
+    },
+    {
+      reportDatetime: '2026-11-07T10:00:00+09:00',
+      infoType: '発表',
+      publishingOffice: '高知地方気象台',
+      dataTypeCode: 'VPWW55',
+      warning: {
+        class10Items: [{ areaCode: '390010', kinds: [{ code: '43', status: '発表' }] }],
+        class20Items: [{ areaCode: '3920200', kinds: [{ code: '43', status: '発表' }] }],
+      },
+    },
+  ];
+  const parsed = parseJmaWarningMapData(raw);
+  assert.equal(parsed.muniSeverityMap['3920100'], 'danger');
+  assert.equal(parsed.muniSeverityMap['3920200'], 'danger');
+  const kochi = parsed.warnings.find((w) => w.divisionCode === '390000');
+  assert.equal(kochi?.severity, 'danger');
+  assert.ok(kochi?.badgeItems.some((b) => b.name === '高潮' && b.severity === 'danger'));
+  assert.equal(getActiveSevereWarningDivisions(parsed.warnings).length, 1);
+  assert.equal(computeWarningSummary(parsed.warnings).dangerCount, 1);
+});
