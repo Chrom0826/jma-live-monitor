@@ -178,32 +178,51 @@ export const REGION_CONFIGS: RegionConfig[] = [
   },
 ];
 
+/**
+ * JMA warning/advisory kind codes (令和8年 新しい防災気象情報体系 + legacy codes).
+ * Source: 気象庁 bosai/warning フロントエンドのコード定義 (2026-11 時点).
+ * - レベル5 特別警報 → 'special'
+ * - レベル4 危険警報 → 'danger'   (大雨/土砂災害/高潮 のみ)
+ * - レベル3 警報     → 'warning'
+ * - レベル2 注意報   → 'advisory'
+ */
 export const JMA_WARNING_CODE_TABLE: Record<
   string,
   { name: string; severity: WarningSeverity }
 > = {
-  '32': { name: '暴風雪特別警報', severity: 'special' },
-  '33': { name: '大雨特別警報', severity: 'special' },
-  '35': { name: '暴風特別警報', severity: 'special' },
-  '36': { name: '大雪特別警報', severity: 'special' },
-  '37': { name: '波浪特別警報', severity: 'special' },
-  '38': { name: '高潮特別警報', severity: 'special' },
-  '02': { name: '暴風雪', severity: 'warning' },
+  // 大雨 (VPWW55)
+  '33': { name: '大雨', severity: 'special' },
+  '43': { name: '大雨', severity: 'danger' },
   '03': { name: '大雨', severity: 'warning' },
-  '04': { name: '洪水', severity: 'warning' },
-  '05': { name: '暴風', severity: 'warning' },
-  '06': { name: '大雪', severity: 'warning' },
-  '07': { name: '波浪', severity: 'warning' },
-  '08': { name: '高潮', severity: 'warning' },
   '10': { name: '大雨', severity: 'advisory' },
-  '12': { name: '大雪', severity: 'advisory' },
-  '13': { name: '風雪', severity: 'advisory' },
-  '14': { name: '雷', severity: 'advisory' },
-  '15': { name: '強風', severity: 'advisory' },
-  '16': { name: '波浪', severity: 'advisory' },
-  '17': { name: '融雪', severity: 'advisory' },
-  '18': { name: '洪水', severity: 'advisory' },
+  // 土砂災害 (VPWW56)
+  '39': { name: '土砂災害', severity: 'special' },
+  '49': { name: '土砂災害', severity: 'danger' },
+  '09': { name: '土砂災害', severity: 'warning' },
+  '29': { name: '土砂災害', severity: 'advisory' },
+  // 高潮 (VPWW57)
+  '38': { name: '高潮', severity: 'special' },
+  '48': { name: '高潮', severity: 'danger' },
+  '08': { name: '高潮', severity: 'warning' },
   '19': { name: '高潮', severity: 'advisory' },
+  // 風・風雪 (VPWW58)
+  '35': { name: '暴風', severity: 'special' },
+  '05': { name: '暴風', severity: 'warning' },
+  '15': { name: '強風', severity: 'advisory' },
+  '32': { name: '暴風雪', severity: 'special' },
+  '02': { name: '暴風雪', severity: 'warning' },
+  '13': { name: '風雪', severity: 'advisory' },
+  // 波浪 (VPWW59)
+  '37': { name: '波浪', severity: 'special' },
+  '07': { name: '波浪', severity: 'warning' },
+  '16': { name: '波浪', severity: 'advisory' },
+  // 大雪 (VPWW60)
+  '36': { name: '大雪', severity: 'special' },
+  '06': { name: '大雪', severity: 'warning' },
+  '12': { name: '大雪', severity: 'advisory' },
+  // その他の注意報 (VPWW61)
+  '14': { name: '雷', severity: 'advisory' },
+  '17': { name: '融雪', severity: 'advisory' },
   '20': { name: '濃霧', severity: 'advisory' },
   '21': { name: '乾燥', severity: 'advisory' },
   '22': { name: 'なだれ', severity: 'advisory' },
@@ -211,6 +230,9 @@ export const JMA_WARNING_CODE_TABLE: Record<
   '24': { name: '霜', severity: 'advisory' },
   '25': { name: '着氷', severity: 'advisory' },
   '26': { name: '着雪', severity: 'advisory' },
+  // Legacy only (旧 warning/data/warning/map.json): 洪水
+  '04': { name: '洪水', severity: 'warning' },
+  '18': { name: '洪水', severity: 'advisory' },
 };
 
 export const PREFECTURE_NAMES: Record<
@@ -382,9 +404,23 @@ export function resolveWarningDivision(
   return WARNING_DIVISIONS[prefCode] || null;
 }
 
+export const WARNING_SEVERITY_RANK: Record<WarningSeverity, number> = {
+  special: 4,
+  danger: 3,
+  warning: 2,
+  advisory: 1,
+  normal: 0,
+};
+
+/** True for レベル3 警報 and above (警報・危険警報・特別警報). */
+export function isWarningOrAbove(sev: WarningSeverity | undefined | null): boolean {
+  return !!sev && WARNING_SEVERITY_RANK[sev] >= WARNING_SEVERITY_RANK.warning;
+}
+
 function compareSeverity(a: WarningSeverity, b: WarningSeverity): number {
   const rank: Record<WarningSeverity, number> = {
-    special: 3,
+    special: 4,
+    danger: 3,
     warning: 2,
     advisory: 1,
     normal: 0,
@@ -531,12 +567,15 @@ export function parseJmaWarningMapData(
     if (!prefMeta) return;
 
     const { badgeItems, maxSeverity } = extractBadgeItems(rawWarnings);
-    if (badgeItems.length === 0) return;
 
-    const prevMuniSev = muniSeverityMap[codeStr] || 'normal';
-    if (compareSeverity(maxSeverity, prevMuniSev) > 0) {
+    // Record EVERY reported municipality, including 'normal' (発表なし / 解除), so the map never
+    // falls back to a coarser division/prefecture severity for municipalities that JMA explicitly
+    // reported as clear (e.g. 山形市 while only 庄内 has 波浪警報).
+    const prevMuniSev = muniSeverityMap[codeStr];
+    if (!prevMuniSev || compareSeverity(maxSeverity, prevMuniSev) > 0) {
       muniSeverityMap[codeStr] = maxSeverity;
     }
+    if (badgeItems.length === 0) return;
     if (compareSeverity(maxSeverity, prefSeverityMap[prefId] || 'normal') > 0) {
       prefSeverityMap[prefId] = maxSeverity;
     }
@@ -610,7 +649,29 @@ export function parseJmaWarningMapData(
     });
   };
 
-  for (const officeBlock of rawArray) {
+  // r8/map.json holds one report per (発表官署 × 電文種別 VPWW55..61). Each kind (大雨/土砂災害/高潮/風/波浪/
+  // 大雪/その他) is independent, so all kinds are merged, but if JMA ever ships more than one report for the
+  // same office + kind, only the newest one is authoritative (older ones may contain lifted warnings).
+  const latestByKey = new Map<string, Record<string, any>>();
+  const passthrough: Array<Record<string, any>> = [];
+  for (const block of Array.isArray(rawArray) ? rawArray : []) {
+    if (!block || typeof block !== 'object') continue;
+    const office = String(block.publishingOffice || '');
+    const kind = String(block.dataTypeCode || '');
+    if (!office || !kind || !block.warning) {
+      passthrough.push(block);
+      continue;
+    }
+    const key = `${office}|${kind}`;
+    const prev = latestByKey.get(key);
+    const t = Date.parse(String(block.reportDatetime || '')) || 0;
+    const pt = prev ? Date.parse(String(prev.reportDatetime || '')) || 0 : -1;
+    if (!prev || t >= pt) latestByKey.set(key, block);
+  }
+  const effectiveBlocks = [...latestByKey.values(), ...passthrough];
+
+  for (const officeBlock of effectiveBlocks) {
+    if (officeBlock.infoType === '取消') continue;
     const reportTime =
       String(
         officeBlock.reportDatetime ||
@@ -1546,23 +1607,26 @@ export function getNextSubRegion(currentSubRegion: RegionId): RegionId {
 
 export function computeWarningSummary(warnings: RegionalWarningItem[]): {
   specialCount: number;
+  dangerCount: number;
   warningCount: number;
   advisoryCount: number;
   normalCount: number;
 } {
   let specialCount = 0;
+  let dangerCount = 0;
   let warningCount = 0;
   let advisoryCount = 0;
   let normalCount = 0;
 
   for (const w of warnings) {
     if (w.severity === 'special') specialCount++;
+    else if (w.severity === 'danger') dangerCount++;
     else if (w.severity === 'warning') warningCount++;
     else if (w.severity === 'advisory') advisoryCount++;
     else normalCount++;
   }
 
-  return { specialCount, warningCount, advisoryCount, normalCount };
+  return { specialCount, dangerCount, warningCount, advisoryCount, normalCount };
 }
 
 const TEMP_COLOR_STOPS: Array<{ temp: number; rgb: [number, number, number] }> = [
@@ -2533,7 +2597,7 @@ export function getActiveSevereWarningDivisions(
   warnings: RegionalWarningItem[]
 ): RegionalWarningItem[] {
   return warnings
-    .filter((w) => w.severity === 'warning' || w.severity === 'special')
+    .filter((w) => isWarningOrAbove(w.severity))
     .sort((a, b) => {
       const orderA = a.divisionCode
         ? (WARNING_DIVISIONS[a.divisionCode]?.order ?? 999)

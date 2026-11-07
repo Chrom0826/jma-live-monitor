@@ -61,8 +61,16 @@ function renderSeverityDot(severity: WarningSeverity) {
   if (severity === 'special') {
     return (
       <span
-        className="inline-block w-3 h-3 rounded-full bg-purple-600 border border-purple-300 shrink-0"
+        className="inline-block w-3 h-3 rounded-full bg-[#4C1D95] border border-purple-300 shrink-0"
         title="特別警報"
+      />
+    );
+  }
+  if (severity === 'danger') {
+    return (
+      <span
+        className="inline-block w-3 h-3 rounded-full bg-[#C026D3] border border-fuchsia-300 shrink-0"
+        title="危険警報"
       />
     );
   }
@@ -447,15 +455,31 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         ? 'bg-sky-600 text-white font-extrabold'
                         : w.severity === 'special'
                           ? 'bg-purple-900 text-white'
-                          : w.severity === 'warning'
+                          : w.severity === 'danger'
+                            ? 'bg-fuchsia-900 text-white'
+                            : w.severity === 'warning'
                             ? 'bg-red-900/90 text-white'
                             : 'bg-[#3E434F] text-white'
                     }`}
                   >
                     <span>{w.prefecture}</span>
-                    {(w.severity === 'warning' || w.severity === 'special') && (
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs">
-                        {w.severity === 'special' ? '特別警報' : '警報'}
+                    {(w.severity === 'warning' ||
+                      w.severity === 'danger' ||
+                      w.severity === 'special') && (
+                      <span
+                        className={`text-[10px] font-mono px-1.5 py-0.2 text-white rounded-xs ${
+                          w.severity === 'special'
+                            ? 'bg-purple-700'
+                            : w.severity === 'danger'
+                              ? 'bg-fuchsia-600'
+                              : 'bg-red-600'
+                        }`}
+                      >
+                        {w.severity === 'special'
+                          ? '特別警報'
+                          : w.severity === 'danger'
+                            ? '危険警報'
+                            : '警報'}
                       </span>
                     )}
                   </div>
@@ -1271,11 +1295,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {effectiveScene === 'warnings' ? (
           <div className="flex items-center justify-between text-[11px] font-bold text-white whitespace-nowrap">
             <span className="inline-flex items-center gap-1">
-              <span className="inline-block w-2.5 h-2.5 rounded-full bg-purple-600 border border-purple-300" />
+              <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#4C1D95] border border-purple-300" />
               特別警報
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="inline-block w-2.5 h-2.5 rounded-full bg-indigo-500" />
+              <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#C026D3]" />
               危険警報
             </span>
             <span className="inline-flex items-center gap-1">

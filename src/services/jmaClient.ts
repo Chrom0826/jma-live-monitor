@@ -298,20 +298,38 @@ async function fetchNowcastAndLightning(): Promise<{
  * (with fallback to `warning/data/warning/map.json`) along with `area.json` and `xy.json`
  * so both 57-division warnings AND municipality-level (`市区町村単位`) polygons are accurately colored and listed.
  */
-async function fetchLiveJmaWarnings(): Promise<{
+type LiveWarningsResult = {
   warnings: RegionalWarningItem[];
   municipalityWarnings: RegionalWarningItem[];
   muniSeverityMap: Record<string, WarningSeverity>;
   prefSeverityMap: Record<number, WarningSeverity>;
   live: boolean;
-}> {
+};
+
+/** Last successfully parsed LIVE warnings (used instead of mock data when a poll fails). */
+let lastLiveWarnings: LiveWarningsResult | null = null;
+
+function offlineWarningsFallback(): LiveWarningsResult {
+  // Never mix demo data into a live session: once live data was received, keep showing it.
+  if (lastLiveWarnings) return { ...lastLiveWarnings, live: false };
+  return {
+    warnings: INITIAL_WARNINGS,
+    municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
+    muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
+    prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
+    live: false,
+  };
+}
+
+async function fetchLiveJmaWarnings(): Promise<LiveWarningsResult> {
   try {
     const [resR8, areaData, xyData] = await Promise.all([
-      fetchWithTimeout(JMA_WARNING_MAP_URL, 4500).catch(() => null),
+      // r8/map.json is ~1 MB: allow enough time instead of silently falling back to demo data
+      fetchWithTimeout(JMA_WARNING_MAP_URL, 15000).catch(() => null),
       fetchSharedJmaAreaConst(),
       cachedJmaXyConst
         ? Promise.resolve(cachedJmaXyConst)
-        : fetchWithTimeout(JMA_XY_CONST_URL, 4500)
+        : fetchWithTimeout(JMA_XY_CONST_URL, 10000)
             .then((r) => (r.ok ? r.json() : null))
             .catch(() => null),
     ]);
@@ -320,51 +338,28 @@ async function fetchLiveJmaWarnings(): Promise<{
     const res =
       resR8 && resR8.ok
         ? resR8
-        : await fetchWithTimeout(JMA_WARNING_MAP_LEGACY_URL, 4500).catch(
+        : await fetchWithTimeout(JMA_WARNING_MAP_LEGACY_URL, 10000).catch(
             () => null
           );
 
-    if (!res || !res.ok) {
-      return {
-        warnings: INITIAL_WARNINGS,
-        municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
-        muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
-        prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
-        live: false,
-      };
-    }
+    if (!res || !res.ok) return offlineWarningsFallback();
     const rawJson = await res.json();
-    const parsed = parseJmaWarningMapData(rawJson, areaData, xyData);
-    if (parsed.warnings.length > 0) {
-      return {
-        warnings: parsed.warnings,
-        municipalityWarnings:
-          parsed.municipalityWarnings.length > 0
-            ? parsed.municipalityWarnings
-            : INITIAL_MUNICIPALITY_WARNINGS,
-        muniSeverityMap:
-          Object.keys(parsed.muniSeverityMap).length > 0
-            ? parsed.muniSeverityMap
-            : INITIAL_MUNI_SEVERITY_MAP,
-        prefSeverityMap: parsed.prefSeverityMap,
-        live: true,
-      };
+    if (!Array.isArray(rawJson) || rawJson.length === 0) {
+      return offlineWarningsFallback();
     }
-    return {
-      warnings: INITIAL_WARNINGS,
-      municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
-      muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
-      prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
-      live: false,
+    const parsed = parseJmaWarningMapData(rawJson, areaData, xyData);
+    // A successful fetch is authoritative even when nothing is in effect nationwide (0 warnings).
+    const result: LiveWarningsResult = {
+      warnings: parsed.warnings,
+      municipalityWarnings: parsed.municipalityWarnings,
+      muniSeverityMap: parsed.muniSeverityMap,
+      prefSeverityMap: parsed.prefSeverityMap,
+      live: true,
     };
+    lastLiveWarnings = result;
+    return result;
   } catch {
-    return {
-      warnings: INITIAL_WARNINGS,
-      municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
-      muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
-      prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
-      live: false,
-    };
+    return offlineWarningsFallback();
   }
 }
 
