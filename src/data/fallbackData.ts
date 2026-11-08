@@ -2849,7 +2849,7 @@ export const INITIAL_TYPHOONS: TyphoonReport[] = [
         location: '日本の東',
         probabilityCircleRadiusKm: 0,
         galeRadiusKm: 390,
-        stormRadiusKm: 0,
+        stormRadiusKm: 110,
       },
       {
         partLabel: '予報 12時間後',
@@ -2869,7 +2869,7 @@ export const INITIAL_TYPHOONS: TyphoonReport[] = [
         location: '日本の東',
         probabilityCircleRadiusKm: 85,
         galeRadiusKm: 350,
-        stormRadiusKm: 0,
+        stormRadiusKm: 95,
       },
       {
         partLabel: '予報 24時間後',
@@ -2889,7 +2889,7 @@ export const INITIAL_TYPHOONS: TyphoonReport[] = [
         location: '千島の東',
         probabilityCircleRadiusKm: 120,
         galeRadiusKm: 320,
-        stormRadiusKm: 0,
+        stormRadiusKm: 80,
       },
     ],
   },

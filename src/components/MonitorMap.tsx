@@ -27,6 +27,7 @@ import {
   computeEarthquakeAreaScales,
   computeEarthquakeCityScales,
   computeTyphoonConeEnvelope,
+  computeTyphoonStormEnvelope,
   dissolveGeoJsonByGroup,
   formatCompactTyphoonCenterLabel,
   formatCompactTyphoonTime,
@@ -1331,6 +1332,19 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           latLonToNormMercator(lat, lon)
         );
 
+        const stormEnvelope = !extratropical
+          ? computeTyphoonStormEnvelope(pts)
+          : { polygon: [], leftEdge: [], rightEdge: [] };
+        const stormPolygonNorm = stormEnvelope.polygon.map(([lat, lon]) =>
+          latLonToNormMercator(lat, lon)
+        );
+        const stormLeftNorm = stormEnvelope.leftEdge.map(([lat, lon]) =>
+          latLonToNormMercator(lat, lon)
+        );
+        const stormRightNorm = stormEnvelope.rightEdge.map(([lat, lon]) =>
+          latLonToNormMercator(lat, lon)
+        );
+
         return {
           tc,
           extratropical,
@@ -1340,6 +1354,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           conePolygonNorm,
           coneLeftNorm,
           coneRightNorm,
+          stormPolygonNorm,
+          stormLeftNorm,
+          stormRightNorm,
           centerLabel,
           badgeW,
           badgeH,
@@ -2385,6 +2402,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             conePolygonNorm,
             coneLeftNorm,
             coneRightNorm,
+            stormPolygonNorm,
             centerLabel,
             badgeW,
             badgeH,
@@ -2487,7 +2505,32 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.restore();
           }
 
-          // 1. Forecast Cone Envelope
+          // 1. Connected Storm Warning Area Envelope (暴風警戒域の包絡線: Single Continuous Shape)
+          if (!extratropical && stormPolygonNorm && stormPolygonNorm.length >= 4) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(
+              stormPolygonNorm[0].normX * worldScale - originX,
+              stormPolygonNorm[0].normY * worldScale - originY
+            );
+            for (let i = 1; i < stormPolygonNorm.length; i++) {
+              ctx.lineTo(
+                stormPolygonNorm[i].normX * worldScale - originX,
+                stormPolygonNorm[i].normY * worldScale - originY
+              );
+            }
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.20)';
+            ctx.fill();
+
+            ctx.setLineDash([6, 4]);
+            ctx.strokeStyle = '#EF4444';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // 2. Forecast Cone Envelope
           if (conePolygonNorm.length >= 4) {
             ctx.save();
             ctx.beginPath();
@@ -2590,25 +2633,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             if (pn.probNormRadius <= 0) continue;
             const px = pn.normX * worldScale - originX;
             const py = pn.normY * worldScale - originY;
-
-            if (pn.pt.stormRadiusKm > 0 && pn.stormProbNormRadius > 0) {
-              ctx.save();
-              ctx.setLineDash([5, 4]);
-              ctx.beginPath();
-              ctx.arc(
-                px,
-                py,
-                pn.stormProbNormRadius * worldScale,
-                0,
-                Math.PI * 2
-              );
-              ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
-              ctx.fill();
-              ctx.strokeStyle = '#EF4444';
-              ctx.lineWidth = 1.8;
-              ctx.stroke();
-              ctx.restore();
-            }
 
             ctx.save();
             ctx.setLineDash([5, 5]);

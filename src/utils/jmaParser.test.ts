@@ -30,6 +30,7 @@ import {
   classifyXmlEntryScene,
   computeAmedasTop5Rankings,
   computeTyphoonConeEnvelope,
+  computeTyphoonStormEnvelope,
   computeWarningSummary,
   DEFAULT_NORMAL_LOOP_SCENES,
   filterNonOverlappingPoints,
@@ -216,6 +217,15 @@ test('parseJmaTyphoonSpecifications parses JMA specifications.json and computeTy
   assert.equal(cone.leftEdge.length, 2);
   assert.equal(cone.rightEdge.length, 2);
   assert.equal(cone.polygon.length, 4);
+
+  // Verify storm warning envelope connecting consecutive storm circles into a single shape
+  const stormEnv = computeTyphoonStormEnvelope([
+    { lat: 31.3, lon: 144.2, stormRadiusKm: 110, probabilityCircleRadiusKm: 0 } as any,
+    { lat: 37.7, lon: 152.2, stormRadiusKm: 95, probabilityCircleRadiusKm: 85 } as any,
+  ]);
+  assert.ok(stormEnv.polygon.length >= 4);
+  assert.ok(stormEnv.leftEdge.length >= 2);
+  assert.ok(stormEnv.rightEdge.length >= 2);
 });
 
 test('parseJmaWarningMapData maps JMA area codes to prefecture severity choropleth', () => {

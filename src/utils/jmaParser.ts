@@ -1010,6 +1010,167 @@ export function computeTyphoonConeEnvelope(points: TyphoonTrackPoint[]): {
   ];
 
   return { leftEdge, rightEdge, polygon };
+}
+/**
+ * Computes the continuous connected storm warning area envelope (暴風警戒域の包絡線)
+ * connecting consecutive track points that have storm-force wind radii (stormRadiusKm > 0),
+ * forming a single unified polygon shape with tangent boundaries and rounded end/start caps.
+ */
+export function computeTyphoonStormEnvelope(points: TyphoonTrackPoint[]): {
+  leftEdge: Array<[number, number]>;
+  rightEdge: Array<[number, number]>;
+  polygon: Array<[number, number]>;
+} {
+  const stormCircles: Array<{ lat: number; lon: number; rKm: number }> = [];
+  for (let i = 0; i < points.length; i++) {
+    const pt = points[i];
+    if (i === 0) {
+      const rKm = pt.stormRadiusKm || 0;
+      if (rKm > 0) {
+        stormCircles.push({ lat: pt.lat, lon: pt.lon, rKm });
+      }
+    } else {
+      if (pt.stormRadiusKm > 0) {
+        const rKm = (pt.probabilityCircleRadiusKm || 0) + pt.stormRadiusKm;
+        if (rKm > 0) {
+          stormCircles.push({ lat: pt.lat, lon: pt.lon, rKm });
+        }
+      }
+    }
+  }
+
+  if (stormCircles.length < 2) {
+    return { leftEdge: [], rightEdge: [], polygon: [] };
+  }
+
+  const M = stormCircles.length;
+  const segTangents: Array<{
+    theta: number;
+    betaLeft: number;
+    betaRight: number;
+    tALeft: [number, number];
+    tBLeft: [number, number];
+    tARight: [number, number];
+    tBRight: [number, number];
+    cosPhi: number;
+  }> = [];
+
+  for (let i = 0; i < M - 1; i++) {
+    const A = stormCircles[i];
+    const B = stormCircles[i + 1];
+
+    const phiAvg = ((A.lat + B.lat) / 2) * (Math.PI / 180);
+    const cosPhi = Math.max(0.2, Math.cos(phiAvg));
+
+    const dx = (B.lon - A.lon) * cosPhi * 111.32;
+    const dy = (B.lat - A.lat) * 111.32;
+    const d = Math.hypot(dx, dy) || 1;
+
+    const theta = Math.atan2(dy, dx);
+    const deltaR = A.rKm - B.rKm;
+    const sinAlpha = Math.max(-0.999, Math.min(0.999, deltaR / d));
+    const alpha = Math.asin(sinAlpha);
+
+    const betaLeft = theta + Math.PI / 2 - alpha;
+    const betaRight = theta - Math.PI / 2 + alpha;
+
+    const toLatLon = (
+      center: { lat: number; lon: number },
+      tx: number,
+      ty: number,
+      cPhi: number
+    ): [number, number] => [
+      Number((center.lat + ty / 111.32).toFixed(4)),
+      Number((center.lon + tx / (111.32 * cPhi)).toFixed(4)),
+    ];
+
+    const tALeft = toLatLon(A, A.rKm * Math.cos(betaLeft), A.rKm * Math.sin(betaLeft), cosPhi);
+    const tBLeft = toLatLon(B, B.rKm * Math.cos(betaLeft), B.rKm * Math.sin(betaLeft), cosPhi);
+    const tARight = toLatLon(A, A.rKm * Math.cos(betaRight), A.rKm * Math.sin(betaRight), cosPhi);
+    const tBRight = toLatLon(B, B.rKm * Math.cos(betaRight), B.rKm * Math.sin(betaRight), cosPhi);
+
+    segTangents.push({
+      theta,
+      betaLeft,
+      betaRight,
+      tALeft,
+      tBLeft,
+      tARight,
+      tBRight,
+      cosPhi,
+    });
+  }
+
+  const leftEdge: Array<[number, number]> = [];
+  const rightEdge: Array<[number, number]> = [];
+
+  // 1. Build Left Edge from circle 0 to circle M-1
+  for (let i = 0; i < M - 1; i++) {
+    const seg = segTangents[i];
+    leftEdge.push(seg.tALeft);
+    leftEdge.push(seg.tBLeft);
+  }
+
+  // 2. End Cap around Circle M-1
+  const lastSeg = segTangents[M - 2];
+  const lastCircle = stormCircles[M - 1];
+  const lastCosPhi = lastSeg.cosPhi;
+  const endCap: Array<[number, number]> = [];
+
+  const startAng = lastSeg.betaLeft;
+  let endAng = lastSeg.betaRight;
+  while (endAng > startAng) endAng -= 2 * Math.PI;
+
+  const numCapSteps = 12;
+  for (let s = 1; s < numCapSteps; s++) {
+    const ang = startAng + (endAng - startAng) * (s / numCapSteps);
+    const tx = lastCircle.rKm * Math.cos(ang);
+    const ty = lastCircle.rKm * Math.sin(ang);
+    endCap.push([
+      Number((lastCircle.lat + ty / 111.32).toFixed(4)),
+      Number((lastCircle.lon + tx / (111.32 * lastCosPhi)).toFixed(4)),
+    ]);
+  }
+
+  // 3. Build Right Edge from circle M-1 back to circle 0
+  for (let i = M - 2; i >= 0; i--) {
+    const seg = segTangents[i];
+    rightEdge.push(seg.tBRight);
+    rightEdge.push(seg.tARight);
+  }
+
+  // 4. Start Cap around Circle 0
+  const firstSeg = segTangents[0];
+  const firstCircle = stormCircles[0];
+  const firstCosPhi = firstSeg.cosPhi;
+  const startCap: Array<[number, number]> = [];
+
+  const sStartAng = firstSeg.betaRight;
+  let sEndAng = firstSeg.betaLeft;
+  while (sEndAng > sStartAng) sEndAng -= 2 * Math.PI;
+
+  for (let s = 1; s < numCapSteps; s++) {
+    const ang = sStartAng + (sEndAng - sStartAng) * (s / numCapSteps);
+    const tx = firstCircle.rKm * Math.cos(ang);
+    const ty = firstCircle.rKm * Math.sin(ang);
+    startCap.push([
+      Number((firstCircle.lat + ty / 111.32).toFixed(4)),
+      Number((firstCircle.lon + tx / (111.32 * firstCosPhi)).toFixed(4)),
+    ]);
+  }
+
+  const polygon: Array<[number, number]> = [
+    ...leftEdge,
+    ...endCap,
+    ...rightEdge,
+    ...startCap,
+  ];
+
+  return {
+    leftEdge,
+    rightEdge,
+    polygon,
+  };
 }
 
 /**
