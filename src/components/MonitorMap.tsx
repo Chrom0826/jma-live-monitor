@@ -4,7 +4,9 @@ import {
   AmedasMetric,
   AmedasStationData,
   EarthquakeReport,
+  EewDisplayMode,
   EewReport,
+  ForecastViewMode,
   InterruptKind,
   MapViewportState,
   MonitorDataBundle,
@@ -39,6 +41,7 @@ import {
   inferRegionFromCoords,
   isExtratropicalCyclone,
   PREFECTURE_NAMES,
+  renderBroadcastWeatherSvg,
   resolveWarningDivision,
   selectNonOverlappingAmedasStations,
   WARNING_DIVISIONS,
@@ -46,10 +49,13 @@ import {
 } from '../utils/jmaParser';
 import {
   computeEewWaveRadiiKm,
+  computeEewAreaScales,
   formatEewArrivalLabel,
   formatEewScaleRange,
+  getLpgmClassStyle,
   getTsunamiGradeStyle,
   isEewStillActive,
+  MAJOR_CITIES,
 } from '../utils/eewTsunami';
 
 let cachedClass20GeoJson: any = null;
@@ -396,13 +402,21 @@ interface MonitorMapProps {
   data: MonitorDataBundle;
   selectedEarthquake: EarthquakeReport;
   selectedTyphoon: TyphoonReport;
+  typhoonPatrolStep?: number;
   activeVolcano: VolcanoStatusItem;
   activeTsunamiStation?: TsunamiStationItem;
   amedasMetric: AmedasMetric;
   onChangeAmedasMetric: (metric: AmedasMetric) => void;
+  forecastViewMode?: ForecastViewMode;
+  onChangeForecastViewMode?: (mode: ForecastViewMode) => void;
+  forecast3hIndex?: number;
+  onChangeForecast3hIndex?: (idx: number) => void;
   onViewportChange?: (viewport: MapViewportState) => void;
   interruptKind: InterruptKind;
   isLoopPaused: boolean;
+  isRightPanelHidden?: boolean;
+  eewDisplayMode?: EewDisplayMode;
+  onChangeEewDisplayMode?: (mode: EewDisplayMode) => void;
   onSceneComplete: () => void;
 }
 
@@ -502,7 +516,7 @@ const SCENE_CAMERA_TARGETS: Record<
   typhoon: { center: [37.5, 149.0], zoom: 4 },
   weather_info: NATIONAL_CAMERA_VIEW,
   amedas: { center: [37.5, 137.5], zoom: 5.2 },
-  forecast: NATIONAL_CAMERA_VIEW,
+  forecast: { center: [35.5, 137.0], zoom: 4.8 },
   volcano: { center: [31.585, 130.657], zoom: 9 },
   tsunami: { center: [36.8, 137.5], zoom: 5.2 },
   earthquake: { center: [36.4, 140.8], zoom: 7 },
@@ -517,12 +531,20 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   data,
   selectedEarthquake,
   selectedTyphoon,
+  typhoonPatrolStep = 0,
   activeVolcano,
   amedasMetric,
   onChangeAmedasMetric,
+  forecastViewMode = 'today_3h',
+  onChangeForecastViewMode,
+  forecast3hIndex = 2,
+  onChangeForecast3hIndex,
   onViewportChange,
   interruptKind,
   isLoopPaused,
+  isRightPanelHidden = false,
+  eewDisplayMode = 'intensity',
+  onChangeEewDisplayMode,
   onSceneComplete,
 }) => {
   const baseMapCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -608,6 +630,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           : interruptKind === 'typhoon'
             ? 'typhoon'
             : activeScene;
+
+  const isSingleTyphoonMode = useMemo(() => {
+    const total = data.typhoons.length > 0 ? data.typhoons.length : 1;
+    return (
+      effectiveScene === 'typhoon' &&
+      typeof typhoonPatrolStep === 'number' &&
+      typhoonPatrolStep >= 1 &&
+      typhoonPatrolStep <= total
+    );
+  }, [effectiveScene, typhoonPatrolStep, data.typhoons.length]);
 
   // Compile World GeoJSON into normalized Web Mercator coordinates once
   useEffect(() => {
@@ -930,6 +962,73 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     earthquakeGeoJsonData,
     class20GeoJsonData,
     compiledVersion,
+  ]);
+
+  // Pre-compile active EEW forecast intensity choropleth polygons & major city labels
+  // Matches JMA 188 subdivision areas (earthquake.json) exactly like the TV broadcast EEW map
+  const preCompiledEew = useMemo(() => {
+    if (!activeEew || !isEewStillActive(activeEew)) {
+      return { areaBuckets: [], cityLabels: [] };
+    }
+
+    const scaleMap = computeEewAreaScales(activeEew);
+    const areaByScale = new Map<number, CompiledGeoShape[]>();
+    const eqShapes = earthquakeCompiledRef.current;
+
+    for (let i = 0; i < eqShapes.length; i++) {
+      const sh = eqShapes[i];
+      const scale = scaleMap.get(sh.id) || 0;
+      if (scale >= 10) {
+        let list = areaByScale.get(scale);
+        if (!list) {
+          list = [];
+          areaByScale.set(scale, list);
+        }
+        list.push(sh);
+      }
+    }
+
+    const areaBuckets = Array.from(areaByScale.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([scale, shapes]) => ({
+        scale,
+        hex: getSeismicScaleStyle(scale).hex,
+        shapes,
+      }));
+
+    // Extract nearby major cities within ~500km of EEW epicenter for clean background context
+    const eewLat =
+      typeof activeEew.lat === 'number' && !Number.isNaN(activeEew.lat)
+        ? activeEew.lat
+        : selectedEarthquake.lat;
+    const eewLon =
+      typeof activeEew.lon === 'number' && !Number.isNaN(activeEew.lon)
+        ? activeEew.lon
+        : selectedEarthquake.lon;
+
+    const cityLabels = MAJOR_CITIES.filter((city) => {
+      const dLat = city.lat - eewLat;
+      const dLon = (city.lon - eewLon) * Math.cos((eewLat * Math.PI) / 180);
+      const distSq = dLat * dLat + dLon * dLon;
+      return distSq <= 5.0 * 5.0; // ~500km radius
+    }).map((city) => {
+      const { normX, normY } = latLonToNormMercator(city.lat, city.lon);
+      return {
+        name: city.name,
+        normX,
+        normY,
+      };
+    });
+
+    return {
+      areaBuckets,
+      cityLabels,
+    };
+  }, [
+    activeEew,
+    compiledVersion,
+    selectedEarthquake.lat,
+    selectedEarthquake.lon,
   ]);
 
   // Pre-compile warning division label normalized Mercator coordinates once
@@ -1460,10 +1559,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             bCtx.fillStyle = '#232731';
             bCtx.fill();
 
-            // 2. Batched Seismic-Intensity Colored Polygons (Municipality level when zoom >= 6.8, 188-Area level when zoom < 6.8)
+            // 2. Batched Seismic-Intensity Colored Polygons (EEW Forecast Choropleth or Confirmed Intensity)
+            const hasActiveEew = Boolean(
+              activeEew && isEewStillActive(activeEew)
+            );
             const isZoomedIn = currentZoom >= 6.8;
-            const buckets =
-              isZoomedIn && preCompiledEarthquake.cityBuckets.length > 0
+            const buckets = hasActiveEew
+              ? preCompiledEew.areaBuckets
+              : isZoomedIn && preCompiledEarthquake.cityBuckets.length > 0
                 ? preCompiledEarthquake.cityBuckets
                 : preCompiledEarthquake.areaBuckets;
 
@@ -1479,11 +1582,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               }
               if (anyInBucket) {
                 bCtx.fillStyle = bucket.hex;
-                bCtx.globalAlpha = 0.55;
+                bCtx.globalAlpha = hasActiveEew ? 0.65 : 0.55;
                 bCtx.fill();
                 bCtx.globalAlpha = 1.0;
                 bCtx.strokeStyle = bucket.hex;
-                bCtx.lineWidth = isZoomedIn ? 1.5 : 1.8;
+                bCtx.lineWidth = hasActiveEew ? 1.8 : isZoomedIn ? 1.5 : 1.8;
                 bCtx.stroke();
               }
             }
@@ -1823,97 +1926,148 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       // 3. Earthquake 60fps Canvas Epicenter & Non-Overlapping Station Badges:
       //    Replaces heavy DOM `L.divIcon` markers so zooming in/out on earthquakes is 60fps with zero lag!
       if (effectiveScene === 'earthquake') {
-        // 3a. Draw Epicenter Cross (`✕`) when not overridden by active EEW
-        if (!activeEew) {
-          const epiX = preCompiledEarthquake.epiNorm.normX * worldScale - originX;
-          const epiY = preCompiledEarthquake.epiNorm.normY * worldScale - originY;
-          if (epiX >= -32 && epiX <= width + 32 && epiY >= -32 && epiY <= height + 32) {
+        const hasActiveEew = Boolean(
+          activeEew && isEewStillActive(activeEew)
+        );
+
+        if (hasActiveEew) {
+          // EEW発令中: 画像1のように余計な観測点ピンは非表示にし、主要都市名（「熊本市」「福岡市」等）をクリーンに描画
+          const cities = preCompiledEew.cityLabels;
+          if (cities.length > 0) {
             ctx.save();
-            ctx.lineCap = 'square';
-            ctx.beginPath();
-            ctx.moveTo(epiX - 10, epiY - 10);
-            ctx.lineTo(epiX + 10, epiY + 10);
-            ctx.moveTo(epiX + 10, epiY - 10);
-            ctx.lineTo(epiX - 10, epiY + 10);
+            ctx.font = '800 11px "Noto Sans JP", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
 
-            ctx.strokeStyle = '#0B0D12';
-            ctx.lineWidth = 6.5;
-            ctx.stroke();
-
-            ctx.strokeStyle = '#EF4444';
-            ctx.lineWidth = 3.8;
-            ctx.stroke();
-
-            ctx.strokeStyle = '#FCA5A5';
-            ctx.lineWidth = 1.2;
-            ctx.stroke();
+            for (let i = 0; i < cities.length; i++) {
+              const c = cities[i];
+              const cx = c.normX * worldScale - originX;
+              const cy = c.normY * worldScale - originY;
+              if (
+                cx < -40 ||
+                cx > width + 40 ||
+                cy < -20 ||
+                cy > height + 20
+              ) {
+                continue;
+              }
+              // Dark shadow outline for high contrast on top of colored polygons
+              ctx.strokeStyle = '#05070A';
+              ctx.lineWidth = 3.2;
+              ctx.strokeText(c.name, cx, cy);
+              ctx.fillStyle = '#FFFFFF';
+              ctx.fillText(c.name, cx, cy);
+            }
             ctx.restore();
           }
-        }
-
-        // 3b. Select non-overlapping station badges (sorted descending by scaleCode; allowed to overlap epicenter)
-        const stationBoxes: Array<{
-          x: number;
-          y: number;
-          w: number;
-          h: number;
-          item: (typeof preCompiledEarthquake.sortedStations)[number];
-        }> = [];
-
-        const stations = preCompiledEarthquake.sortedStations;
-        for (let i = 0; i < stations.length; i++) {
-          const item = stations[i];
-          const posX = item.normX * worldScale - originX;
-          const posY = item.normY * worldScale - originY;
-          const w = item.compactW;
-          const h = item.compactH;
-
-          if (posX < -w || posX > width + w || posY < -h || posY > height + h) {
-            continue;
-          }
-
-          let collides = false;
-          for (let j = 0; j < stationBoxes.length; j++) {
-            const b = stationBoxes[j];
+          delete canvas.dataset.renderedEqStationCount;
+        } else {
+          // 3a. Draw Epicenter Cross (`✕`) when hypocenter is known
+          if (!selectedEarthquake.hypocenterUnknown) {
+            const epiX =
+              preCompiledEarthquake.epiNorm.normX * worldScale - originX;
+            const epiY =
+              preCompiledEarthquake.epiNorm.normY * worldScale - originY;
             if (
-              Math.abs(posX - b.x) < (w + b.w) / 2 + 2 &&
-              Math.abs(posY - b.y) < (h + b.h) / 2 + 2
+              epiX >= -32 &&
+              epiX <= width + 32 &&
+              epiY >= -32 &&
+              epiY <= height + 32
             ) {
-              collides = true;
-              break;
+              ctx.save();
+              ctx.lineCap = 'square';
+              ctx.beginPath();
+              ctx.moveTo(epiX - 10, epiY - 10);
+              ctx.lineTo(epiX + 10, epiY + 10);
+              ctx.moveTo(epiX + 10, epiY - 10);
+              ctx.lineTo(epiX - 10, epiY + 10);
+
+              ctx.strokeStyle = '#0B0D12';
+              ctx.lineWidth = 6.5;
+              ctx.stroke();
+
+              ctx.strokeStyle = '#EF4444';
+              ctx.lineWidth = 3.8;
+              ctx.stroke();
+
+              ctx.strokeStyle = '#FCA5A5';
+              ctx.lineWidth = 1.2;
+              ctx.stroke();
+              ctx.restore();
             }
           }
-          if (collides) continue;
-          stationBoxes.push({ x: posX, y: posY, w, h, item });
-        }
 
-        // Draw badges in reverse order so highest intensity badges sit on top
-        ctx.font = '900 11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.lineWidth = 1.5;
+          // 3b. Select non-overlapping station badges (sorted descending by scaleCode; allowed to overlap epicenter)
+          const stationBoxes: Array<{
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+            item: (typeof preCompiledEarthquake.sortedStations)[number];
+          }> = [];
 
-        for (let i = stationBoxes.length - 1; i >= 0; i--) {
-          const { x, y, w, h, item } = stationBoxes[i];
-          const rx = x - w / 2;
-          const ry = y - h / 2;
+          const stations = preCompiledEarthquake.sortedStations;
+          for (let i = 0; i < stations.length; i++) {
+            const item = stations[i];
+            const posX = item.normX * worldScale - originX;
+            const posY = item.normY * worldScale - originY;
+            const w = item.compactW;
+            const h = item.compactH;
 
-          ctx.fillStyle = item.hex;
-          ctx.strokeStyle = '#0B0D12';
-          ctx.beginPath();
-          if (typeof ctx.roundRect === 'function') {
-            ctx.roundRect(rx, ry, w, h, 3);
-          } else {
-            ctx.rect(rx, ry, w, h);
+            if (
+              posX < -w ||
+              posX > width + w ||
+              posY < -h ||
+              posY > height + h
+            ) {
+              continue;
+            }
+
+            let collides = false;
+            for (let j = 0; j < stationBoxes.length; j++) {
+              const b = stationBoxes[j];
+              if (
+                Math.abs(posX - b.x) < (w + b.w) / 2 + 2 &&
+                Math.abs(posY - b.y) < (h + b.h) / 2 + 2
+              ) {
+                collides = true;
+                break;
+              }
+            }
+            if (collides) continue;
+            stationBoxes.push({ x: posX, y: posY, w, h, item });
           }
-          ctx.fill();
-          ctx.stroke();
 
-          ctx.fillStyle = item.badgeText;
-          ctx.fillText(item.st.scaleLabel, x, y + 0.5);
+          // Draw badges in reverse order so highest intensity badges sit on top
+          ctx.font = '900 11px "JetBrains Mono", monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = 1.5;
+
+          for (let i = stationBoxes.length - 1; i >= 0; i--) {
+            const { x, y, w, h, item } = stationBoxes[i];
+            const rx = x - w / 2;
+            const ry = y - h / 2;
+
+            ctx.fillStyle = item.hex;
+            ctx.strokeStyle = '#0B0D12';
+            ctx.beginPath();
+            if (typeof ctx.roundRect === 'function') {
+              ctx.roundRect(rx, ry, w, h, 3);
+            } else {
+              ctx.rect(rx, ry, w, h);
+            }
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = item.badgeText;
+            ctx.fillText(item.st.scaleLabel, x, y + 0.5);
+          }
+
+          setDs(canvas, 'renderedEqStationCount', String(stationBoxes.length));
         }
-
-        setDs(canvas, 'renderedEqStationCount', String(stationBoxes.length));
       } else {
         delete canvas.dataset.renderedEqStationCount;
       }
@@ -1924,6 +2078,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       if (effectiveScene === 'typhoon') {
         for (let tIdx = 0; tIdx < preCompiledTyphoons.length; tIdx++) {
           const item = preCompiledTyphoons[tIdx];
+          if (isSingleTyphoonMode && item.tc.id !== selectedTyphoon.id) {
+            continue;
+          }
           const {
             extratropical,
             ptsNorm,
@@ -2255,8 +2412,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     preCompiledMunicipalityLabelsByDiv,
     preCompiledDivisionLabels,
     preCompiledTyphoons,
+    isSingleTyphoonMode,
+    selectedTyphoon.id,
     divHasActiveWarningMap,
     preCompiledEarthquake,
+    preCompiledEew,
     activeEew,
     data.warnings,
     data.muniSeverityMap,
@@ -2792,11 +2952,67 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         typeof activeEew.lon === 'number' &&
         !Number.isNaN(activeEew.lon)
       ) {
+        // EEW camera: Center directly on epicenter with optimal zoom (7.0)
+        // so all affected areas around the epicenter are centered in the visible viewport
         return {
           center: [activeEew.lat, activeEew.lon],
-          zoom: 7.2,
+          zoom: 7.0,
         };
       }
+
+      // When hypocenter coordinates are known:
+      // The epicenter is the primary focal point of the earthquake report!
+      // Center camera directly on the hypocenter [lat, lon] so it is ALWAYS displayed
+      // perfectly in the center of the viewport (not pushed to the right side by far-off scale 1 points).
+      if (
+        typeof selectedEarthquake.lat === 'number' &&
+        typeof selectedEarthquake.lon === 'number' &&
+        !Number.isNaN(selectedEarthquake.lat) &&
+        !Number.isNaN(selectedEarthquake.lon) &&
+        !selectedEarthquake.hypocenterUnknown
+      ) {
+        const validStations = selectedEarthquake.stations.filter(
+          (s): s is typeof s & { lat: number; lon: number } =>
+            typeof s.lat === 'number' &&
+            typeof s.lon === 'number' &&
+            !Number.isNaN(s.lat) &&
+            !Number.isNaN(s.lon)
+        );
+
+        let targetZoom = 7.0;
+        if (validStations.length > 0) {
+          // Measure spatial spread of noticeable shaking (scale >= 3 or top shaking stations) around epicenter
+          const significantStations = validStations.filter(
+            (s) => (s.scaleCode ?? 0) >= 30
+          );
+          const focusStations =
+            significantStations.length >= 3 ? significantStations : validStations;
+
+          const dLats = focusStations.map((s) => Math.abs(s.lat - selectedEarthquake.lat));
+          const dLons = focusStations.map((s) => Math.abs(s.lon - selectedEarthquake.lon));
+          const maxDLat = Math.max(...dLats);
+          const maxDLon = Math.max(...dLons);
+          const spread = Math.max(maxDLat, maxDLon * 0.8);
+
+          if (spread <= 0.8) {
+            targetZoom = 7.6;
+          } else if (spread <= 1.8) {
+            targetZoom = 7.1;
+          } else if (spread <= 3.2) {
+            targetZoom = 6.6;
+          } else {
+            targetZoom = 5.8;
+          }
+        }
+
+        return {
+          center: [selectedEarthquake.lat, selectedEarthquake.lon],
+          zoom: targetZoom,
+        };
+      }
+
+      // Fallback when hypocenter is unknown (e.g. preliminary 震度速報):
+      // Center on the centroid of observed stations
       const validStations = selectedEarthquake.stations.filter(
         (s): s is typeof s & { lat: number; lon: number } =>
           typeof s.lat === 'number' &&
@@ -2805,14 +3021,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           !Number.isNaN(s.lon)
       );
       if (validStations.length > 0) {
-        const lats = [
-          selectedEarthquake.lat,
-          ...validStations.map((s) => s.lat),
-        ];
-        const lons = [
-          selectedEarthquake.lon,
-          ...validStations.map((s) => s.lon),
-        ];
+        const lats = validStations.map((s) => s.lat);
+        const lons = validStations.map((s) => s.lon);
         const minLat = Math.min(...lats);
         const maxLat = Math.max(...lats);
         const minLon = Math.min(...lons);
@@ -2821,18 +3031,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         const lonSpan = maxLon - minLon;
         const targetZoom =
           latSpan <= 1.2 && lonSpan <= 1.5
-            ? 8
-            : latSpan <= 3.8 && lonSpan <= 4.8
-              ? 7
-              : 6;
+            ? 7.6
+            : latSpan <= 3.2 && lonSpan <= 4.0
+              ? 6.8
+              : 6.0;
         return {
           center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2],
           zoom: targetZoom,
         };
       }
       return {
-        center: [selectedEarthquake.lat, selectedEarthquake.lon],
-        zoom: 7,
+        center: [36.2, 137.8],
+        zoom: 6.8,
       };
     }
     if (effectiveScene === 'volcano') {
@@ -2961,8 +3171,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       };
     }
     if (effectiveScene === 'typhoon') {
-      const targetList =
-        data.typhoons.length > 0 ? data.typhoons : [selectedTyphoon];
+      const targetList = isSingleTyphoonMode
+        ? [selectedTyphoon]
+        : data.typhoons.length > 0
+        ? data.typhoons
+        : [selectedTyphoon];
       const allLats: number[] = [];
       const allLons: number[] = [];
       for (const tc of targetList) {
@@ -2978,17 +3191,31 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         }
       }
       if (allLats.length > 0) {
-        const minLat = Math.min(...allLats, 30.0);
-        const maxLat = Math.max(...allLats, 45.5);
-        const minLon = Math.min(...allLons, 132.0);
-        const maxLon = Math.max(...allLons);
-        const latSpan = maxLat - minLat;
-        const lonSpan = maxLon - minLon;
-        const targetZoom = latSpan > 11 || lonSpan > 18 ? 4 : 5;
-        return {
-          center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2 + 2.0],
-          zoom: targetZoom,
-        };
+        if (isSingleTyphoonMode) {
+          const minLat = Math.min(...allLats);
+          const maxLat = Math.max(...allLats);
+          const minLon = Math.min(...allLons);
+          const maxLon = Math.max(...allLons);
+          const latSpan = maxLat - minLat;
+          const lonSpan = maxLon - minLon;
+          const targetZoom = latSpan > 8 || lonSpan > 12 ? 4.8 : latSpan > 4 || lonSpan > 6 ? 5.4 : 6.0;
+          return {
+            center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2 + 1.2],
+            zoom: targetZoom,
+          };
+        } else {
+          const minLat = Math.min(...allLats, 30.0);
+          const maxLat = Math.max(...allLats, 45.5);
+          const minLon = Math.min(...allLons, 132.0);
+          const maxLon = Math.max(...allLons);
+          const latSpan = maxLat - minLat;
+          const lonSpan = maxLon - minLon;
+          const targetZoom = latSpan > 11 || lonSpan > 18 ? 4 : 5;
+          return {
+            center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2 + 2.0],
+            zoom: targetZoom,
+          };
+        }
       }
     }
     if (effectiveScene === 'warnings' && activeWarningDivision) {
@@ -3122,6 +3349,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     selectedEarthquake.lat,
     selectedEarthquake.lon,
     selectedTyphoon.id,
+    isSingleTyphoonMode,
+    typhoonPatrolStep,
     activeVolcano.id,
     activeVolcano.lat,
     activeVolcano.lon,
@@ -3236,26 +3465,119 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         }
       }
     } else if (effectiveScene === 'forecast') {
-      // Dedicated ocean-side callout positions + leader lines so no two city labels ever overlap
+      // Nationwide Layout for the 18 Major Cities (dark theme, true geographic coordinates for all islands):
+      // 旭川・札幌・釧路・秋田・仙台・新潟・金沢・長野・東京・小笠原諸島・名古屋・大阪・広島・高知・福岡・鹿児島・那覇・石垣島
+      // Dedicated callout coordinates positioned close to actual locations.
       const FORECAST_LABEL_COORDS: Record<string, [number, number]> = {
-        'fc-016000': [43.8, 138.2], // 札幌 -> 日本海側北西
-        'fc-040000': [38.6, 143.6], // 仙台 -> 太平洋側東
-        'fc-150000': [39.3, 135.8], // 新潟 -> 日本海側北西
-        'fc-130000': [35.6, 143.1], // 東京 -> 太平洋側東
-        'fc-230000': [32.9, 139.2], // 名古屋 -> 太平洋側南東
-        'fc-270000': [36.9, 133.2], // 大阪 -> 日本海側北西
-        'fc-340000': [31.3, 134.4], // 広島・高松 -> 四国沖南
-        'fc-400000': [33.8, 127.1], // 福岡・鹿児島 -> 東シナ海西
-        'fc-471000': [26.2, 130.6], // 那覇 -> 太平洋側東
+        'fc-012000': [45.15, 142.55], // 旭川 -> 道北沖
+        'fc-016000': [43.55, 138.85], // 札幌 -> 日本海側北西
+        'fc-014100': [42.65, 145.65], // 釧路 -> 道東太平洋側
+        'fc-050000': [40.65, 138.65], // 秋田 -> 日本海側
+        'fc-040000': [38.45, 143.35], // 仙台 -> 三陸・太平洋側東
+        'fc-150000': [38.45, 137.35], // 新潟 -> 佐渡・日本海側
+        'fc-170000': [37.25, 134.45], // 金沢 -> 能登半島北西沖
+        'fc-200000': [36.35, 138.65], // 長野 -> 甲信中央
+        'fc-130000': [35.55, 142.25], // 東京 -> 関東東沖
+        'fc-130040': [27.10, 143.40], // 小笠原諸島 -> 父島東近海（実際の地理的位置）
+        'fc-230000': [32.85, 138.25], // 名古屋 -> 遠州灘沖南東
+        'fc-270000': [34.15, 135.25], // 大阪 -> 紀伊水道近海
+        'fc-340000': [35.75, 131.65], // 広島 -> 山陰沖日本海
+        'fc-390000': [31.95, 133.85], // 高知 -> 土佐湾南沖
+        'fc-400000': [34.25, 128.65], // 福岡 -> 九州北西沖
+        'fc-460100': [31.15, 129.55], // 鹿児島 -> 九州南西沖
+        'fc-471000': [26.40, 129.00], // 那覇 -> 沖縄本島東近海（実際の地理的位置）
+        'fc-474000': [24.40, 122.90], // 石垣島 -> 八重山諸島西近海（実際の地理的位置）
       };
 
-      for (const fc of data.forecasts) {
+      // 18 Major Forecast Cities Priority List for Collision Resolution:
+      // When two cards overlap due to zoom or small screen size,
+      // the higher priority city remains visible and the conflicting lower one is omitted ("かぶるんだったらどちらかを表示しない").
+      const FORECAST_PRIORITY_ORDER: string[] = [
+        'fc-130000', // 東京 (首都・最優先)
+        'fc-270000', // 大阪 (近畿中枢)
+        'fc-230000', // 名古屋 (中京中枢)
+        'fc-400000', // 福岡 (九州中枢)
+        'fc-016000', // 札幌 (道央中枢)
+        'fc-471000', // 那覇 (沖縄県庁)
+        'fc-040000', // 仙台 (東北中枢)
+        'fc-340000', // 広島 (中国中枢)
+        'fc-150000', // 新潟 (信越)
+        'fc-170000', // 金沢 (北陸)
+        'fc-390000', // 高知 (四国)
+        'fc-460100', // 鹿児島 (南九州)
+        'fc-050000', // 秋田 (北東北)
+        'fc-014100', // 釧路 (道東)
+        'fc-012000', // 旭川 (道北)
+        'fc-200000', // 長野 (甲信)
+        'fc-474000', // 石垣島 (先島)
+        'fc-130040', // 小笠原諸島 (島嶼部)
+      ];
+
+      const priorityMap = new Map<string, number>();
+      FORECAST_PRIORITY_ORDER.forEach((id, idx) => {
+        priorityMap.set(id, idx);
+      });
+
+      const sortedForecasts = [...data.forecasts].sort((a, b) => {
+        const pA = priorityMap.get(a.id) ?? 999;
+        const pB = priorityMap.get(b.id) ?? 999;
+        return pA - pB;
+      });
+
+      const map = mapInstanceRef.current;
+      interface CardBox {
+        x1: number;
+        x2: number;
+        y1: number;
+        y2: number;
+      }
+      const placedBoxes: CardBox[] = [];
+      const visibleForecasts: typeof sortedForecasts = [];
+
+      for (const fc of sortedForecasts) {
         const targetPos = FORECAST_LABEL_COORDS[fc.id] || [
           fc.lat + 0.8,
           fc.lon + 1.8,
         ];
 
-        // Leader line from city coordinate to callout box
+        if (map) {
+          const pt = map.latLngToLayerPoint([targetPos[0], targetPos[1]]);
+          // Card dimensions: width 92px, height 49px (anchor center: 46, 24)
+          // Add 3px safety margin on all sides so cards never touch or overlap
+          const box: CardBox = {
+            x1: pt.x - 49,
+            x2: pt.x + 49,
+            y1: pt.y - 27,
+            y2: pt.y + 27,
+          };
+
+          const isColliding = placedBoxes.some((b) => {
+            return !(
+              box.x2 < b.x1 ||
+              box.x1 > b.x2 ||
+              box.y2 < b.y1 ||
+              box.y1 > b.y2
+            );
+          });
+
+          if (isColliding) {
+            // Omit colliding lower-priority card as requested
+            continue;
+          }
+
+          placedBoxes.push(box);
+        }
+
+        visibleForecasts.push(fc);
+      }
+
+      for (const fc of visibleForecasts) {
+        const targetPos = FORECAST_LABEL_COORDS[fc.id] || [
+          fc.lat + 0.8,
+          fc.lon + 1.8,
+        ];
+
+        // Leader line from actual city coordinate to weather card
         L.polyline(
           [
             [fc.lat, fc.lon],
@@ -3264,37 +3586,93 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           {
             pane: 'vectorOverlayPane',
             renderer: overlayRenderer,
-            color: '#64748B',
+            color: '#475569',
             weight: 1.2,
+            opacity: 0.85,
             interactive: false,
           }
         ).addTo(group);
 
-        // City dot on the map
+        // Subtle station dot on the map
         L.circleMarker([fc.lat, fc.lon], {
           pane: 'vectorOverlayPane',
           renderer: overlayRenderer,
-          radius: 3.8,
-          color: '#0E1014',
+          radius: 3.2,
+          color: '#0F172A',
           fillColor: '#38BDF8',
           fillOpacity: 1,
           weight: 1.2,
           interactive: false,
         }).addTo(group);
 
+        // Resolve weather code, weather text, and right-side upper/lower values for the active forecast mode
+        const safe3hIdx = Math.max(
+          0,
+          Math.min((fc.hourly3h?.length || 1) - 1, forecast3hIndex)
+        );
+        const slot3h = fc.hourly3h?.[safe3hIdx];
+
+        let cardWeatherCode = fc.todayWeatherCode;
+        let cardWeatherText = fc.todayWeather;
+        let topCellText = `${fc.todayTempMax ?? fc.tempMax}`;
+        let bottomCellText = `${fc.todayTempMin ?? fc.tempMin}`;
+
+        if (forecastViewMode === 'today_3h') {
+          cardWeatherCode = slot3h?.weatherCode || fc.todayWeatherCode;
+          cardWeatherText = slot3h?.weatherText || fc.todayWeather;
+          topCellText = `${slot3h?.temp ?? fc.todayTempMax ?? fc.tempMax}℃`;
+          bottomCellText = `${slot3h?.pop ?? Math.max(...fc.pops)}%`;
+        } else if (forecastViewMode === 'tomorrow') {
+          cardWeatherCode = fc.tomorrowWeatherCode || fc.todayWeatherCode;
+          cardWeatherText = fc.tomorrowWeather || fc.todayWeather;
+          topCellText = `${fc.tomorrowTempMax ?? fc.tempMax}`;
+          bottomCellText = `${fc.tomorrowTempMin ?? fc.tempMin}`;
+        } else {
+          cardWeatherCode = fc.dayAfterWeatherCode || fc.tomorrowWeatherCode;
+          cardWeatherText = fc.dayAfterWeather || fc.tomorrowWeather;
+          topCellText = `${fc.dayAfterTempMax ?? fc.tempMax}`;
+          bottomCellText = `${fc.dayAfterTempMin ?? fc.tempMin}`;
+        }
+
+        const weatherSvgHtml = renderBroadcastWeatherSvg(
+          cardWeatherCode,
+          cardWeatherText,
+          46,
+          32
+        );
+
+        const displayCityName =
+          fc.cityName === '小笠原諸島' ? '小笠原諸島' : fc.cityName;
+
         const icon = L.divIcon({
           className: 'custom-forecast-callout',
           html: `
-            <div data-testid="forecast-city-label" style="display:inline-flex;align-items:center;gap:5px;background:rgba(13,15,18,0.95);border:1px solid #4B5563;padding:2px 7px;white-space:nowrap;font-family:'JetBrains Mono',monospace;box-shadow:0 2px 8px rgba(0,0,0,0.65);">
-              <span style="color:#F8FAFC;font-size:11px;font-weight:700;">${fc.cityName}</span>
-              <span style="color:#F87171;font-size:11px;font-weight:700;">${fc.tempMax}℃</span>
-              <span style="color:#38BDF8;font-size:11px;font-weight:700;">/${fc.tempMin}℃</span>
+            <div data-testid="forecast-city-label" style="width:92px;background:rgba(15,20,28,0.95);border:1px solid #334155;border-radius:4px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.75);font-family:'JetBrains Mono','Inter',sans-serif;user-select:none;">
+              <div style="background:#1E293B;color:#F1F5F9;font-size:${displayCityName.length >= 5 ? '10px' : '11px'};font-weight:700;text-align:center;line-height:16px;height:16px;letter-spacing:0.04em;border-bottom:1px solid #334155;white-space:nowrap;overflow:hidden;">
+                ${displayCityName}
+              </div>
+              <div style="display:flex;align-items:stretch;height:32px;background:#0B0F17;">
+                <div style="width:46px;height:32px;flex-shrink:0;position:relative;overflow:hidden;">
+                  ${weatherSvgHtml}
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;border-left:1px solid #334155;font-family:'JetBrains Mono',monospace;">
+                  <div style="flex:1;background:rgba(239,68,68,0.14);color:#F87171;font-size:${forecastViewMode === 'today_3h' ? '11px' : '12px'};font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;border-bottom:1px solid #334155;">
+                    ${topCellText}
+                  </div>
+                  <div style="flex:1;background:rgba(56,189,248,0.14);color:#38BDF8;font-size:${forecastViewMode === 'today_3h' ? '10px' : '12px'};font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;">
+                    ${bottomCellText}
+                  </div>
+                </div>
+              </div>
             </div>
           `,
-          iconSize: [130, 24],
-          iconAnchor: [65, 12],
+          iconSize: [92, 49],
+          iconAnchor: [46, 24],
         });
-        L.marker([targetPos[0], targetPos[1]], { icon }).addTo(group);
+        L.marker([targetPos[0], targetPos[1]], {
+          icon,
+          zIndexOffset: 1800,
+        }).addTo(group);
       }
     } else if (effectiveScene === 'volcano') {
       L.circle([activeVolcano.lat, activeVolcano.lon], {
@@ -3402,91 +3780,25 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }).addTo(group);
         }
 
-        // EEW Epicenter Marker
-        const isFinal = activeEew.serial >= 5;
-        const reportBadge = isFinal
-          ? `最終報(第${activeEew.serial}報)`
-          : `第${activeEew.serial}報`;
-        const epiPt = map.project([eewLat, eewLon], projectionZoom);
-        placedBoxes.push({ x: epiPt.x, y: epiPt.y, w: 60, h: 40 });
-
-        const magLabel =
-          activeEew.magnitude > 0
-            ? `M${activeEew.magnitude.toFixed(1)}`
-            : 'M不明';
+        // EEW Epicenter Marker: 画像1のようなシンプルな震央✕印（ピカピカ円や下部ブロックなし）
         const eewEpiIcon = L.divIcon({
           className: 'custom-eew-epicenter-marker',
           html: `
-            <div style="position:relative;display:flex;flex-direction:column;align-items:center;pointer-events:none;">
-              <div style="position:relative;display:flex;align-items:center;justify-content:center;width:40px;height:40px;">
-                <div style="position:absolute;width:36px;height:36px;border-radius:50%;background:rgba(239,68,68,0.45);animation:ping 1.4s cubic-bezier(0,0,0.2,1) infinite;"></div>
-                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-                  <path d="M5 5L27 27M27 5L5 27" stroke="#0B0D12" stroke-width="7" stroke-linecap="square"/>
-                  <path d="M5 5L27 27M27 5L5 27" stroke="#EF4444" stroke-width="4.2" stroke-linecap="square"/>
-                  <path d="M5 5L27 27M27 5L5 27" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="square"/>
-                </svg>
-              </div>
-              <div style="background:rgba(18,20,26,0.96);border:2px solid #EF4444;padding:2px 8px;white-space:nowrap;margin-top:2px;box-shadow:0 3px 10px rgba(0,0,0,0.85);border-radius:3px;font-family:'JetBrains Mono',monospace;">
-                <span style="background:#EF4444;color:#FFFFFF;font-weight:900;font-size:10px;padding:1px 4px;margin-right:4px;">EEW</span>
-                <span style="color:#EF4444;font-size:11px;font-weight:800;">${reportBadge}</span>
-                <span style="color:#FFFFFF;font-size:11px;font-weight:800;margin-left:4px;">${magLabel}</span>
-              </div>
+            <div style="position:relative;display:flex;align-items:center;justify-content:center;width:34px;height:34px;pointer-events:none;transform:translate(-50%, -50%);">
+              <svg width="34" height="34" viewBox="0 0 32 32" fill="none" style="filter: drop-shadow(0 2px 5px rgba(0,0,0,0.95));">
+                <path d="M5 5L27 27M27 5L5 27" stroke="#050810" stroke-width="8" stroke-linecap="square"/>
+                <path d="M5 5L27 27M27 5L5 27" stroke="#EF4444" stroke-width="5" stroke-linecap="square"/>
+                <path d="M5 5L27 27M27 5L5 27" stroke="#FFFFFF" stroke-width="1.8" stroke-linecap="square"/>
+              </svg>
             </div>
           `,
-          iconSize: [160, 68],
-          iconAnchor: [80, 20],
+          iconSize: [34, 34],
+          iconAnchor: [17, 17],
         });
         L.marker([eewLat, eewLon], {
           icon: eewEpiIcon,
           zIndexOffset: 3000,
         }).addTo(group);
-
-        // EEW Warning Area badges on the map
-        const prefCoordMap: Record<string, [number, number]> = {};
-        for (const p of Object.values(PREFECTURE_NAMES)) {
-          prefCoordMap[p.name] = [p.lat, p.lon];
-        }
-
-        activeEew.areas.forEach((area) => {
-          let pos = prefCoordMap[area.pref];
-          if (!pos) {
-            for (const [pName, pCoord] of Object.entries(prefCoordMap)) {
-              if (
-                area.pref.includes(pName) ||
-                pName.includes(area.pref) ||
-                area.name.includes(pName)
-              ) {
-                pos = pCoord;
-                break;
-              }
-            }
-          }
-          if (!pos) return;
-
-          const scaleText = formatEewScaleRange(area.scaleFrom, area.scaleTo);
-          const arrivalLabel = formatEewArrivalLabel(area, eewAnimNow);
-          const isArrived = arrivalLabel.includes('到達');
-          const pt = map.project(pos, projectionZoom);
-          const boxW = 120;
-          const boxH = 22;
-
-          if (!collidesWithPlaced(pt.x, pt.y, boxW, boxH, 2)) {
-            placedBoxes.push({ x: pt.x, y: pt.y, w: boxW, h: boxH });
-            const areaIcon = L.divIcon({
-              className: 'custom-eew-area-badge',
-              html: `
-                <div style="display:inline-flex;align-items:center;gap:4px;background:rgba(18,20,26,0.92);border:1.5px solid ${isArrived ? '#EF4444' : '#F59E0B'};padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.8);">
-                  <span style="color:#FFFFFF;font-size:10px;font-weight:700;">${area.name}</span>
-                  <span style="background:${isArrived ? '#EF4444' : '#F59E0B'};color:#000;font-size:10px;font-weight:900;padding:0 3px;border-radius:2px;">${scaleText}</span>
-                  <span style="color:${isArrived ? '#FCA5A5' : '#FDE047'};font-size:9px;font-weight:700;">${arrivalLabel}</span>
-                </div>
-              `,
-              iconSize: [boxW, boxH],
-              iconAnchor: [Math.round(boxW / 2), Math.round(boxH / 2)],
-            });
-            L.marker(pos, { icon: areaIcon, zIndexOffset: 2500 }).addTo(group);
-          }
-        });
       }
       // Note: Standard Observed Earthquake Stations and Epicenter marker are rendered directly on interactiveCanvasRef at 60fps for zero DOM layout overhead during zoom/flyTo.
     }
@@ -3541,16 +3853,29 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     radarFrameIndex,
     radarPass,
     amedasMetric,
+    forecastViewMode,
+    forecast3hIndex,
     selectedEarthquake,
     selectedTyphoon,
     activeVolcano,
     activeEew,
     activeTsunamiForecast,
     eewAnimNow,
+    eewDisplayMode,
   ]);
 
   const currentNowcastEntry =
     data.nowcastTimes[Math.min(radarFrameIndex, data.nowcastTimes.length - 1)];
+
+  const refForecast = data.forecasts[0];
+  const todayDateLabel = refForecast?.todayDateLabel || '今日';
+  const tomorrowDateLabel = refForecast?.tomorrowDateLabel || '明日';
+  const dayAfterDateLabel = refForecast?.dayAfterDateLabel || '明後日';
+  const sample3hSlots = refForecast?.hourly3h || [];
+  const active3hSlot =
+    sample3hSlots[
+      Math.max(0, Math.min(sample3hSlots.length - 1, forecast3hIndex))
+    ];
 
   return (
     <div className="relative w-full h-full bg-[#0E1014] overflow-hidden select-none">
@@ -3644,6 +3969,56 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         </button>
       </div>
 
+      {/* EEW Mode Indicator / Switcher Bar & LPGM Legend (震度予測 ↔ 長周期地震動階級1〜4 定期切替) */}
+      {effectiveScene === 'earthquake' && activeEew && isEewStillActive(activeEew) && (
+        <div
+          data-testid="eew-mode-switcher-bar"
+          className="absolute bottom-3 left-64 z-[400] bg-[#111318]/94 border border-red-500/80 px-2.5 py-1 rounded-xs flex items-center gap-2 shadow-xl"
+        >
+          <span className="text-[11px] font-mono text-neutral-200 font-bold">
+            緊急地震速報:
+          </span>
+          <button
+            type="button"
+            data-testid="eew-mode-btn-intensity"
+            onClick={() => onChangeEewDisplayMode?.('intensity')}
+            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border ${
+              eewDisplayMode === 'intensity'
+                ? 'bg-red-600 border-red-300 text-white shadow-sm'
+                : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
+            }`}
+          >
+            各地の予測震度
+          </button>
+          <button
+            type="button"
+            data-testid="eew-mode-btn-lpgm"
+            onClick={() => onChangeEewDisplayMode?.('lpgm')}
+            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border ${
+              eewDisplayMode === 'lpgm'
+                ? 'bg-amber-600 border-amber-300 text-white shadow-sm'
+                : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
+            }`}
+          >
+            長周期地震動（階級1〜4）
+          </button>
+          <span className="text-[10px] text-amber-300 font-mono ml-1 flex items-center gap-1">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+            定期切替中
+          </span>
+
+          {/* Inline mini-legend for LPGM */}
+          {eewDisplayMode === 'lpgm' && (
+            <div className="flex items-center gap-1 ml-2 pl-2 border-l border-neutral-700 text-[10px] font-mono">
+              <span className="px-1.5 py-0.2 rounded-xs bg-[#10B981] text-white font-bold">階級1</span>
+              <span className="px-1.5 py-0.2 rounded-xs bg-[#F59E0B] text-slate-950 font-bold">階級2</span>
+              <span className="px-1.5 py-0.2 rounded-xs bg-[#F97316] text-white font-bold">階級3</span>
+              <span className="px-1.5 py-0.2 rounded-xs bg-[#EF4444] text-white font-bold">階級4</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Compact Radar Scrubber (2-Pass: 1周目 雨雲レーダー -> 2周目 雨雲＋雷レーダー) */}
       {effectiveScene === 'radar' && (
         <div
@@ -3722,6 +4097,169 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             (ズーム連動・重なり防止高密度表示)
           </span>
         </div>
+      )}
+
+      {/* TV Broadcast Nationwide Weather Mode Switcher, 3h Scrubber & Legend */}
+      {effectiveScene === 'forecast' && (
+        <>
+          {/* Bottom-Center Mode Switcher + 3h Scrubber (aligned with Radar & AMeDAS bars, never overlaps top-left title) */}
+          <div
+            data-testid="forecast-broadcast-header"
+            className="absolute bottom-3 left-64 z-[400] flex flex-col gap-1"
+          >
+            {/* 3-Hour Slot Scrubber when in 'today_3h' mode */}
+            {forecastViewMode === 'today_3h' && sample3hSlots.length > 0 && (
+              <div
+                data-testid="forecast-3h-scrubber"
+                className="flex items-center gap-1 bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit"
+              >
+                <span className="text-[11px] font-bold text-amber-300 mr-1">
+                  3時間ごと ({todayDateLabel}):
+                </span>
+                {sample3hSlots.map((slot, idx) => (
+                  <button
+                    key={slot.timeLabel}
+                    type="button"
+                    data-testid={`forecast-3h-btn-${slot.hour}`}
+                    onClick={() => onChangeForecast3hIndex?.(idx)}
+                    className={`px-2 py-0.5 text-[11px] font-mono font-bold transition-colors border rounded-xs cursor-pointer ${
+                      idx === forecast3hIndex
+                        ? 'bg-amber-500 border-amber-200 text-slate-950 shadow-sm'
+                        : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
+                    }`}
+                  >
+                    {slot.timeLabel}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Mode Switcher Pills */}
+            <div className="flex items-center gap-1.5 bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit">
+              <span className="text-[11px] font-mono text-neutral-300 font-bold mr-0.5">
+                予報期間:
+              </span>
+              {(
+                [
+                  {
+                    id: 'today_3h',
+                    label: `今日の3時間ごと (${active3hSlot?.timeLabel || '15時'})`,
+                  },
+                  { id: 'tomorrow', label: `明日 ${tomorrowDateLabel}` },
+                  { id: 'day_after', label: `明後日 ${dayAfterDateLabel}` },
+                ] as Array<{ id: ForecastViewMode; label: string }>
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  data-testid={`forecast-mode-btn-${m.id}`}
+                  onClick={() => onChangeForecastViewMode?.(m.id)}
+                  className={`px-2.5 py-0.5 text-[11px] font-bold transition-colors border rounded-xs cursor-pointer ${
+                    forecastViewMode === m.id
+                      ? 'bg-sky-600 border-sky-300 text-white shadow-sm'
+                      : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Bottom-Right Forecast Legend (adjusts right offset dynamically when right panel is hidden) */}
+          <div
+            data-testid="forecast-broadcast-legend"
+            className={`absolute bottom-3 z-[400] bg-[#0F141C]/95 border border-slate-700/80 rounded-xs px-3 py-1.5 flex items-center gap-3.5 shadow-lg text-slate-200 text-xs font-bold transition-all duration-500 ease-in-out ${
+              isRightPanelHidden ? 'right-4' : 'right-[272px]'
+            }`}
+          >
+            {/* [ |> のち ] */}
+            <div className="flex items-center gap-1.5 text-slate-300">
+              <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                <rect
+                  x="0.75"
+                  y="0.75"
+                  width="24.5"
+                  height="16.5"
+                  rx="2"
+                  fill="none"
+                  stroke="#94A3B8"
+                  strokeWidth="1.5"
+                />
+                <polyline
+                  points="11,0.75 15.5,9 11,17.25"
+                  fill="none"
+                  stroke="#94A3B8"
+                  strokeWidth="1.5"
+                />
+              </svg>
+              <span className="text-[11px]">のち</span>
+            </div>
+
+            {/* [ ┏ 時々 ] */}
+            <div className="flex items-center gap-1.5 text-slate-300">
+              <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                <rect
+                  x="0.75"
+                  y="0.75"
+                  width="24.5"
+                  height="16.5"
+                  rx="2"
+                  fill="none"
+                  stroke="#94A3B8"
+                  strokeWidth="1.5"
+                />
+                <polyline
+                  points="12,17.25 14.5,8.5 25.25,8.5"
+                  fill="none"
+                  stroke="#94A3B8"
+                  strokeWidth="1.5"
+                />
+              </svg>
+              <span className="text-[11px]">時々</span>
+            </div>
+
+            {/* [ 最高気温 / 最低気温 ] or [ 予想気温 / 降水確率 ] */}
+            <div className="flex items-center gap-1.5">
+              <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                <rect
+                  x="0.75"
+                  y="0.75"
+                  width="24.5"
+                  height="16.5"
+                  rx="2"
+                  fill="none"
+                  stroke="#94A3B8"
+                  strokeWidth="1.5"
+                />
+                <line
+                  x1="14"
+                  y1="0.75"
+                  x2="14"
+                  y2="17.25"
+                  stroke="#94A3B8"
+                  strokeWidth="1.5"
+                />
+                <line
+                  x1="14"
+                  y1="9"
+                  x2="25.25"
+                  y2="9"
+                  stroke="#94A3B8"
+                  strokeWidth="1.5"
+                />
+              </svg>
+              <div className="flex flex-col leading-none text-[10px] font-mono">
+                <span className="text-red-400 font-bold">
+                  {forecastViewMode === 'today_3h' ? '予想気温' : '最高気温'}
+                </span>
+                <span className="text-sky-400 font-bold mt-0.5">
+                  {forecastViewMode === 'today_3h' ? '降水確率' : '最低気温'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

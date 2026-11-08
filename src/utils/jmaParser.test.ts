@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { INITIAL_FORECASTS } from '../data/fallbackData';
 import {
   computeEewWaveRadiiKm,
   formatEewArrivalLabel,
@@ -7,14 +8,19 @@ import {
   formatOccurrenceTimeJa,
   getSeismicScaleBadgeStyle,
   getTsunamiAlertSeverity,
+  isEewStillActive,
   parseJmaTsunamiDetail,
   parseP2PEew,
+  parseP2PEewDetection,
   parseP2PTsunami,
+  parseWolfxEew,
   shouldReplaceEew,
 } from './eewTsunami';
 import {
   AMEDAS_PATROL_STOPS,
   AUTO_PATROL_SEQUENCE,
+  buildCity3HourlySlots,
+  classifyJmaWeatherDescriptor,
   classifyXmlEntryScene,
   computeAmedasTop5Rankings,
   computeTyphoonConeEnvelope,
@@ -39,11 +45,15 @@ import {
   getWindDirectionRotationDeg,
   interpolateArchipelagoSweepPosition,
   isExtratropicalCyclone,
+  MAJOR_FORECAST_CITY_TARGETS,
+  mergeProgressiveEarthquakeReports,
   parseJmaAmedasNationwide,
   parseJmaAtomXml,
+  parseJmaCityForecastJson,
   parseJmaIntensityString,
   parseJmaIsoCoordinate,
   parseJmaQuakeDetailJson,
+  renderBroadcastWeatherSvg,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
   resolveLabelBoxCollisions,
@@ -1206,6 +1216,438 @@ test('computeEarthquakeAreaScales maps seismic intensity stations to JMA 188-are
   const cityScales = computeEarthquakeCityScales(quakeWithCity, mockClass20);
   assert.equal(cityScales.get('3520300'), 20);
 });
+
+test('parseWolfxEew (緊急地震速報 予報・警報) and mergeProgressiveEarthquakeReports (震度速報 -> 震源情報 -> 各地の震度) work accurately', () => {
+  // 1. Wolfx EEW Forecast (`緊急地震速報（予報）`) parsing
+  const wolfxForecastPayload = {
+    type: 'jma_eew',
+    Title: '緊急地震速報（予報）',
+    EventID: '20261107200747',
+    Serial: 8,
+    AnnouncedTime: '2026/11/07 20:08:46',
+    OriginTime: '2026/11/07 20:07:41',
+    Hypocenter: '茨城県沖',
+    Latitude: 36.2,
+    Longitude: 141.5,
+    Magunitude: 5.4,
+    Magnitude: 5.4,
+    Depth: 40,
+    MaxIntensity: '3',
+    WarnArea: [],
+    isSea: true,
+    isTraining: false,
+    isAssumption: false,
+    isWarn: false,
+    isFinal: true,
+    isCancel: false,
+  };
+
+  const nowDuringEew = new Date('2026-11-07T20:09:00+09:00').getTime();
+  const parsedForecastEew = parseWolfxEew(wolfxForecastPayload, nowDuringEew);
+  assert.ok(parsedForecastEew);
+  assert.equal(parsedForecastEew.eventId, '20261107200747');
+  assert.equal(parsedForecastEew.serial, 8);
+  assert.equal(parsedForecastEew.isWarning, false);
+  assert.equal(parsedForecastEew.isFinal, true);
+  assert.equal(parsedForecastEew.hypocenterName, '茨城県沖');
+  assert.equal(parsedForecastEew.maxScaleCode, 30);
+  assert.equal(parsedForecastEew.maxScaleLabel, '3');
+  assert.equal(isEewStillActive(parsedForecastEew, nowDuringEew), true);
+
+  // Detection placeholder (P2P code 554) is replaced by actual Wolfx EEW report
+  const det554 = parseP2PEewDetection(
+    { code: 554, id: 'det-1', time: '2026/11/07 20:07:50' },
+    nowDuringEew
+  );
+  assert.ok(det554);
+  assert.equal(shouldReplaceEew(det554, parsedForecastEew), true);
+
+  // 2. Progressive earthquake reports for EventID 20261107200747:
+  // Stage A: VXSE51 (`震度速報`)
+  const vxse51 = parseJmaQuakeDetailJson(
+    {
+      Head: {
+        Title: '震度速報',
+        ReportDateTime: '2026-11-07T20:09:00+09:00',
+        TargetDateTime: '2026-11-07T20:07:00+09:00',
+        EventID: '20261107200747',
+        InfoKind: '震度速報',
+      },
+      Body: {
+        Intensity: {
+          Observation: {
+            MaxInt: '3',
+            Pref: [
+              {
+                Name: '福島県',
+                Code: '07',
+                MaxInt: '3',
+                Area: [{ Name: '福島県中通り', Code: '250', MaxInt: '3' }],
+              },
+            ],
+          },
+        },
+      },
+    },
+    { eid: '20261107200747', maxi: '3', ttl: '震度速報' }
+  );
+  assert.ok(vxse51);
+  assert.equal(vxse51.issueTypeLabel, '震度速報');
+  assert.equal(vxse51.hypocenterUnknown, true);
+  assert.equal(vxse51.isConfirmed, false);
+  assert.equal(vxse51.maxScaleCode, 30);
+  assert.equal(vxse51.stations.length, 1);
+  assert.equal(vxse51.stations[0].stationName, '福島県中通り');
+
+  // Stage B: VXSE52 (`震源に関する情報`, has hypocenter & magnitude, no intensity)
+  const vxse52 = parseJmaQuakeDetailJson(
+    {
+      Head: {
+        Title: '震源に関する情報',
+        ReportDateTime: '2026-11-07T20:11:00+09:00',
+        TargetDateTime: '2026-11-07T20:07:00+09:00',
+        EventID: '20261107200747',
+        InfoKind: '震源速報',
+      },
+      Body: {
+        Earthquake: {
+          OriginTime: '2026-11-07T20:07:00+09:00',
+          Hypocenter: {
+            Area: {
+              Name: '茨城県沖',
+              Code: '471',
+              Coordinate: '+36.2+141.6-20000/',
+            },
+          },
+          Magnitude: '5.6',
+        },
+      },
+    },
+    {
+      eid: '20261107200747',
+      anm: '茨城県沖',
+      cod: '+36.2+141.6-20000/',
+      mag: '5.6',
+      maxi: '',
+      ttl: '震源に関する情報',
+    }
+  );
+  assert.ok(vxse52);
+  assert.equal(vxse52.issueTypeLabel, '震源に関する情報');
+  assert.equal(vxse52.hypocenterUnknown, false);
+  assert.equal(vxse52.isConfirmed, false);
+  assert.equal(vxse52.maxScaleCode, -1);
+
+  // Merge VXSE52 + VXSE51 -> Combines 茨城県沖 M5.6 with 最大震度3 (福島県中通り), while keeping isConfirmed = false!
+  const mergedInterim = mergeProgressiveEarthquakeReports([vxse52, vxse51]);
+  assert.equal(mergedInterim.length, 1);
+  assert.equal(mergedInterim[0].hypocenterName, '茨城県沖');
+  assert.equal(mergedInterim[0].hypocenterUnknown, false);
+  assert.equal(mergedInterim[0].maxScaleCode, 30);
+  assert.equal(mergedInterim[0].maxScaleLabel, '3');
+  assert.equal(mergedInterim[0].isConfirmed, false);
+  assert.ok(mergedInterim[0].areaMaxScales?.['250']);
+
+  // Stage C: VXSE5k (`各地の震度に関する情報` / `震源・震度情報`) arrives -> isConfirmed becomes true!
+  const vxse5k = parseJmaQuakeDetailJson(
+    {
+      Head: {
+        Title: '震源・震度情報',
+        ReportDateTime: '2026-11-07T20:12:00+09:00',
+        TargetDateTime: '2026-11-07T20:07:00+09:00',
+        EventID: '20261107200747',
+        InfoKind: '地震情報',
+      },
+      Body: {
+        Earthquake: {
+          OriginTime: '2026-11-07T20:07:00+09:00',
+          Hypocenter: {
+            Area: {
+              Name: '茨城県沖',
+              Code: '471',
+              Coordinate: '+36.2+141.6-20000/',
+            },
+          },
+          Magnitude: '5.6',
+        },
+        Intensity: {
+          Observation: {
+            MaxInt: '3',
+            Pref: [
+              {
+                Name: '福島県',
+                Code: '07',
+                MaxInt: '3',
+                Area: [
+                  {
+                    Name: '福島県中通り',
+                    Code: '250',
+                    MaxInt: '3',
+                    City: [
+                      {
+                        Name: '郡山市',
+                        Code: '0720300',
+                        MaxInt: '3',
+                        IntensityStation: [
+                          {
+                            Name: '郡山市朝日',
+                            Code: '0720300',
+                            Int: '3',
+                            latlon: { lat: 37.39, lon: 140.38 },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    },
+    {
+      eid: '20261107200747',
+      anm: '茨城県沖',
+      cod: '+36.2+141.6-20000/',
+      mag: '5.6',
+      maxi: '3',
+      ttl: '震源・震度情報',
+    }
+  );
+  assert.ok(vxse5k);
+  assert.equal(vxse5k.isConfirmed, true);
+
+  const mergedFinal = mergeProgressiveEarthquakeReports([
+    vxse5k,
+    vxse52,
+    vxse51,
+  ]);
+  assert.equal(mergedFinal.length, 1);
+  assert.equal(mergedFinal[0].isConfirmed, true);
+  assert.equal(mergedFinal[0].issueTypeLabel, '各地の震度に関する情報');
+  assert.notEqual(mergedFinal[0].reportKey, mergedInterim[0].reportKey);
+});
+
+test('18 major forecast cities, TV broadcast weather descriptor (single / 時々 / のち), SVG rendering, 3-hourly slot generation, and JMA forecast JSON parsing work accurately', () => {
+  // 1. Verify all 18 requested cities exist in MAJOR_FORECAST_CITY_TARGETS & INITIAL_FORECASTS
+  assert.equal(MAJOR_FORECAST_CITY_TARGETS.length, 18);
+  assert.equal(INITIAL_FORECASTS.length, 18);
+  const expectedCities = [
+    '旭川',
+    '札幌',
+    '釧路',
+    '秋田',
+    '仙台',
+    '新潟',
+    '金沢',
+    '長野',
+    '東京',
+    '小笠原諸島',
+    '名古屋',
+    '大阪',
+    '広島',
+    '高知',
+    '福岡',
+    '鹿児島',
+    '那覇',
+    '石垣島',
+  ];
+  assert.deepEqual(
+    MAJOR_FORECAST_CITY_TARGETS.map((c) => c.cityName),
+    expectedCities
+  );
+  assert.deepEqual(
+    INITIAL_FORECASTS.map((c) => c.cityName),
+    expectedCities
+  );
+
+  // 2. Verify classifyJmaWeatherDescriptor for single, 時々 (sometimes), and のち (later)
+  const dSingle = classifyJmaWeatherDescriptor('100', '晴れ');
+  assert.equal(dSingle.pattern, 'single');
+  assert.equal(dSingle.primary, 'sunny');
+  assert.equal(dSingle.shortLabel, '晴');
+
+  const dSometimes = classifyJmaWeatherDescriptor('101', '晴れ 時々 くもり');
+  assert.equal(dSometimes.pattern, 'sometimes');
+  assert.equal(dSometimes.primary, 'sunny');
+  assert.equal(dSometimes.secondary, 'cloudy');
+  assert.equal(dSometimes.shortLabel, '晴時々曇');
+
+  const dLater = classifyJmaWeatherDescriptor('411', '雪 のち 晴れ');
+  assert.equal(dLater.pattern, 'later');
+  assert.equal(dLater.primary, 'snow');
+  assert.equal(dLater.secondary, 'sunny');
+  assert.equal(dLater.shortLabel, '雪のち晴');
+
+  // 3. Verify renderBroadcastWeatherSvg produces valid SVG markup for all 3 patterns
+  const svgSingle = renderBroadcastWeatherSvg('100', '晴れ');
+  assert.ok(svgSingle.includes('<svg'));
+  assert.ok(svgSingle.includes('#C2410C'));
+
+  const svgSometimes = renderBroadcastWeatherSvg('101', '晴時々曇');
+  assert.ok(svgSometimes.includes('22.5,34 27.2,15.5 48,15.5'));
+
+  const svgLater = renderBroadcastWeatherSvg('210', '曇のち晴');
+  assert.ok(svgLater.includes('21.5,0 28,17 21.5,34'));
+
+  // 4. Verify 3-hourly slot generation
+  const slots = buildCity3HourlySlots({
+    weatherCode: '112',
+    weatherText: '晴れ 夕方 から 雨',
+    tempMin: 8,
+    tempMax: 18,
+    pops: [10, 20, 60, 80],
+  });
+  assert.equal(slots.length, 8);
+  assert.equal(slots[0].timeLabel, '03時');
+  assert.equal(slots[1].temp, 8); // 06時 = min
+  assert.equal(slots[4].temp, 18); // 15時 = max
+  assert.equal(slots[2].weatherText, '晴'); // 09時 before transition
+  assert.equal(slots[5].weatherText, '雨'); // 18時 after transition
+
+  // 5. Verify parseJmaCityForecastJson for both 東京 (130010 / 44132) and 小笠原諸島 (130040 / 44301)
+  const mockJma130000 = [
+    {
+      publishingOffice: '気象庁',
+      reportDatetime: '2026-11-08T05:00:00+09:00',
+      timeSeries: [
+        {
+          timeDefines: [
+            '2026-11-08T05:00:00+09:00',
+            '2026-11-09T00:00:00+09:00',
+            '2026-11-10T00:00:00+09:00',
+          ],
+          areas: [
+            {
+              area: { name: '東京地方', code: '130010' },
+              weatherCodes: ['100', '101', '203'],
+              weathers: ['晴れ', '晴れ　時々　くもり', 'くもり　時々　雨'],
+            },
+            {
+              area: { name: '小笠原諸島', code: '130040' },
+              weatherCodes: ['212', '203', '200'],
+              weathers: ['くもり　夜遅く　雨', 'くもり　時々　雨', 'くもり'],
+            },
+          ],
+        },
+        {
+          timeDefines: [
+            '2026-11-08T06:00:00+09:00',
+            '2026-11-08T12:00:00+09:00',
+            '2026-11-08T18:00:00+09:00',
+            '2026-11-09T00:00:00+09:00',
+          ],
+          areas: [
+            { area: { name: '東京地方', code: '130010' }, pops: ['0', '10', '20', '30'] },
+            { area: { name: '小笠原諸島', code: '130040' }, pops: ['30', '50', '60', '70'] },
+          ],
+        },
+        {
+          timeDefines: [
+            '2026-11-08T00:00:00+09:00',
+            '2026-11-08T09:00:00+09:00',
+            '2026-11-09T00:00:00+09:00',
+            '2026-11-09T09:00:00+09:00',
+          ],
+          areas: [
+            { area: { name: '東京', code: '44132' }, temps: ['10', '18', '8', '15'] },
+            { area: { name: '父島', code: '44301' }, temps: ['24', '27', '25', '28'] },
+          ],
+        },
+      ],
+    },
+    {
+      timeSeries: [
+        {
+          timeDefines: [
+            '2026-11-09T00:00:00+09:00',
+            '2026-11-10T00:00:00+09:00',
+          ],
+          areas: [
+            { area: { name: '東京地方', code: '130010' }, weatherCodes: ['101', '203'], pops: ['20', '70'] },
+            { area: { name: '小笠原諸島', code: '130040' }, weatherCodes: ['203', '200'], pops: ['70', '40'] },
+          ],
+        },
+        {
+          timeDefines: [
+            '2026-11-09T00:00:00+09:00',
+            '2026-11-10T00:00:00+09:00',
+          ],
+          areas: [
+            { area: { name: '東京', code: '44132' }, tempsMin: ['8', '9'], tempsMax: ['15', '13'] },
+            { area: { name: '父島', code: '44301' }, tempsMin: ['25', '23'], tempsMax: ['28', '26'] },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const nowMs = Date.parse('2026-11-08T06:00:00+09:00');
+  const tokyoTarget = MAJOR_FORECAST_CITY_TARGETS.find((t) => t.id === 'fc-130000')!;
+  const ogasawaraTarget = MAJOR_FORECAST_CITY_TARGETS.find((t) => t.id === 'fc-130040')!;
+  const tokyoFallback = INITIAL_FORECASTS.find((f) => f.id === 'fc-130000')!;
+  const ogasawaraFallback = INITIAL_FORECASTS.find((f) => f.id === 'fc-130040')!;
+
+  const parsedTokyo = parseJmaCityForecastJson(mockJma130000, tokyoTarget, tokyoFallback, nowMs);
+  assert.equal(parsedTokyo.cityName, '東京');
+  assert.equal(parsedTokyo.todayWeatherCode, '100');
+  assert.equal(parsedTokyo.tomorrowWeatherCode, '101');
+  assert.equal(parsedTokyo.dayAfterWeatherCode, '203');
+  assert.equal(parsedTokyo.todayTempMax, 18);
+  assert.equal(parsedTokyo.tomorrowTempMax, 15);
+  assert.equal(parsedTokyo.tomorrowTempMin, 8);
+  assert.equal(parsedTokyo.dayAfterTempMax, 13);
+  assert.equal(parsedTokyo.dayAfterTempMin, 9);
+  assert.equal(parsedTokyo.hourly3h?.length, 8);
+
+  const parsedOgasawara = parseJmaCityForecastJson(mockJma130000, ogasawaraTarget, ogasawaraFallback, nowMs);
+  assert.equal(parsedOgasawara.cityName, '小笠原諸島');
+  assert.equal(parsedOgasawara.todayWeatherCode, '212');
+  assert.equal(parsedOgasawara.tomorrowTempMax, 28);
+  assert.equal(parsedOgasawara.tomorrowTempMin, 25);
+  assert.equal(parsedOgasawara.dayAfterTempMax, 26);
+  assert.equal(parsedOgasawara.dayAfterTempMin, 23);
+});
+
+test('findSubdivisionAreaCodes correctly maps EEW prefectures and area names to JMA 188 subdivision codes', async () => {
+  const { findSubdivisionAreaCodes, computeEewAreaScales } = await import('./eewTsunami');
+
+  // Kumamoto
+  const kumamotoCodes = findSubdivisionAreaCodes('熊本県', '熊本');
+  assert.ok(kumamotoCodes.includes('741'));
+
+  const amakusaCodes = findSubdivisionAreaCodes('熊本県', '天草・芦北');
+  assert.ok(amakusaCodes.includes('743'));
+
+  // Shizuoka & Aichi
+  const shizuokaCodes = findSubdivisionAreaCodes('静岡県', '西部');
+  assert.ok(shizuokaCodes.includes('443'));
+
+  const aichiCodes = findSubdivisionAreaCodes('愛知県', '愛知県西部');
+  assert.ok(aichiCodes.includes('451'));
+
+  // Whole prefecture
+  const fukuokaAll = findSubdivisionAreaCodes('福岡県', '福岡県');
+  assert.ok(fukuokaAll.includes('710')); // 福岡
+  assert.ok(fukuokaAll.includes('711')); // 北九州
+
+  // computeEewAreaScales
+  const mockEew: any = {
+    areas: [
+      { pref: '熊本県', name: '熊本', scaleFrom: 50, scaleTo: 50 },
+      { pref: '熊本県', name: '天草・芦北', scaleFrom: 40, scaleTo: 40 },
+      { pref: '福岡県', name: '福岡', scaleFrom: 30, scaleTo: 30 },
+    ],
+  };
+  const scaleMap = computeEewAreaScales(mockEew);
+  assert.equal(scaleMap.get('741'), 50); // 熊本 -> 震度5強
+  assert.equal(scaleMap.get('743'), 40); // 天草・芦北 -> 震度4
+  assert.equal(scaleMap.get('710'), 30); // 福岡 -> 震度3
+});
+
+
+
 
 
 

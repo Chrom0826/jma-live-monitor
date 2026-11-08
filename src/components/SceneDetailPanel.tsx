@@ -3,7 +3,9 @@ import {
   AmedasMetric,
   AmedasStationData,
   EarthquakeReport,
+  EewDisplayMode,
   EewReport,
+  ForecastViewMode,
   InterruptKind,
   MapViewportState,
   MonitorDataBundle,
@@ -21,11 +23,13 @@ import {
   computeAmedasTop5Rankings,
   getAmedasMetricColor,
   getSeismicScaleStyle,
+  renderBroadcastWeatherSvg,
 } from '../utils/jmaParser';
 import {
   formatEewArrivalLabel,
   formatEewScaleRange,
   formatOccurrenceTimeJa,
+  getLpgmClassStyle,
   getSeismicScaleBadgeStyle,
   getTsunamiGradeStyle,
   isEewStillActive,
@@ -40,7 +44,9 @@ interface SceneDetailPanelProps {
   data: MonitorDataBundle;
   selectedEarthquake: EarthquakeReport;
   selectedTyphoon: TyphoonReport;
+  typhoonPatrolStep?: number;
   onSelectTyphoon: (tc: TyphoonReport) => void;
+  onReturnTyphoonOverview?: () => void;
   activeVolcano: VolcanoStatusItem;
   activeTsunamiStation?: TsunamiStationItem;
   activeEew?: EewReport | null;
@@ -49,11 +55,17 @@ interface SceneDetailPanelProps {
   onToggleTsunamiDemo?: () => void;
   amedasMetric: AmedasMetric;
   onChangeAmedasMetric: (metric: AmedasMetric) => void;
+  forecastViewMode?: ForecastViewMode;
+  onChangeForecastViewMode?: (mode: ForecastViewMode) => void;
+  forecast3hIndex?: number;
+  onChangeForecast3hIndex?: (idx: number) => void;
   onSelectEarthquake: (eq: EarthquakeReport) => void;
   interruptKind: InterruptKind;
   onDismissInterrupt: () => void;
   isLoopPaused: boolean;
   loopIntervalSec: number;
+  eewDisplayMode?: EewDisplayMode;
+  onChangeEewDisplayMode?: (mode: EewDisplayMode) => void;
   onSceneComplete: () => void;
 }
 
@@ -82,6 +94,8 @@ function renderSeverityDot(severity: WarningSeverity) {
   );
 }
 
+
+
 export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   activeScene,
   activeRegionConfig,
@@ -91,7 +105,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   data,
   selectedEarthquake,
   selectedTyphoon,
+  typhoonPatrolStep = 0,
   onSelectTyphoon,
+  onReturnTyphoonOverview,
   activeVolcano,
   activeTsunamiStation = null,
   activeEew = null,
@@ -100,11 +116,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   onToggleTsunamiDemo,
   amedasMetric,
   onChangeAmedasMetric,
+  forecastViewMode = 'today_3h',
+  onChangeForecastViewMode,
+  forecast3hIndex = 2,
+  onChangeForecast3hIndex,
   onSelectEarthquake,
   interruptKind,
   onDismissInterrupt,
   isLoopPaused,
   loopIntervalSec,
+  eewDisplayMode = 'intensity',
+  onChangeEewDisplayMode,
   onSceneComplete,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -212,6 +234,13 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   // 「各都府県」「鹿児島県（奄美地方除く）」「奄美地方」「沖縄本島地方」「大東島地方」「宮古島地方」「八重山地方」
   const displayWarnings = data.warnings;
 
+  const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+  const isSingleTyphoonMode =
+    effectiveScene === 'typhoon' &&
+    typeof typhoonPatrolStep === 'number' &&
+    typhoonPatrolStep >= 1 &&
+    typhoonPatrolStep <= totalTyphoons;
+
   // Reset scroll position to top when scene, zoomed region, typhoon, or AMeDAS metric changes
   useEffect(() => {
     const el = scrollContainerRef.current;
@@ -227,6 +256,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     isFinalWarningNational,
     amedasMetric,
     selectedTyphoon.id,
+    typhoonPatrolStep,
     selectedEarthquake.id,
   ]);
 
@@ -285,6 +315,35 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         cancelled = true;
         if (fallbackTimer) clearTimeout(fallbackTimer);
       };
+    }
+
+    // Special handling for typhoon patrol steps:
+    // 0 = overview (all low-pressure systems blocks, no forecasts)
+    // 1..M = single cyclone focus (fixed header + forecast timeline with ↓ arrows)
+    // M+1 = return to overview
+    if (effectiveScene === 'typhoon') {
+      const isOverview =
+        typhoonPatrolStep === 0 || typhoonPatrolStep > totalTyphoons;
+      const holdMs = isOverview
+        ? Math.min(Math.max(5500, loopIntervalSec * 400), 7000)
+        : Math.min(Math.max(7000, loopIntervalSec * 500), 9000);
+
+      fallbackTimer = setTimeout(() => {
+        if (!cancelled) {
+          onSceneCompleteRef.current();
+        }
+      }, holdMs);
+
+      return () => {
+        cancelled = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      };
+    }
+
+    // When in 'forecast', scene progression is managed by App.tsx's dedicated timer
+    // (stepping 03時..24時 -> tomorrow -> day_after -> next scene)
+    if (effectiveScene === 'forecast') {
+      return;
     }
 
     const minSceneDurationMs = Math.max(10000, loopIntervalSec * 1000);
@@ -371,6 +430,8 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     isFinalWarningNational,
     amedasMetric,
     selectedTyphoon.id,
+    typhoonPatrolStep,
+    totalTyphoons,
     selectedEarthquake.id,
     isLoopPaused,
     interruptKind,
@@ -485,113 +546,466 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {/* ==================== TYPHOON TRACK & FORECAST CONE ==================== */}
         {effectiveScene === 'typhoon' && (
           <>
-            {/* Typhoon Selector (Only shown if multiple active JMA typhoons exist) */}
-            {data.typhoons.length > 1 && (
-              <div className="p-2 bg-[#1A1E26] space-y-1">
-                <div className="text-[10px] font-mono text-neutral-400">
-                  対象台風切替 ({data.typhoons.length}件)
+            {!isSingleTyphoonMode ? (
+              /* ==================== 1. OVERVIEW MODE (All Cyclones in Blocks, Current Specs Only) ==================== */
+              <div className="space-y-2.5 pb-2">
+                {/* Header banner */}
+                <div className="bg-red-700 px-3 py-1.5 text-xs font-bold text-white flex items-center justify-between shadow-md">
+                  <div className="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
+                    <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
+                    <span>発表中の低気圧一覧（全 {data.typhoons.length} 件）</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-red-200 shrink-0 whitespace-nowrap">
+                    気象庁実況
+                  </span>
                 </div>
-                <div className="flex flex-col gap-1">
-                  {data.typhoons.map((tc) => (
-                    <button
+
+                {data.typhoons.map((tc) => {
+                  const p0 =
+                    tc.points.find((p) => !p.isForecast) || tc.points[0];
+
+                  return (
+                    <div
                       key={tc.id}
-                      type="button"
                       onClick={() => onSelectTyphoon(tc)}
-                      className={`w-full text-left px-2 py-1 text-xs font-bold border transition-colors cursor-pointer ${
-                        selectedTyphoon.id === tc.id
-                          ? 'bg-red-700 border-red-400 text-white'
-                          : 'bg-[#111318] border-neutral-700 text-neutral-300 hover:bg-neutral-800'
-                      }`}
+                      className="border border-neutral-700 bg-[#141822] rounded-md overflow-hidden shadow-lg transition-all hover:border-sky-400 cursor-pointer group"
                     >
-                      {tc.displayNumber}（{tc.nameJp}）
+                      {/* Card Header: Number/Name + Time (Category square badge removed) */}
+                      <div className="bg-[#1C2230] group-hover:bg-[#222B3D] px-3 py-2 flex items-baseline justify-between border-b border-neutral-700 transition-colors gap-2">
+                        <div className="flex items-baseline gap-2 min-w-0">
+                          <span className="text-base font-black text-white tracking-wide shrink-0 whitespace-nowrap">
+                            {tc.displayNumber}
+                          </span>
+                          {tc.nameJp && tc.nameJp !== tc.displayNumber && (
+                            <span className="text-xs font-bold text-sky-300 truncate">
+                              {tc.nameJp} {tc.nameEn && `(${tc.nameEn})`}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] font-mono text-neutral-400 shrink-0 whitespace-nowrap">
+                          {p0?.timeLabel || tc.issueTimeJst}
+                        </span>
+                      </div>
+
+                      {/* Card Body: Large Bold Numbers for Specs */}
+                      <div className="p-3 space-y-2.5">
+                        {/* Position & Course on 2 clean rows */}
+                        <div className="space-y-1 text-xs border-b border-neutral-800 pb-2">
+                          <div className="flex items-baseline justify-between">
+                            <span className="text-neutral-400 shrink-0 whitespace-nowrap">
+                              現在地:
+                            </span>
+                            <span className="text-neutral-200 font-bold text-right truncate ml-2">
+                              {p0?.location || '実況位置'}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline justify-between">
+                            <span className="text-neutral-400 shrink-0 whitespace-nowrap">
+                              進行・速度:
+                            </span>
+                            <div className="font-mono text-right ml-2 whitespace-nowrap">
+                              {p0?.course && p0?.speedKmh ? (
+                                <>
+                                  <span className="text-cyan-400 font-bold">
+                                    {p0.course}
+                                  </span>
+                                  <span className="text-base font-black text-cyan-300 ml-1.5">
+                                    {p0.speedKmh}
+                                  </span>
+                                  <span className="text-[10px] text-neutral-400 ml-0.5">
+                                    km/h
+                                  </span>
+                                </>
+                              ) : (
+                                <span className="text-neutral-400">-</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Large Metric Cards: Pressure & Wind (Gust wrapped cleanly below) */}
+                        <div className="grid grid-cols-2 gap-2">
+                          {/* Pressure */}
+                          <div className="bg-[#0B0F17] border border-neutral-800 p-2.5 rounded flex flex-col justify-between">
+                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                              中心気圧
+                            </span>
+                            <div className="flex items-baseline gap-1 mt-0.5">
+                              <span className="text-2xl font-black font-mono text-white tracking-tight">
+                                {p0?.pressureHpa || '-'}
+                              </span>
+                              <span className="text-xs font-bold text-neutral-400">
+                                hPa
+                              </span>
+                            </div>
+                            <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                              -
+                            </div>
+                          </div>
+
+                          {/* Max Wind */}
+                          <div className="bg-[#0B0F17] border border-neutral-800 p-2.5 rounded flex flex-col justify-between">
+                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                              最大風速
+                            </span>
+                            <div className="flex items-baseline gap-1 mt-0.5">
+                              <span className="text-2xl font-black font-mono text-yellow-300 tracking-tight">
+                                {p0?.maxWindMs || '-'}
+                              </span>
+                              <span className="text-xs font-bold text-neutral-400">
+                                m/s
+                              </span>
+                            </div>
+                            {p0?.maxGustMs ? (
+                              <div className="text-[11px] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
+                                <span className="text-neutral-400">最大瞬間</span>{' '}
+                                <span className="font-bold text-yellow-400">
+                                  {p0.maxGustMs}
+                                </span>{' '}
+                                <span className="text-[10px] text-neutral-400">
+                                  m/s
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                                -
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Gale / Storm Radius if present */}
+                        {(p0?.stormRadiusKm > 0 || p0?.galeRadiusKm > 0) && (
+                          <div className="flex items-center gap-3 text-xs pt-1 border-t border-neutral-800/80 font-mono">
+                            {p0.stormRadiusKm > 0 && (
+                              <span className="inline-flex items-center gap-1 text-red-400 whitespace-nowrap">
+                                <span className="w-2 h-2 rounded-full bg-red-500 inline-block shrink-0" />
+                                暴風域:{' '}
+                                <span className="font-bold text-white text-sm">
+                                  {p0.stormRadiusKm}
+                                </span>
+                                km
+                              </span>
+                            )}
+                            {p0.galeRadiusKm > 0 && (
+                              <span className="inline-flex items-center gap-1 text-yellow-400 whitespace-nowrap">
+                                <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block shrink-0" />
+                                強風域:{' '}
+                                <span className="font-bold text-white text-sm">
+                                  {p0.galeRadiusKm}
+                                </span>
+                                km
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              /* ==================== 2. SINGLE CYCLONE DETAIL MODE (Header Block Fixed + Forecast Timeline with ↓) ==================== */
+              <div className="space-y-2.5 pb-2">
+                {/* Back to overview button / status header */}
+                <div className="flex items-center justify-between text-xs pb-0.5">
+                  <div className="flex items-center gap-1.5 text-sky-300 font-bold shrink-0 whitespace-nowrap">
+                    <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
+                    <span>低気圧詳細 ({typhoonPatrolStep}/{totalTyphoons})</span>
+                  </div>
+                  {onReturnTyphoonOverview && (
+                    <button
+                      type="button"
+                      onClick={onReturnTyphoonOverview}
+                      className="px-2 py-0.5 text-[11px] font-bold bg-[#1C2230] border border-neutral-600 text-neutral-300 hover:text-white hover:border-sky-400 rounded transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                    >
+                      全低気圧一覧 ↩
                     </button>
-                  ))}
+                  )}
                 </div>
+
+                {/* Selected Typhoon Primary Header Block (Fixed) with Selection Highlight Animation */}
+                {(() => {
+                  const p0 =
+                    selectedTyphoon.points.find((p) => !p.isForecast) ||
+                    selectedTyphoon.points[0];
+
+                  return (
+                    <div className="border-2 border-sky-400 bg-[#141A28] rounded-md overflow-hidden shadow-[0_0_20px_rgba(56,189,248,0.35)] ring-1 ring-sky-300/50 animate-in fade-in slide-in-from-top-2 duration-300">
+                      {/* Fixed Top Block Header: NO square category block */}
+                      <div className="bg-sky-600 px-3 py-2 flex items-center justify-between text-white border-b border-sky-400/60 gap-2">
+                        <div className="flex items-baseline gap-2 min-w-0">
+                          <span className="text-base font-black tracking-wide shrink-0 whitespace-nowrap">
+                            {selectedTyphoon.displayNumber}
+                          </span>
+                          {selectedTyphoon.nameJp &&
+                            selectedTyphoon.nameJp !==
+                              selectedTyphoon.displayNumber && (
+                              <span className="text-xs font-bold text-sky-100 truncate">
+                                {selectedTyphoon.nameJp}{' '}
+                                {selectedTyphoon.nameEn &&
+                                  `(${selectedTyphoon.nameEn})`}
+                              </span>
+                            )}
+                        </div>
+                        <span className="text-[10px] font-bold bg-sky-950 px-2 py-0.5 rounded-full text-sky-200 border border-sky-400/50 shrink-0 whitespace-nowrap">
+                          実況
+                        </span>
+                      </div>
+
+                      {/* Current Stats with BIG BOLD NUMBERS */}
+                      <div className="p-3 space-y-2.5">
+                        <div className="space-y-1 text-xs border-b border-neutral-700/80 pb-2">
+                          <div className="flex items-baseline justify-between">
+                            <span className="text-neutral-400 shrink-0 whitespace-nowrap">
+                              現在位置:
+                            </span>
+                            <span className="text-white font-bold text-right truncate ml-2">
+                              {p0?.location || '実況位置'}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline justify-between">
+                            <span className="text-neutral-400 shrink-0 whitespace-nowrap">
+                              進行・速度:
+                            </span>
+                            <div className="font-mono text-right ml-2 whitespace-nowrap">
+                              {p0?.course && p0?.speedKmh ? (
+                                <>
+                                  <span className="text-cyan-400 font-bold">
+                                    {p0.course}
+                                  </span>
+                                  <span className="text-base font-black text-cyan-300 ml-1.5">
+                                    {p0.speedKmh}
+                                  </span>
+                                  <span className="text-[10px] text-neutral-400 ml-0.5">
+                                    km/h
+                                  </span>
+                                </>
+                              ) : (
+                                <span className="text-neutral-400">-</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="bg-[#0B0F17] border border-neutral-700/80 p-2.5 rounded flex flex-col justify-between">
+                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                              現在中心気圧
+                            </span>
+                            <div className="flex items-baseline gap-1 mt-0.5">
+                              <span className="text-2xl font-black font-mono text-white tracking-tight">
+                                {p0?.pressureHpa || '-'}
+                              </span>
+                              <span className="text-xs font-bold text-neutral-400">
+                                hPa
+                              </span>
+                            </div>
+                            <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                              -
+                            </div>
+                          </div>
+
+                          <div className="bg-[#0B0F17] border border-neutral-700/80 p-2.5 rounded flex flex-col justify-between">
+                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                              現在最大風速
+                            </span>
+                            <div className="flex items-baseline gap-1 mt-0.5">
+                              <span className="text-2xl font-black font-mono text-yellow-300 tracking-tight">
+                                {p0?.maxWindMs || '-'}
+                              </span>
+                              <span className="text-xs font-bold text-neutral-400">
+                                m/s
+                              </span>
+                            </div>
+                            {p0?.maxGustMs ? (
+                              <div className="text-[11px] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
+                                <span className="text-neutral-400">最大瞬間</span>{' '}
+                                <span className="font-bold text-yellow-400">
+                                  {p0.maxGustMs}
+                                </span>{' '}
+                                <span className="text-[10px] text-neutral-400">
+                                  m/s
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                                -
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {(p0?.stormRadiusKm > 0 || p0?.galeRadiusKm > 0) && (
+                          <div className="flex items-center gap-3 text-xs pt-1 border-t border-neutral-700/60 font-mono">
+                            {p0.stormRadiusKm > 0 && (
+                              <span className="inline-flex items-center gap-1 text-red-400 whitespace-nowrap">
+                                <span className="w-2 h-2 rounded-full bg-red-500 inline-block shrink-0" />
+                                暴風域:{' '}
+                                <span className="font-bold text-white text-sm">
+                                  {p0.stormRadiusKm}
+                                </span>
+                                km
+                              </span>
+                            )}
+                            {p0.galeRadiusKm > 0 && (
+                              <span className="inline-flex items-center gap-1 text-yellow-400 whitespace-nowrap">
+                                <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block shrink-0" />
+                                強風域:{' '}
+                                <span className="font-bold text-white text-sm">
+                                  {p0.galeRadiusKm}
+                                </span>
+                                km
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Forecast Timeline Connected by Downward Arrows */}
+                {(() => {
+                  const forecastPoints = selectedTyphoon.points.filter(
+                    (p) => p.isForecast
+                  );
+
+                  if (forecastPoints.length === 0) {
+                    return (
+                      <div className="p-3 bg-[#13161F] border border-neutral-800 rounded text-center text-xs text-neutral-400 mt-2">
+                        今後の進路予報はありません（現在の実況情報のみ）
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="pt-0.5 space-y-1">
+                      {forecastPoints.map((pt, fIdx) => (
+                        <React.Fragment key={`${selectedTyphoon.id}-fc-${fIdx}`}>
+                          {/* Downward connecting arrow before each forecast card */}
+                          <div className="flex flex-col items-center justify-center my-1.5 py-0.5">
+                            <div className="w-0.5 h-3.5 bg-gradient-to-b from-sky-400 to-sky-500" />
+                            <svg
+                              className="w-4 h-4 text-sky-400 -mt-1"
+                              viewBox="0 0 20 20"
+                              fill="currentColor"
+                            >
+                              <path
+                                fillRule="evenodd"
+                                d="M10 14.5a.75.75 0 01-.53-.22l-4.25-4.25a.75.75 0 111.06-1.06L9.25 11.94V3.75a.75.75 0 011.5 0v8.19l2.97-2.97a.75.75 0 111.06 1.06l-4.25 4.25a.75.75 0 01-.53.22z"
+                                clipRule="evenodd"
+                              />
+                            </svg>
+                          </div>
+
+                          {/* Forecast Card: Category badge removed so date/time never wraps */}
+                          <div className="border border-neutral-700/90 bg-[#141822] rounded-md overflow-hidden shadow-md">
+                            {/* Forecast Time Header */}
+                            <div className="bg-[#212736] px-3 py-1.5 flex items-baseline justify-between border-b border-neutral-700 gap-2">
+                              <span className="text-sm font-black text-white tracking-wide font-mono whitespace-nowrap">
+                                {pt.timeLabel}
+                              </span>
+                              <span className="text-[11px] font-mono text-neutral-300 shrink-0 whitespace-nowrap">
+                                {pt.partLabel}
+                              </span>
+                            </div>
+
+                            {/* Forecast Stats with BIG NUMBERS & GUST ON NEXT LINE */}
+                            <div className="p-2.5 space-y-2">
+                              <div className="grid grid-cols-2 gap-2">
+                                {/* Pressure */}
+                                <div className="bg-[#0B0F17] border border-neutral-800 p-2 rounded flex flex-col justify-between">
+                                  <span className="text-[10px] text-neutral-400 font-bold">
+                                    予想中心気圧
+                                  </span>
+                                  <div className="flex items-baseline gap-1 mt-0.5">
+                                    <span className="text-xl font-black font-mono text-white">
+                                      {pt.pressureHpa || '-'}
+                                    </span>
+                                    <span className="text-xs font-bold text-neutral-400">
+                                      hPa
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                                    -
+                                  </div>
+                                </div>
+
+                                {/* Max Wind (Gust on next line) */}
+                                <div className="bg-[#0B0F17] border border-neutral-800 p-2 rounded flex flex-col justify-between">
+                                  <span className="text-[10px] text-neutral-400 font-bold">
+                                    予想最大風速
+                                  </span>
+                                  <div className="flex items-baseline gap-1 mt-0.5">
+                                    <span className="text-xl font-black font-mono text-yellow-300">
+                                      {pt.maxWindMs || '-'}
+                                    </span>
+                                    <span className="text-xs font-bold text-neutral-400">
+                                      m/s
+                                    </span>
+                                  </div>
+                                  {pt.maxGustMs > 0 ? (
+                                    <div className="text-[11px] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
+                                      <span className="text-neutral-400">最大瞬間</span>{' '}
+                                      <span className="font-bold text-yellow-400">
+                                        {pt.maxGustMs}
+                                      </span>{' '}
+                                      <span className="text-[10px] text-neutral-400">
+                                        m/s
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                                      -
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Movement & Probability Circle on 2 clean rows */}
+                              <div className="space-y-1 text-xs pt-1.5 border-t border-neutral-800 text-neutral-300 font-mono">
+                                <div className="flex items-baseline justify-between">
+                                  <span className="text-neutral-400 shrink-0 whitespace-nowrap">
+                                    進行・速度:
+                                  </span>
+                                  <div className="text-right whitespace-nowrap ml-2">
+                                    <span className="text-cyan-400 font-bold">
+                                      {pt.course}
+                                    </span>{' '}
+                                    <span className="font-bold text-white text-sm ml-1">
+                                      {pt.speedKmh}
+                                    </span>
+                                    <span className="text-[10px] text-neutral-400 ml-0.5">
+                                      km/h
+                                    </span>
+                                  </div>
+                                </div>
+                                {pt.probabilityCircleRadiusKm > 0 && (
+                                  <div className="flex items-baseline justify-between">
+                                    <span className="text-neutral-400 shrink-0 whitespace-nowrap">
+                                      予報円半径:
+                                    </span>
+                                    <div className="text-right whitespace-nowrap ml-2">
+                                      <span className="font-bold text-white text-sm">
+                                        {pt.probabilityCircleRadiusKm}
+                                      </span>
+                                      <span className="text-[10px] text-neutral-400 ml-0.5">
+                                        km
+                                      </span>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
             )}
-
-            {/* Selected Typhoon Primary Summary */}
-            <div className="pb-2">
-              <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
-                <span>{selectedTyphoon.displayNumber}</span>
-                <span className="text-[11px] font-mono">気象庁実況</span>
-              </div>
-              <div className="px-2.5 pt-2 space-y-1">
-                <div className="text-base font-extrabold text-white">
-                  {selectedTyphoon.nameJp}
-                  {selectedTyphoon.nameEn ? (
-                    <span className="text-xs font-normal text-neutral-300 ml-1.5">
-                      ({selectedTyphoon.nameEn})
-                    </span>
-                  ) : null}
-                </div>
-                <div className="text-[11px] font-mono text-neutral-300">
-                  {selectedTyphoon.issueTimeJst}
-                </div>
-              </div>
-            </div>
-
-            {/* Chronological Analysis & Forecast Track Points */}
-            {selectedTyphoon.points.map((pt, idx) => (
-              <div key={`${selectedTyphoon.id}-pt-${idx}`} className="pb-1.5">
-                <div
-                  className={`px-2.5 py-0.5 text-[12px] font-bold flex items-center justify-between ${
-                    idx === 0
-                      ? 'bg-amber-500 text-slate-950'
-                      : 'bg-[#3E434F] text-white'
-                  }`}
-                >
-                  <span>{pt.timeLabel}</span>
-                  <span className="font-mono text-[11px]">{pt.categoryJp}</span>
-                </div>
-                <div className="px-2.5 pt-1.5 space-y-0.5 text-xs font-mono">
-                  <div className="flex items-center justify-between">
-                    <span className="text-neutral-300">中心気圧:</span>
-                    <span className="text-white font-bold">
-                      {pt.pressureHpa} hPa
-                    </span>
-                  </div>
-                  {pt.maxWindMs > 0 && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-neutral-300">最大風速:</span>
-                      <span className="text-yellow-300 font-bold">
-                        {pt.maxWindMs} m/s (瞬間{pt.maxGustMs}m/s)
-                      </span>
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between">
-                    <span className="text-neutral-300">進行・速度:</span>
-                    <span className="text-cyan-300">
-                      {pt.course} {pt.speedKmh} km/h
-                    </span>
-                  </div>
-                  {pt.probabilityCircleRadiusKm > 0 && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-neutral-400">予報円半径:</span>
-                      <span className="text-neutral-200">
-                        {pt.probabilityCircleRadiusKm} km
-                      </span>
-                    </div>
-                  )}
-                  {pt.stormRadiusKm > 0 && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-red-300">暴風域(25m/s+):</span>
-                      <span className="text-red-400 font-bold">
-                        半径 {pt.stormRadiusKm} km
-                      </span>
-                    </div>
-                  )}
-                  {pt.galeRadiusKm > 0 && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-yellow-300">強風域(15m/s+):</span>
-                      <span className="text-yellow-300">
-                        半径 {pt.galeRadiusKm} km
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
           </>
         )}
 
@@ -832,37 +1246,220 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {/* ==================== FORECAST ==================== */}
         {effectiveScene === 'forecast' &&
           (() => {
-            const scopedForecasts = isZoomedIn
-              ? (() => {
-                  const matched = data.forecasts.filter((fc) =>
-                    activeRegionConfig.id !== 'national' &&
-                    activeRegionConfig.id !== 'world'
-                      ? fc.regionId === activeRegionConfig.id
-                      : isPointInViewport(fc.lat, fc.lon) ||
-                        fc.regionId === syncedRegionId
-                  );
-                  return matched.length > 0 ? matched : data.forecasts;
-                })()
-              : data.forecasts;
+            const scopedForecasts = data.forecasts;
+            const refFc = scopedForecasts[0];
+            const todayDateLabel = refFc?.todayDateLabel || '今日';
+            const tomorrowDateLabel = refFc?.tomorrowDateLabel || '明日';
+            const dayAfterDateLabel = refFc?.dayAfterDateLabel || '明後日';
+            const activeSlot =
+              refFc?.hourly3h?.[
+                Math.max(
+                  0,
+                  Math.min(
+                    (refFc?.hourly3h?.length || 1) - 1,
+                    forecast3hIndex
+                  )
+                )
+              ];
 
-            return scopedForecasts.map((fc) => (
-              <div key={fc.id} className="pb-1.5">
-                <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                  <span>{fc.cityName}</span>
-                  <span className="text-[11px] font-mono text-neutral-200">
-                    降水 {Math.max(...fc.pops)}%
-                  </span>
+            return (
+              <div className="space-y-2 pb-2">
+                {/* Sticky Broadcast Mode Switcher Header */}
+                <div className="bg-[#181D29] border border-neutral-700 rounded-xs overflow-hidden">
+                  <div className="bg-sky-700 px-2.5 py-1 text-xs font-black text-white flex items-center justify-between">
+                    <span>
+                      {forecastViewMode === 'today_3h'
+                        ? `今日の3時間ごとの天気 (${todayDateLabel})`
+                        : forecastViewMode === 'tomorrow'
+                          ? `明日の全国の天気 (${tomorrowDateLabel})`
+                          : `明後日の全国の天気 (${dayAfterDateLabel})`}
+                    </span>
+                    <span className="font-mono text-[10px] bg-sky-950/80 px-1.5 py-0.5 rounded text-sky-200">
+                      全{scopedForecasts.length}地域
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1 p-1 bg-[#0F131C]">
+                    {(
+                      [
+                        { id: 'today_3h', label: '今日(3時間)' },
+                        { id: 'tomorrow', label: `明日 ${tomorrowDateLabel}` },
+                        { id: 'day_after', label: `明後日 ${dayAfterDateLabel}` },
+                      ] as Array<{ id: ForecastViewMode; label: string }>
+                    ).map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => onChangeForecastViewMode?.(m.id)}
+                        className={`py-1 text-[11px] font-bold rounded-xs border transition-colors cursor-pointer truncate ${
+                          forecastViewMode === m.id
+                            ? 'bg-sky-600 border-sky-300 text-white'
+                            : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="px-2.5 pt-1 flex items-center justify-between text-xs">
-                  <span className="text-white font-bold">{fc.todayWeather}</span>
-                  <span className="font-mono">
-                    <span className="text-red-400 font-bold">{fc.tempMax}℃</span>
-                    <span className="text-neutral-500">/</span>
-                    <span className="text-sky-400 font-bold">{fc.tempMin}℃</span>
-                  </span>
-                </div>
+
+                {forecastViewMode === 'today_3h' ? (
+                  /* ==================== 1. TODAY 3-HOURLY UPCOMING WEATHER ==================== */
+                  <div className="space-y-1.5">
+                    {activeSlot && (
+                      <div className="flex items-center justify-between px-2 py-1 bg-amber-950/40 border border-amber-500/50 rounded-xs text-[11px]">
+                        <span className="text-amber-200 font-bold">
+                          マップ表示時刻:
+                        </span>
+                        <span className="font-mono font-black text-amber-300">
+                          本日 {activeSlot.timeLabel} 予想
+                        </span>
+                      </div>
+                    )}
+
+                    {scopedForecasts.map((fc) => {
+                      const slots = fc.hourly3h || [];
+                      return (
+                        <div
+                          key={fc.id}
+                          className="border border-[#262E3D] bg-[#11151F] rounded-xs overflow-hidden"
+                        >
+                          <div className="bg-[#1A2230] px-2 py-0.5 flex items-center justify-between text-xs border-b border-[#262E3D]">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-black text-white whitespace-nowrap">
+                                {fc.cityName}
+                              </span>
+                              <span className="text-[11px] text-sky-200 font-bold truncate">
+                                {fc.todayWeather}
+                              </span>
+                            </div>
+                            <span className="font-mono text-[11px] shrink-0">
+                              <span className="text-red-400 font-bold">
+                                {fc.todayTempMax ?? fc.tempMax}℃
+                              </span>
+                              <span className="text-neutral-500">/</span>
+                              <span className="text-sky-400 font-bold">
+                                {fc.todayTempMin ?? fc.tempMin}℃
+                              </span>
+                            </span>
+                          </div>
+
+                          {/* 8-slot 3-hourly progression strip (03時..24時) */}
+                          <div className="grid grid-cols-8 divide-x divide-neutral-800 bg-[#0D1017]">
+                            {slots.map((slot, sIdx) => {
+                              const isCurrent = sIdx === forecast3hIndex;
+                              return (
+                                <button
+                                  key={slot.timeLabel}
+                                  type="button"
+                                  onClick={() => onChangeForecast3hIndex?.(sIdx)}
+                                  className={`py-1 px-0.5 flex flex-col items-center justify-between transition-colors cursor-pointer ${
+                                    isCurrent
+                                      ? 'bg-sky-900/50 ring-1 ring-inset ring-amber-400'
+                                      : 'hover:bg-neutral-800/60'
+                                  }`}
+                                >
+                                  <span
+                                    className={`text-[9px] font-mono leading-none ${
+                                      isCurrent
+                                        ? 'text-amber-300 font-black'
+                                        : 'text-neutral-400'
+                                    }`}
+                                  >
+                                    {slot.hour}時
+                                  </span>
+                                  <div
+                                    className="my-0.5"
+                                    dangerouslySetInnerHTML={{
+                                      __html: renderBroadcastWeatherSvg(
+                                        slot.weatherCode,
+                                        slot.weatherText,
+                                        24,
+                                        17
+                                      ),
+                                    }}
+                                  />
+                                  <span className="text-[10px] font-mono font-bold text-white leading-none">
+                                    {slot.temp}°
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  /* ==================== 2. TOMORROW / DAY-AFTER-TOMORROW FORECAST CARDS ==================== */
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {scopedForecasts.map((fc) => {
+                      const isTomorrow = forecastViewMode === 'tomorrow';
+                      const wCode = isTomorrow
+                        ? fc.tomorrowWeatherCode || fc.todayWeatherCode
+                        : fc.dayAfterWeatherCode || fc.tomorrowWeatherCode;
+                      const wText = isTomorrow
+                        ? fc.tomorrowWeather || fc.todayWeather
+                        : fc.dayAfterWeather || fc.tomorrowWeather;
+                      const tMax = isTomorrow
+                        ? (fc.tomorrowTempMax ?? fc.tempMax)
+                        : (fc.dayAfterTempMax ?? fc.tempMax);
+                      const tMin = isTomorrow
+                        ? (fc.tomorrowTempMin ?? fc.tempMin)
+                        : (fc.dayAfterTempMin ?? fc.tempMin);
+                      const popVal = isTomorrow
+                        ? (fc.tomorrowPop ?? Math.max(...fc.pops))
+                        : (fc.dayAfterPop ?? Math.max(...fc.pops));
+
+                      return (
+                        <div
+                          key={fc.id}
+                          className="bg-[#11151F] border border-[#262E3D] rounded-xs overflow-hidden shadow-md flex flex-col justify-between"
+                        >
+                          {/* Dark Theme Header */}
+                          <div className="px-2 py-0.5 text-xs font-bold text-slate-200 bg-[#1A2230] flex items-center justify-between border-b border-[#262E3D]">
+                            <span className="truncate">{fc.cityName}</span>
+                            <span className="text-[10px] font-mono font-bold text-sky-400 shrink-0">
+                              {popVal}%
+                            </span>
+                          </div>
+
+                          {/* Card Body: Left Weather Icon + Right Max/Min Temps */}
+                          <div className="p-1.5 flex items-center justify-between gap-1.5 bg-[#0D1017]">
+                            <div className="flex flex-col items-center min-w-0">
+                              <div
+                                className="border border-[#262E3D] rounded-xs overflow-hidden shrink-0 bg-[#0B0F17]"
+                                dangerouslySetInnerHTML={{
+                                  __html: renderBroadcastWeatherSvg(
+                                    wCode,
+                                    wText,
+                                    46,
+                                    32
+                                  ),
+                                }}
+                              />
+                              <span className="text-[10px] font-bold text-slate-300 truncate max-w-[68px] mt-0.5">
+                                {wText}
+                              </span>
+                            </div>
+
+                            {/* Stacked Dark Theme Temperature Box */}
+                            <div className="w-11 border border-[#262E3D] rounded-xs overflow-hidden font-mono shrink-0">
+                              <div className="bg-red-950/40 text-red-400 text-xs font-bold text-center leading-4 border-b border-[#262E3D]">
+                                {tMax}℃
+                              </div>
+                              <div className="bg-sky-950/40 text-sky-400 text-xs font-bold text-center leading-4">
+                                {tMin}℃
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            ));
+            );
           })()}
 
         {/* ==================== VOLCANO ==================== */}
@@ -1106,125 +1703,246 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {/* ==================== EARTHQUAKE ==================== */}
         {effectiveScene === 'earthquake' && (
           <>
-            {/* EEW (緊急地震速報) Live Banner (NERV / Broadcast Style) */}
-            {activeEew && isEewStillActive(activeEew) && (
-              <div className="pb-2 mb-2 bg-[#1A0B0E] border-2 border-red-500 rounded-xs shadow-lg shadow-red-950/60 animate-pulse-slow">
-                <div className="bg-red-600 px-2.5 py-1 text-[13px] font-black text-white flex items-center justify-between tracking-wide">
-                  <span className="flex items-center gap-1.5">
-                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-                    緊急地震速報 (警報)
-                  </span>
-                  <span className="font-mono text-xs bg-black/40 px-1.5 py-0.2 rounded-xs">
-                    第{activeEew.serial}報
-                    {activeEew.serial >= 5 ? ' (最終報)' : ''}
-                  </span>
-                </div>
-
-                <div className="px-2.5 pt-2 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-lg font-black text-white tracking-wide">
-                        {activeEew.hypocenterName || '震源調査中'}
-                      </div>
-                      <div className="text-xs font-mono text-neutral-300">
-                        {activeEew.magnitude > 0
-                          ? `M${activeEew.magnitude.toFixed(1)}`
-                          : 'M不明'}{' '}
-                        /{' '}
-                        {activeEew.depthKm >= 0
-                          ? `深さ約${activeEew.depthKm}km`
-                          : '深さ不明'}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-[10px] text-neutral-400 font-mono">
-                        最大予測震度
-                      </div>
-                      <div className="text-2xl font-black text-yellow-300 font-mono tracking-wider">
-                        震度{activeEew.maxScaleLabel}
-                      </div>
-                    </div>
+            {/* EEW (緊急地震速報 警報・予報) Live Banner (NERV / Broadcast Style) */}
+            {activeEew && isEewStillActive(activeEew) && (() => {
+              const isWarn = activeEew.isWarning !== false;
+              const isFinalReport = Boolean(activeEew.isFinal) || activeEew.serial >= 5;
+              return (
+                <div
+                  data-testid="eew-live-banner"
+                  className={`pb-2 mb-2 rounded-xs shadow-lg animate-pulse-slow border-2 ${
+                    isWarn
+                      ? 'bg-[#1A0B0E] border-red-500 shadow-red-950/60'
+                      : 'bg-[#1C1408] border-amber-500 shadow-amber-950/60'
+                  }`}
+                >
+                  <div
+                    className={`px-2.5 py-1 text-[13px] font-black text-white flex items-center justify-between tracking-wide ${
+                      isWarn ? 'bg-red-600' : 'bg-amber-600'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping" />
+                      {isWarn ? '緊急地震速報 (警報)' : '緊急地震速報 (予報)'}
+                    </span>
+                    <span className="font-mono text-xs bg-black/40 px-1.5 py-0.2 rounded-xs">
+                      第{activeEew.serial}報
+                      {isFinalReport ? ' (最終報)' : ''}
+                    </span>
                   </div>
 
-                  <div className="text-[11px] font-mono text-neutral-400 flex items-center justify-between border-t border-red-900/50 pt-1">
-                    <span>発生: {activeEew.originTime || '直近'}</span>
-                    <span>発表: {activeEew.issueTime || '随時'}</span>
-                  </div>
-
-                  {/* Warning Areas with Arrival Countdown */}
-                  {activeEew.areas.length > 0 && (
-                    <div className="space-y-1 pt-1">
-                      <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
-                        <span>強い揺れの予想地域</span>
-                        <span className="font-mono text-[10px] text-neutral-400">
-                          {activeEew.areas.length}地域
-                        </span>
+                  <div className="px-2.5 pt-2 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-lg font-black text-white tracking-wide">
+                          {activeEew.hypocenterName || '震源調査中'}
+                        </div>
+                        <div className="text-xs font-mono text-neutral-300">
+                          {activeEew.magnitude > 0
+                            ? `M${activeEew.magnitude.toFixed(1)}`
+                            : 'M不明'}{' '}
+                          /{' '}
+                          {activeEew.depthKm >= 0
+                            ? `深さ約${activeEew.depthKm}km`
+                            : '深さ不明'}
+                        </div>
                       </div>
-                      <div className="max-h-48 overflow-y-auto space-y-1 pr-0.5">
-                        {activeEew.areas.map((area) => {
-                          const scaleRange = formatEewScaleRange(
-                            area.scaleFrom,
-                            area.scaleTo
-                          );
-                          const arrival = formatEewArrivalLabel(
-                            area,
-                            eewAnimNow
-                          );
-                          const isArrived = arrival.includes('到達');
-                          return (
-                            <div
-                              key={`${area.pref}-${area.name}`}
-                              className="bg-neutral-900/90 border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between text-xs"
-                            >
-                              <div className="font-bold text-white">
-                                <span className="text-[11px] text-neutral-400 mr-1.5">
-                                  {area.pref}
-                                </span>
-                                {area.name}
-                              </div>
-                              <div className="flex items-center gap-2 font-mono">
-                                <span className="px-1.5 py-0.2 bg-yellow-400 text-slate-950 font-black rounded-xs text-[11px]">
-                                  {scaleRange}
-                                </span>
-                                <span
-                                  className={`text-[11px] font-bold ${
-                                    isArrived
-                                      ? 'text-red-400'
-                                      : 'text-amber-300'
-                                  }`}
-                                >
-                                  {arrival}
-                                </span>
-                              </div>
-                            </div>
-                          );
-                        })}
+                      <div className="text-right">
+                        <div className="text-[10px] text-neutral-400 font-mono">
+                          {eewDisplayMode === 'lpgm' ? '最大予想階級' : '最大予測震度'}
+                        </div>
+                        <div
+                          className={`text-2xl font-black font-mono tracking-wider ${
+                            eewDisplayMode === 'lpgm' ? 'text-orange-400' : 'text-yellow-300'
+                          }`}
+                        >
+                          {eewDisplayMode === 'lpgm'
+                            ? activeEew.maxLpgmLabel || '階級1以上'
+                            : activeEew.maxScaleLabel === '不明' || activeEew.maxScaleLabel === '解析中'
+                              ? activeEew.maxScaleLabel
+                              : `震度${activeEew.maxScaleLabel}`}
+                        </div>
                       </div>
                     </div>
-                  )}
+
+                    {/* Mode Switcher Pills: 予測震度 ↔ 長周期地震動（階級1〜4） */}
+                    <div className="grid grid-cols-2 gap-1 p-0.5 bg-black/50 border border-neutral-700/80 rounded-xs">
+                      <button
+                        type="button"
+                        onClick={() => onChangeEewDisplayMode?.('intensity')}
+                        className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
+                          eewDisplayMode === 'intensity'
+                            ? 'bg-red-600 text-white font-black shadow-xs'
+                            : 'text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        震度予測 (1〜7)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onChangeEewDisplayMode?.('lpgm')}
+                        className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
+                          eewDisplayMode === 'lpgm'
+                            ? 'bg-amber-600 text-white font-black shadow-xs'
+                            : 'text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        長周期地震動 (階級1〜4)
+                      </button>
+                    </div>
+
+                    <div
+                      className={`text-[11px] font-mono text-neutral-400 flex items-center justify-between border-t pt-1 ${
+                        isWarn ? 'border-red-900/50' : 'border-amber-900/50'
+                      }`}
+                    >
+                      <span>発生: {activeEew.originTime || '直近'}</span>
+                      <span className="flex items-center gap-1 text-[10px] text-amber-300">
+                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+                        自動切替中
+                      </span>
+                    </div>
+
+                    {/* Warning / Affected Areas (No "未到達と予測" - displays clean predicted intensity or LPGM class) */}
+                    {activeEew.areas.length > 0 && (
+                      <div className="space-y-1 pt-1">
+                        <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
+                          <span>
+                            {eewDisplayMode === 'lpgm'
+                              ? '長周期地震動 予想地域（階級1〜4）'
+                              : '強い揺れの予想地域'}
+                          </span>
+                          <span className="font-mono text-[10px] text-neutral-400">
+                            {activeEew.areas.length}地域
+                          </span>
+                        </div>
+                        <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
+                          {activeEew.areas.map((area) => {
+                            const scaleRange = formatEewScaleRange(
+                              area.scaleFrom,
+                              area.scaleTo
+                            );
+                            const lpgmStyle = getLpgmClassStyle(area.lpgmClass);
+
+                            return (
+                              <div
+                                key={`${area.pref}-${area.name}`}
+                                className="bg-[#121620] border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between text-xs"
+                              >
+                                <div className="font-bold text-white min-w-0 pr-1 truncate">
+                                  <span className="text-[10px] text-neutral-400 mr-1.5 font-normal">
+                                    {area.pref}
+                                  </span>
+                                  <span>{area.name}</span>
+                                </div>
+                                <div className="flex items-center gap-1.5 font-mono shrink-0">
+                                  {eewDisplayMode === 'lpgm' ? (
+                                    <span
+                                      className="px-1.5 py-0.2 font-black rounded-xs text-[11px]"
+                                      style={{
+                                        backgroundColor: lpgmStyle.bg,
+                                        color: lpgmStyle.text,
+                                      }}
+                                    >
+                                      {lpgmStyle.label}
+                                    </span>
+                                  ) : (
+                                    <span
+                                      className={`px-1.5 py-0.2 font-black rounded-xs text-[11px] ${
+                                        area.scaleTo >= 50 || area.scaleFrom >= 50
+                                          ? 'bg-red-600 text-white'
+                                          : 'bg-yellow-400 text-slate-950'
+                                      }`}
+                                    >
+                                      震度{scaleRange}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Regular Earthquake Detailed Report */}
             <div className="pb-2">
               <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
-                <span>震源・震度詳細</span>
+                <span>
+                  {selectedEarthquake.issueTypeLabel || '震源・震度詳細'}
+                </span>
                 <span className="font-mono text-xs">
-                  最大震度 {selectedEarthquake.maxScaleLabel}
+                  {selectedEarthquake.maxScaleCode >= 10
+                    ? `最大震度 ${selectedEarthquake.maxScaleLabel}`
+                    : '最大震度 調査中'}
                 </span>
               </div>
+              {/* Confirmation / Lock Status Bar */}
+              {selectedEarthquake.isConfirmed === false ||
+              (activeEew && isEewStillActive(activeEew)) ? (
+                <div
+                  data-testid="earthquake-awaiting-confirm-badge"
+                  className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                    最終震度・震源の確定まで地震タブ固定中
+                  </span>
+                  <span className="font-mono text-[10px] text-amber-300">
+                    自動取得中
+                  </span>
+                </div>
+              ) : interruptKind === 'earthquake' ? (
+                <div
+                  data-testid="earthquake-confirmed-badge"
+                  className="bg-emerald-950/70 border-b border-emerald-500/60 px-2.5 py-1 text-[11px] font-bold text-emerald-200 flex items-center justify-between"
+                >
+                  <span>✓ 震源・各地の震度 確定</span>
+                  <button
+                    type="button"
+                    onClick={onDismissInterrupt}
+                    className="font-mono text-[10px] bg-emerald-800/80 hover:bg-emerald-700 text-white px-1.5 py-0.5 rounded-xs cursor-pointer"
+                  >
+                    巡回再開
+                  </button>
+                </div>
+              ) : isLoopPaused ? (
+                <div
+                  data-testid="earthquake-manual-pinned-badge"
+                  className="bg-neutral-800/90 border-b border-amber-500/50 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
+                    手動選択中（巡回停止）
+                  </span>
+                  <button
+                    type="button"
+                    onClick={onDismissInterrupt}
+                    className="font-mono text-[10px] bg-amber-700/90 hover:bg-amber-600 text-white px-2 py-0.5 rounded-xs cursor-pointer transition-colors shadow-xs"
+                    title="自動巡回を再開して最新の地震に戻す"
+                  >
+                    巡回再開 ▶
+                  </button>
+                </div>
+              ) : null}
               <div className="px-2.5 pt-2 space-y-1">
                 <div className="text-base font-extrabold text-white">
                   {selectedEarthquake.hypocenterName}
                 </div>
                 <div className="text-xs font-mono text-neutral-200 flex items-center justify-between">
                   <span>
-                    M{selectedEarthquake.magnitude.toFixed(1)} / 深さ約
-                    {selectedEarthquake.depthKm}km
+                    {selectedEarthquake.hypocenterUnknown
+                      ? '震源・規模 調査中'
+                      : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
                   </span>
                   <span className="text-amber-300 font-bold">
-                    観測点 {selectedEarthquake.stations.length}箇所
+                    {selectedEarthquake.issueTypeLabel === '震度速報'
+                      ? `観測地域 ${selectedEarthquake.stations.length}地域`
+                      : `観測点 ${selectedEarthquake.stations.length}箇所`}
                   </span>
                 </div>
                 <div className="text-[11px] font-mono text-neutral-400">

@@ -6,6 +6,7 @@ import {
   TsunamiGrade,
 } from '../types/jma';
 import { formatSeismicScale, parseJmaIsoCoordinate } from './jmaParser';
+import { JMA_SUBDIVISION_AREAS } from '../data/jmaSubdivisions';
 
 /**
  * P2P地震情報 API v2 で利用する情報コード
@@ -149,14 +150,24 @@ export function parseP2PEew(
   const rawMag = Number(hypo.magnitude);
 
   const areas: EewForecastArea[] = (Array.isArray(item.areas) ? item.areas : [])
-    .map((a: any) => ({
-      pref: String(a?.pref || ''),
-      name: String(a?.name || ''),
-      scaleFrom: Math.trunc(Number(a?.scaleFrom ?? -1)),
-      scaleTo: Math.trunc(Number(a?.scaleTo ?? -1)),
-      kindCode: String(a?.kindCode ?? ''),
-      arrivalTime: a?.arrivalTime ? String(a.arrivalTime) : null,
-    }))
+    .map((a: any) => {
+      const scaleFrom = Math.trunc(Number(a?.scaleFrom ?? -1));
+      const scaleTo = Math.trunc(Number(a?.scaleTo ?? -1));
+      const rawLpgm = Number(a?.lpgmClass ?? a?.lpgm ?? -1);
+      const lpgmClass =
+        rawLpgm >= 1 && rawLpgm <= 4
+          ? (rawLpgm as 1 | 2 | 3 | 4)
+          : estimateLpgmClassFromScale(scaleFrom, scaleTo, rawMag);
+      return {
+        pref: String(a?.pref || ''),
+        name: String(a?.name || ''),
+        scaleFrom,
+        scaleTo,
+        kindCode: String(a?.kindCode ?? ''),
+        arrivalTime: a?.arrivalTime ? String(a.arrivalTime) : null,
+        lpgmClass,
+      };
+    })
     .filter((a: EewForecastArea) => a.name)
     .sort(
       (a: EewForecastArea, b: EewForecastArea) =>
@@ -172,6 +183,12 @@ export function parseP2PEew(
     (a) => a.scaleTo === 99 && getEewAreaRepresentativeScale(a) === maxScaleCode
   );
 
+  const maxLpgmClass = areas.reduce<0 | 1 | 2 | 3 | 4>(
+    (max, a) => (typeof a.lpgmClass === 'number' && a.lpgmClass > max ? a.lpgmClass : max),
+    0
+  );
+  const maxLpgmLabel = maxLpgmClass > 0 ? `階級${maxLpgmClass}` : undefined;
+
   return {
     id: String(item.id || `${eventId}-${serial}`),
     eventId,
@@ -185,31 +202,245 @@ export function parseP2PEew(
     magnitude: !Number.isNaN(rawMag) && rawMag >= 0 ? Number(rawMag.toFixed(1)) : -1,
     isCancelled,
     isTest: Boolean(item.test),
+    isWarning: true,
+    isFinal: false,
     isAssumedHypocenter: String(eq.condition || '') === '仮定震源要素',
     maxScaleCode,
     maxScaleLabel:
       maxScaleCode < 0
         ? '不明'
         : `${formatSeismicScaleJa(maxScaleCode)}${maxHasUpper ? '以上' : ''}`,
+    maxLpgmClass,
+    maxLpgmLabel,
     areas,
     receivedAtMs,
   };
 }
 
 /**
+ * Maps a Japanese/JMA intensity string (e.g. "3", "5弱", "5-", "6強", "不明") to P2P numeric scaleCode.
+ */
+function parseEewIntensityStringToCode(raw: unknown): {
+  scaleCode: number;
+  scaleLabel: string;
+} {
+  const s = String(raw ?? '').trim().replace(/^震度/, '');
+  switch (s) {
+    case '7':
+      return { scaleCode: 70, scaleLabel: '7' };
+    case '6強':
+    case '6+':
+      return { scaleCode: 60, scaleLabel: '6強' };
+    case '6弱':
+    case '6-':
+      return { scaleCode: 55, scaleLabel: '6弱' };
+    case '5強':
+    case '5+':
+      return { scaleCode: 50, scaleLabel: '5強' };
+    case '5弱':
+    case '5-':
+    case '5弱程度以上':
+      return { scaleCode: 45, scaleLabel: s.includes('以上') ? '5弱以上' : '5弱' };
+    case '4':
+      return { scaleCode: 40, scaleLabel: '4' };
+    case '3':
+      return { scaleCode: 30, scaleLabel: '3' };
+    case '2':
+      return { scaleCode: 20, scaleLabel: '2' };
+    case '1':
+      return { scaleCode: 10, scaleLabel: '1' };
+    default:
+      return { scaleCode: -1, scaleLabel: '不明' };
+  }
+}
+
+/**
+ * Parses a P2P地震情報 code 554 (`緊急地震速報 発表検出`) payload into an immediate placeholder `EewReport`.
+ */
+export function parseP2PEewDetection(
+  item: Record<string, any>,
+  receivedAtMs: number = Date.now()
+): EewReport | null {
+  if (!item || Number(item.code) !== P2P_CODES.EEW_DETECTION) return null;
+  const timeStr = String(item.time || '');
+  const id = String(item.id || `p2p-554-${timeStr || receivedAtMs}`);
+  return {
+    id,
+    eventId: `p2p-554-${id}`,
+    serial: 1,
+    issueTime: timeStr,
+    originTime: timeStr,
+    hypocenterName: '緊急地震速報 発表検出（解析中）',
+    lat: Number.NaN,
+    lon: Number.NaN,
+    depthKm: -1,
+    magnitude: -1,
+    isCancelled: false,
+    isTest: false,
+    isWarning: true,
+    isFinal: false,
+    isAssumedHypocenter: false,
+    maxScaleCode: -1,
+    maxScaleLabel: '解析中',
+    areas: [],
+    receivedAtMs,
+  };
+}
+
+/**
+ * Parses a Wolfx JMA EEW JSON / WebSocket payload (`https://api.wolfx.jp/jma_eew.json` or `wss://ws-api.wolfx.jp/jma_eew`).
+ * Supports BOTH `緊急地震速報（予報）` (`isWarn: false`) and `緊急地震速報（警報）` (`isWarn: true`),
+ * including every serial (`第1報..最終報`).
+ */
+export function parseWolfxEew(
+  item: Record<string, any>,
+  nowMs: number = Date.now()
+): EewReport | null {
+  if (!item || typeof item !== 'object') return null;
+  if (item.type && item.type !== 'jma_eew') return null;
+
+  const eventId = String(item.EventID || '').trim();
+  if (!eventId) return null;
+
+  const serialNum = Number.parseInt(String(item.Serial ?? '1'), 10);
+  const serial = Number.isNaN(serialNum) || serialNum < 1 ? 1 : serialNum;
+  const isCancelled = Boolean(item.isCancel);
+  const isTest = Boolean(item.isTraining);
+  const isWarning = Boolean(item.isWarn) || String(item.Title || '').includes('警報');
+  const isFinal = Boolean(item.isFinal);
+  const isAssumedHypocenter = Boolean(item.isAssumption);
+
+  const issueTime = String(item.AnnouncedTime || '');
+  const originTime = String(item.OriginTime || '');
+  const hypocenterName = String(
+    item.Hypocenter || (isCancelled ? '' : '震源調査中')
+  );
+
+  const rawLat = Number(item.Latitude);
+  const rawLon = Number(item.Longitude);
+  const hasHypo =
+    !Number.isNaN(rawLat) &&
+    rawLat > -90 &&
+    rawLat < 90 &&
+    !Number.isNaN(rawLon) &&
+    rawLon > -180 &&
+    rawLon < 180;
+
+  const rawDepth = Number(item.Depth);
+  const rawMag = Number(item.Magnitude ?? item.Magunitude);
+
+  const maxIntInfo = parseEewIntensityStringToCode(item.MaxIntensity);
+
+  const rawAreas = Array.isArray(item.WarnArea) ? item.WarnArea : [];
+  const areas: EewForecastArea[] = rawAreas
+    .map((a: any) => {
+      const name = String(a?.Chiiki || a?.name || '').trim();
+      const s1 = parseEewIntensityStringToCode(a?.Shindo1);
+      const s2 =
+        a?.Shindo2 === '以上' || String(a?.Shindo2 || '').includes('以上')
+          ? { scaleCode: 99, scaleLabel: '以上' }
+          : parseEewIntensityStringToCode(a?.Shindo2);
+      const arrived =
+        String(a?.Arrive || '').includes('到達') ||
+        String(a?.Time || '').includes('//');
+      let arrivalTime: string | null = null;
+      const rawTime = String(a?.Time || '').trim();
+      if (/^\d{2}:\d{2}:\d{2}$/.test(rawTime) && issueTime.length >= 10) {
+        arrivalTime = `${issueTime.slice(0, 10)} ${rawTime}`;
+      }
+      const scaleFrom = s1.scaleCode;
+      const scaleTo = s2.scaleCode > 0 ? s2.scaleCode : s1.scaleCode;
+      const rawLpgm = Number(a?.lpgmClass ?? a?.Lpgm ?? -1);
+      const lpgmClass =
+        rawLpgm >= 1 && rawLpgm <= 4
+          ? (rawLpgm as 1 | 2 | 3 | 4)
+          : estimateLpgmClassFromScale(scaleFrom, scaleTo, rawMag);
+      return {
+        pref: name.slice(0, 3),
+        name,
+        scaleFrom,
+        scaleTo,
+        kindCode: isAssumedHypocenter ? '19' : arrived ? '11' : '10',
+        arrivalTime,
+        lpgmClass,
+      };
+    })
+    .filter((a: EewForecastArea) => a.name)
+    .sort(
+      (a: EewForecastArea, b: EewForecastArea) =>
+        getEewAreaRepresentativeScale(b) - getEewAreaRepresentativeScale(a)
+    );
+
+  const maxLpgmClass = areas.reduce<0 | 1 | 2 | 3 | 4>(
+    (max, a) => (typeof a.lpgmClass === 'number' && a.lpgmClass > max ? a.lpgmClass : max),
+    0
+  );
+  const maxLpgmLabel = maxLpgmClass > 0 ? `階級${maxLpgmClass}` : undefined;
+
+  // Use AnnouncedTime (or OriginTime) to determine receivedAtMs so REST polling
+  // does not treat an old EEW from hours ago as newly received right now.
+  const announcedMs = parseJstDateTimeMs(issueTime);
+  const originMs = parseJstDateTimeMs(originTime);
+  const refTimeMs = !Number.isNaN(announcedMs)
+    ? announcedMs
+    : !Number.isNaN(originMs)
+      ? originMs
+      : nowMs;
+
+  return {
+    id: `wolfx-eew-${eventId}-${serial}`,
+    eventId,
+    serial,
+    issueTime,
+    originTime,
+    hypocenterName,
+    lat: hasHypo ? rawLat : Number.NaN,
+    lon: hasHypo ? rawLon : Number.NaN,
+    depthKm: !Number.isNaN(rawDepth) && rawDepth >= 0 ? Math.trunc(rawDepth) : -1,
+    magnitude: !Number.isNaN(rawMag) && rawMag > 0 ? Number(rawMag.toFixed(1)) : -1,
+    isCancelled,
+    isTest,
+    isWarning,
+    isFinal,
+    isAssumedHypocenter,
+    maxScaleCode: maxIntInfo.scaleCode,
+    maxScaleLabel: maxIntInfo.scaleLabel,
+    maxLpgmClass,
+    maxLpgmLabel,
+    areas,
+    receivedAtMs: refTimeMs,
+  };
+}
+
+/**
  * Determines whether an incoming EEW report should replace the currently displayed one:
- * - New event (different `eventId`) always replaces.
- * - Same event: replace only when `serial` is newer or equal (handles WebSocket duplicates / out-of-order delivery),
- *   or when the incoming report is a cancellation.
+ * - Placeholder detection (`p2p-554-*`) is always replaced by an actual EEW report.
+ * - New event (different `eventId`) replaces if its timestamp is >= current event.
+ * - Same event: replace when `serial` is newer, or when `serial` is equal and the incoming
+ *   report has richer data (e.g. warning areas, final flag, or cancellation).
  */
 export function shouldReplaceEew(
   prev: EewReport | null | undefined,
   next: EewReport
 ): boolean {
   if (!prev) return true;
-  if (prev.eventId !== next.eventId) return true;
+  if (prev.eventId.startsWith('p2p-554-') && !next.eventId.startsWith('p2p-554-')) {
+    return true;
+  }
+  if (!prev.eventId.startsWith('p2p-554-') && next.eventId.startsWith('p2p-554-')) {
+    return false;
+  }
+  if (prev.eventId !== next.eventId) {
+    return next.receivedAtMs >= prev.receivedAtMs - 60000;
+  }
   if (next.isCancelled) return true;
-  return next.serial >= prev.serial;
+  if (next.serial > prev.serial) return true;
+  if (next.serial === prev.serial) {
+    if (next.areas.length > prev.areas.length) return true;
+    if (next.isFinal && !prev.isFinal) return true;
+    if (next.isWarning && !prev.isWarning) return true;
+  }
+  return false;
 }
 
 /**
@@ -618,3 +849,245 @@ export function getTsunamiAlertSeverity(
 
   return 'none';
 }
+
+/** 長周期地震動（LPGM: Long-Period Ground Motion）階級のスタイルと解説定義 */
+export interface LpgmClassStyle {
+  bg: string;
+  text: string;
+  border: string;
+  label: string;
+  description: string;
+}
+
+export function getLpgmClassStyle(lpgmClass: number | undefined): LpgmClassStyle {
+  switch (lpgmClass) {
+    case 4:
+      return {
+        bg: '#EF4444',
+        text: '#FFFFFF',
+        border: '#DC2626',
+        label: '階級4',
+        description: '立っていることができず、はいつくばらないと動けない',
+      };
+    case 3:
+      return {
+        bg: '#F97316',
+        text: '#FFFFFF',
+        border: '#EA580C',
+        label: '階級3',
+        description: '立っていることが困難。固定していない家具が移動・転倒',
+      };
+    case 2:
+      return {
+        bg: '#F59E0B',
+        text: '#0B0D13',
+        border: '#D97706',
+        label: '階級2',
+        description: '室内で大きな揺れ。物につかまらないと歩行が困難',
+      };
+    case 1:
+      return {
+        bg: '#10B981',
+        text: '#FFFFFF',
+        border: '#059669',
+        label: '階級1',
+        description: '室内のほとんどの人が揺れを感じる。ブラインドが揺れる',
+      };
+    default:
+      return {
+        bg: '#334155',
+        text: '#94A3B8',
+        border: '#1E293B',
+        label: '階級0',
+        description: '長周期地震動による顕著な揺れは予測されていません',
+      };
+  }
+}
+
+/**
+ * EEW予測震度・規模（M）から長周期地震動階級（1〜4）を気象庁基準に準拠して推定・付与する
+ */
+export function estimateLpgmClassFromScale(
+  scaleFrom: number,
+  scaleTo: number,
+  magnitude: number = 6.0
+): 0 | 1 | 2 | 3 | 4 {
+  const maxS = scaleTo > 0 && scaleTo !== 99 ? scaleTo : scaleFrom;
+  if (magnitude < 5.4 && maxS < 45) return 0;
+  if (maxS >= 65) return 4; // 震度6強以上 -> 階級4
+  if (maxS >= 55) return 3; // 震度5強〜6弱 -> 階級3
+  if (maxS >= 45) return 2; // 震度5弱 -> 階級2
+  if (maxS >= 40 && magnitude >= 5.8) return 1; // 震度4かつM5.8以上 -> 階級1
+  return 0;
+}
+
+/**
+ * EEW 電文の府県名（pref）と細分区域名（name）から
+ * 気象庁震度細分区域コード（100〜790番台）を照合・取得する
+ */
+export function findSubdivisionAreaCodes(pref: string, name: string): string[] {
+  const normPref = (pref || '').replace(/(都|府|県)$/, '').trim();
+  const rawCleanName = (name || '')
+    .replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xfee0))
+    .replace(/(地方|地域)$/, '')
+    .trim();
+  const normName = rawCleanName.replace(/(都|府|県)$/, '').trim();
+
+  // 都道府県名そのものが指定されている場合（例: pref="福岡県", name="福岡県" または name=""）
+  // は、その都道府県の全細分区域を返す
+  const isWholePrefecture =
+    !normName ||
+    rawCleanName === pref ||
+    (Boolean(normPref) && rawCleanName === `${normPref}県`) ||
+    (Boolean(normPref) && rawCleanName === `${normPref}府`) ||
+    (Boolean(normPref) && rawCleanName === `${normPref}都`);
+
+  if (isWholePrefecture) {
+    const list: string[] = [];
+    for (const [code, fullName] of Object.entries(JMA_SUBDIVISION_AREAS)) {
+      if (normPref && fullName.includes(normPref)) list.push(code);
+    }
+    return list;
+  }
+
+  // 1. 細分区域名または都道府県+区域名の完全一致を最優先
+  const matches: string[] = [];
+  for (const [code, fullName] of Object.entries(JMA_SUBDIVISION_AREAS)) {
+    const fullNorm = fullName.replace(/[０-９]/g, (s) =>
+      String.fromCharCode(s.charCodeAt(0) - 0xfee0)
+    );
+    const specific = fullNorm.replace(
+      new RegExp(`^${normPref}(都|府|県)?`),
+      ''
+    );
+
+    if (
+      fullNorm === rawCleanName ||
+      fullNorm === `${pref}${name}` ||
+      fullNorm === `${normPref}${rawCleanName}` ||
+      (normName && specific === normName)
+    ) {
+      matches.push(code);
+    }
+  }
+
+  if (matches.length > 0) return matches;
+
+  // 2. 部分一致（区域名を含む・含まれる）
+  if (normName) {
+    for (const [code, fullName] of Object.entries(JMA_SUBDIVISION_AREAS)) {
+      const fullNorm = fullName.replace(/[０-９]/g, (s) =>
+        String.fromCharCode(s.charCodeAt(0) - 0xfee0)
+      );
+      if (normPref && !fullNorm.includes(normPref)) continue;
+
+      const specific = fullNorm.replace(
+        new RegExp(`^${normPref}(都|府|県)?`),
+        ''
+      );
+      if (
+        (specific && normName.includes(specific)) ||
+        (normName && specific.includes(normName))
+      ) {
+        matches.push(code);
+      }
+    }
+  }
+
+  if (matches.length > 0) return matches;
+
+  // 3. 固有の細分区域にヒットしなかった場合のフォールバック（都道府県全域）
+  if (normPref) {
+    const list: string[] = [];
+    for (const [code, fullName] of Object.entries(JMA_SUBDIVISION_AREAS)) {
+      if (fullName.includes(normPref)) list.push(code);
+    }
+    return list;
+  }
+
+  return [];
+}
+
+/**
+ * EEW レポートから気象庁細分区域コード（188区域）ごとの最大予測震度コード Map を算出する
+ */
+export function computeEewAreaScales(eew: EewReport | null | undefined): Map<string, number> {
+  const scaleMap = new Map<string, number>();
+  if (!eew || !Array.isArray(eew.areas)) return scaleMap;
+
+  for (const area of eew.areas) {
+    // 代表予測震度（scaleTo が 99 の場合は scaleFrom、そうでなければ scaleTo を基本とする）
+    let repScale =
+      area.scaleTo > 0 && area.scaleTo !== 99 ? area.scaleTo : area.scaleFrom;
+    if (repScale <= 0) repScale = area.scaleFrom > 0 ? area.scaleFrom : 10;
+
+    const codes = findSubdivisionAreaCodes(area.pref, area.name);
+    for (const code of codes) {
+      const current = scaleMap.get(code) || 0;
+      if (repScale > current) {
+        scaleMap.set(code, repScale);
+      }
+    }
+  }
+
+  return scaleMap;
+}
+
+/**
+ * 地震情報・EEWマップ上で位置関係を直感的に把握するための主要都市（県庁所在地・中核市）座標一覧
+ */
+export const MAJOR_CITIES: Array<{ name: string; lat: number; lon: number }> = [
+  { name: '札幌市', lat: 43.0642, lon: 141.3469 },
+  { name: '旭川市', lat: 43.7706, lon: 142.3649 },
+  { name: '函館市', lat: 41.7687, lon: 140.7288 },
+  { name: '釧路市', lat: 42.9849, lon: 144.3818 },
+  { name: '青森市', lat: 40.8244, lon: 140.7400 },
+  { name: '盛岡市', lat: 39.7036, lon: 141.1527 },
+  { name: '仙台市', lat: 38.2682, lon: 140.8694 },
+  { name: '秋田市', lat: 39.7186, lon: 140.1024 },
+  { name: '山形市', lat: 38.2404, lon: 140.3633 },
+  { name: '福島市', lat: 37.7503, lon: 140.4678 },
+  { name: '水戸市', lat: 36.3418, lon: 140.4468 },
+  { name: '宇都宮市', lat: 36.5658, lon: 139.8836 },
+  { name: '前橋市', lat: 36.3911, lon: 139.0608 },
+  { name: 'さいたま市', lat: 35.8617, lon: 139.6455 },
+  { name: '千葉市', lat: 35.6074, lon: 140.1065 },
+  { name: '東京都', lat: 35.6895, lon: 139.6917 },
+  { name: '横浜市', lat: 35.4478, lon: 139.6425 },
+  { name: '新潟市', lat: 37.9026, lon: 139.0232 },
+  { name: '富山市', lat: 36.6953, lon: 137.2113 },
+  { name: '金沢市', lat: 36.5947, lon: 136.6256 },
+  { name: '福井市', lat: 36.0652, lon: 136.2219 },
+  { name: '甲府市', lat: 35.6639, lon: 138.5683 },
+  { name: '長野市', lat: 36.6513, lon: 138.1810 },
+  { name: '岐阜市', lat: 35.3912, lon: 136.7223 },
+  { name: '静岡市', lat: 34.9769, lon: 138.3831 },
+  { name: '浜松市', lat: 34.7108, lon: 137.7261 },
+  { name: '名古屋市', lat: 35.1802, lon: 136.9066 },
+  { name: '津市', lat: 34.7303, lon: 136.5086 },
+  { name: '大津市', lat: 35.0045, lon: 135.8686 },
+  { name: '京都市', lat: 35.0210, lon: 135.7556 },
+  { name: '大阪市', lat: 34.6863, lon: 135.5200 },
+  { name: '神戸市', lat: 34.6946, lon: 135.1955 },
+  { name: '奈良市', lat: 34.6853, lon: 135.8327 },
+  { name: '和歌山市', lat: 34.2260, lon: 135.1675 },
+  { name: '鳥取市', lat: 35.5039, lon: 134.2377 },
+  { name: '松江市', lat: 35.4723, lon: 133.0505 },
+  { name: '岡山市', lat: 34.6618, lon: 133.9350 },
+  { name: '広島市', lat: 34.3966, lon: 132.4596 },
+  { name: '山口市', lat: 34.1861, lon: 131.4705 },
+  { name: '徳島市', lat: 34.0658, lon: 134.5593 },
+  { name: '高松市', lat: 34.3401, lon: 134.0434 },
+  { name: '松山市', lat: 33.8417, lon: 132.7661 },
+  { name: '高知市', lat: 33.5597, lon: 133.5311 },
+  { name: '福岡市', lat: 33.6064, lon: 130.4183 },
+  { name: '北九州市', lat: 33.8835, lon: 130.8752 },
+  { name: '佐賀市', lat: 33.2494, lon: 130.2988 },
+  { name: '長崎市', lat: 32.7448, lon: 129.8737 },
+  { name: '熊本市', lat: 32.7898, lon: 130.7417 },
+  { name: '大分市', lat: 33.2382, lon: 131.6126 },
+  { name: '宮崎市', lat: 31.9111, lon: 131.4239 },
+  { name: '鹿児島市', lat: 31.5602, lon: 130.5581 },
+  { name: '那覇市', lat: 26.2124, lon: 127.6809 },
+];
+

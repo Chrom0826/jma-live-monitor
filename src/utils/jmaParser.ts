@@ -1,8 +1,10 @@
 import {
   AmedasMetric,
   AmedasStationData,
+  CityForecastItem,
   EarthquakeReport,
   EarthquakeStationIntensity,
+  Forecast3HourlySlot,
   JmaXmlEntry,
   RegionConfig,
   RegionId,
@@ -1226,23 +1228,25 @@ export function parseJmaQuakeDetailJson(
     const hypoArea = eq.Hypocenter?.Area || {};
 
     const eid = String(head.EventID || listSummary?.eid || '');
-    const hypocenterName = String(
-      hypoArea.Name || listSummary?.anm || '震源調査中'
-    );
+    const rawHypoName = String(hypoArea.Name || listSummary?.anm || '').trim();
+    const hypocenterName = rawHypoName || '震源調査中';
     const coordStr = String(hypoArea.Coordinate || listSummary?.cod || '');
     const parsedCoord = parseJmaIsoCoordinate(coordStr);
+    const hypocenterUnknown = !parsedCoord || !rawHypoName;
 
     const lat = parsedCoord ? parsedCoord.lat : 35.68;
     const lon = parsedCoord ? parsedCoord.lon : 139.76;
     const depthKm = parsedCoord ? parsedCoord.depthKm : 10;
 
-    const rawMag = Number(eq.Magnitude ?? listSummary?.mag ?? 4.0);
+    const rawMag = Number(eq.Magnitude ?? listSummary?.mag ?? -1);
     const magnitude =
-      !Number.isNaN(rawMag) && rawMag > 0 ? Number(rawMag.toFixed(1)) : 4.0;
+      !Number.isNaN(rawMag) && rawMag > 0 ? Number(rawMag.toFixed(1)) : -1;
 
     const obs = body.Intensity?.Observation || {};
-    const maxIntStr = String(obs.MaxInt || listSummary?.maxi || '1');
-    const maxIntInfo = parseJmaIntensityString(maxIntStr);
+    const rawMaxIntStr = String(obs.MaxInt || listSummary?.maxi || '').trim();
+    const maxIntInfo = rawMaxIntStr
+      ? parseJmaIntensityString(rawMaxIntStr)
+      : { scaleCode: -1, scaleLabel: '-' };
 
     const stations: EarthquakeStationIntensity[] = [];
     const areaMaxScales: Record<
@@ -1258,9 +1262,9 @@ export function parseJmaQuakeDetailJson(
       for (const area of areas) {
         const areaName = String(area?.Name || prefName);
         const areaCode = String(area?.Code || '');
-        const areaMaxIntStr = String(area?.MaxInt || '');
+        const areaMaxIntStr = String(area?.MaxInt || pref?.MaxInt || '');
+        const aInt = parseJmaIntensityString(areaMaxIntStr || '1');
         if (areaCode) {
-          const aInt = parseJmaIntensityString(areaMaxIntStr || '1');
           areaMaxScales[areaCode] = {
             scaleCode: aInt.scaleCode,
             scaleLabel: aInt.scaleLabel,
@@ -1268,6 +1272,21 @@ export function parseJmaQuakeDetailJson(
           };
         }
         const cities = Array.isArray(area?.City) ? area.City : [];
+        if (cities.length === 0 && areaMaxIntStr) {
+          // 震度速報 (VXSE51) has Pref -> Area with MaxInt, but no City or IntensityStation yet
+          const baseMeta = Object.values(PREFECTURE_NAMES).find(
+            (m) => prefName.includes(m.name) || m.name.includes(prefName)
+          );
+          stations.push({
+            prefecture: prefName || areaName,
+            city: areaName,
+            stationName: areaName,
+            scaleCode: aInt.scaleCode,
+            scaleLabel: aInt.scaleLabel,
+            lat: baseMeta?.lat,
+            lon: baseMeta?.lon,
+          });
+        }
         for (const city of cities) {
           const cityName = String(city?.Name || areaName);
           const cityCode = String(city?.Code || '');
@@ -1279,6 +1298,16 @@ export function parseJmaQuakeDetailJson(
           const intensityStations = Array.isArray(city?.IntensityStation)
             ? city.IntensityStation
             : [];
+          if (intensityStations.length === 0 && cityMaxIntStr) {
+            const cInt = parseJmaIntensityString(cityMaxIntStr);
+            stations.push({
+              prefecture: prefName,
+              city: cityName,
+              stationName: cityName,
+              scaleCode: cInt.scaleCode,
+              scaleLabel: cInt.scaleLabel,
+            });
+          }
           for (const st of intensityStations) {
             const stName = String(st?.Name || cityName).replace(/[＊*]/g, '');
             const intInfo = parseJmaIntensityString(
@@ -1302,22 +1331,55 @@ export function parseJmaQuakeDetailJson(
 
     stations.sort((a, b) => b.scaleCode - a.scaleCode);
 
+    const title = String(head.Title || listSummary?.ttl || '');
+    const infoKind = String(head.InfoKind || '');
+    let issueTypeLabel = '震源・震度に関する情報';
+    if (title.includes('震度速報') || infoKind.includes('震度速報')) {
+      issueTypeLabel = '震度速報';
+    } else if (
+      title.includes('震源に関する情報') ||
+      infoKind.includes('震源速報')
+    ) {
+      issueTypeLabel = '震源に関する情報';
+    } else if (title.includes('遠地') || infoKind.includes('遠地')) {
+      issueTypeLabel = '遠地地震に関する情報';
+    } else if (stations.length > 0 && Object.keys(cityMaxScales).length > 0) {
+      issueTypeLabel = '各地の震度に関する情報';
+    }
+
+    const isConfirmed =
+      !hypocenterUnknown &&
+      maxIntInfo.scaleCode >= 10 &&
+      issueTypeLabel !== '震度速報' &&
+      issueTypeLabel !== '震源に関する情報';
+
     const reportIso = String(head.ReportDateTime || listSummary?.rdt || '');
-    const originIso = String(eq.OriginTime || listSummary?.at || reportIso);
+    const originIso = String(
+      eq.OriginTime || head.TargetDateTime || listSummary?.at || reportIso
+    );
     const commentText = String(
       body.Comments?.ForecastComment?.Text || ''
     ).trim();
 
+    const id = eid ? `jma-eq-${eid}` : `jma-eq-${originIso}`;
+    const reportKey = `${id}|${issueTypeLabel}|${hypocenterName}|${maxIntInfo.scaleCode}|${stations.length}|${isConfirmed ? 1 : 0}`;
+
+    // If hypocenter is unknown (震度速報) and we have area/prefecture stations, center on first station's prefecture
+    const finalLat =
+      hypocenterUnknown && stations[0]?.lat ? stations[0].lat : lat;
+    const finalLon =
+      hypocenterUnknown && stations[0]?.lon ? stations[0].lon : lon;
+
     return {
-      id: eid ? `jma-eq-${eid}` : `jma-eq-${originIso}`,
+      id,
       issueTime: formatJmaIsoDateTimeJst(reportIso, '発表'),
       occurrenceTime: formatJmaIsoDateTimeJst(originIso, '頃発生'),
       hypocenterName,
-      regionId: inferRegionFromHypocenterName(hypocenterName, lat, lon),
-      lat,
-      lon,
+      regionId: inferRegionFromHypocenterName(hypocenterName, finalLat, finalLon),
+      lat: finalLat,
+      lon: finalLon,
       depthKm,
-      magnitude,
+      magnitude: magnitude > 0 ? magnitude : 4.0,
       maxScaleCode: maxIntInfo.scaleCode,
       maxScaleLabel: maxIntInfo.scaleLabel,
       domesticTsunami:
@@ -1328,22 +1390,28 @@ export function parseJmaQuakeDetailJson(
           detailJson.Control?.PublishingOffice ||
           '気象庁本庁（震源・震度情報）'
       ),
+      issueTypeLabel,
+      hypocenterUnknown,
+      isConfirmed,
+      reportKey,
       areaMaxScales,
       cityMaxScales,
       stations:
         stations.length > 0
           ? stations
-          : [
-              {
-                prefecture: hypocenterName,
-                city: hypocenterName,
-                stationName: hypocenterName,
-                scaleCode: maxIntInfo.scaleCode,
-                scaleLabel: maxIntInfo.scaleLabel,
-                lat,
-                lon,
-              },
-            ],
+          : maxIntInfo.scaleCode >= 10
+            ? [
+                {
+                  prefecture: hypocenterName,
+                  city: hypocenterName,
+                  stationName: hypocenterName,
+                  scaleCode: maxIntInfo.scaleCode,
+                  scaleLabel: maxIntInfo.scaleLabel,
+                  lat: finalLat,
+                  lon: finalLon,
+                },
+              ]
+            : [],
     };
   } catch {
     return null;
@@ -1860,6 +1928,200 @@ export function sortEarthquakesByNewest(
     if (cmp !== 0) return cmp;
     return b.maxScaleCode - a.maxScaleCode;
   });
+}
+
+/**
+ * Merges progressive earthquake reports (e.g. `震度速報` + `震源に関する情報` + `各地の震度に関する情報`
+ * across JMA bosai JSON and P2P地震情報 551) belonging to the same earthquake event.
+ * Ensures that:
+ * - `震源に関する情報` (which has hypocenter but no intensity) never wipes out `震度速報` intensities.
+ * - `isConfirmed` is true ONLY when a confirmed detail report (`各地の震度に関する情報` / `震源・震度に関する情報`)
+ *   with both known hypocenter and station intensities has been received.
+ */
+export function mergeProgressiveEarthquakeReports(
+  reports: EarthquakeReport[]
+): EarthquakeReport[] {
+  if (!Array.isArray(reports) || reports.length === 0) return [];
+
+  const groups: EarthquakeReport[][] = [];
+
+  for (const r of reports) {
+    if (!r) continue;
+    const tR =
+      parseEarthquakeTimeMs(r.occurrenceTime) ||
+      parseEarthquakeTimeMs(r.issueTime);
+    let matchedGroup: EarthquakeReport[] | null = null;
+
+    for (const grp of groups) {
+      const rep = grp[0];
+      if (rep.id === r.id) {
+        matchedGroup = grp;
+        break;
+      }
+      const tRep =
+        parseEarthquakeTimeMs(rep.occurrenceTime) ||
+        parseEarthquakeTimeMs(rep.issueTime);
+      if (tR > 0 && tRep > 0 && Math.abs(tR - tRep) <= 95 * 1000) {
+        const sameOrUnknownHypo =
+          rep.hypocenterUnknown ||
+          r.hypocenterUnknown ||
+          rep.hypocenterName === '震源調査中' ||
+          r.hypocenterName === '震源調査中' ||
+          rep.hypocenterName === r.hypocenterName;
+        if (sameOrUnknownHypo) {
+          matchedGroup = grp;
+          break;
+        }
+      }
+    }
+
+    if (matchedGroup) {
+      matchedGroup.push(r);
+    } else {
+      groups.push([r]);
+    }
+  }
+
+  const mergedList: EarthquakeReport[] = groups.map((grp) => {
+    // Sort group so JMA official reports and newer issueTime come first
+    const ordered = [...grp].sort((a, b) => {
+      const aConfirmedJma = a.isConfirmed && a.id.startsWith('jma-eq-') ? 1 : 0;
+      const bConfirmedJma = b.isConfirmed && b.id.startsWith('jma-eq-') ? 1 : 0;
+      if (bConfirmedJma !== aConfirmedJma) return bConfirmedJma - aConfirmedJma;
+      const tIssueA = parseEarthquakeTimeMs(a.issueTime);
+      const tIssueB = parseEarthquakeTimeMs(b.issueTime);
+      if (tIssueB !== tIssueA) return tIssueB - tIssueA;
+      return b.stations.length - a.stations.length;
+    });
+
+    const base = ordered[0];
+    const jmaIdReport = ordered.find((r) => r.id.startsWith('jma-eq-'));
+    const id = jmaIdReport ? jmaIdReport.id : base.id;
+
+    // Best hypocenter source: any report in the group with known hypocenter
+    const hypoSource =
+      ordered.find(
+        (r) =>
+          !r.hypocenterUnknown &&
+          r.hypocenterName &&
+          r.hypocenterName !== '震源調査中'
+      ) || base;
+
+    const hypocenterUnknown = Boolean(
+      hypoSource.hypocenterUnknown || hypoSource.hypocenterName === '震源調査中'
+    );
+    const hypocenterName = hypocenterUnknown
+      ? '震源調査中'
+      : hypoSource.hypocenterName;
+
+    // Best intensity & station source: prefer confirmed JMA report with lat/lon stations, else highest station count with valid scale
+    const intensitySource =
+      ordered.find(
+        (r) =>
+          r.id.startsWith('jma-eq-') &&
+          r.maxScaleCode >= 10 &&
+          r.stations.length > 0 &&
+          r.issueTypeLabel !== '震度速報'
+      ) ||
+      ordered
+        .filter((r) => r.maxScaleCode >= 10 && r.stations.length > 0)
+        .sort(
+          (a, b) =>
+            b.stations.length - a.stations.length ||
+            b.maxScaleCode - a.maxScaleCode
+        )[0] ||
+      ordered.find((r) => r.maxScaleCode >= 10) ||
+      base;
+
+    // Merge areaMaxScales & cityMaxScales across all reports in the group
+    const mergedAreaScales: Record<
+      string,
+      { scaleCode: number; scaleLabel: string; name?: string }
+    > = {};
+    const mergedCityScales: Record<string, number> = {};
+
+    for (const r of ordered) {
+      if (r.areaMaxScales) {
+        for (const [k, v] of Object.entries(r.areaMaxScales)) {
+          if (!mergedAreaScales[k] || v.scaleCode > mergedAreaScales[k].scaleCode) {
+            mergedAreaScales[k] = v;
+          }
+        }
+      }
+      if (r.cityMaxScales) {
+        for (const [k, v] of Object.entries(r.cityMaxScales)) {
+          if (!mergedCityScales[k] || v > mergedCityScales[k]) {
+            mergedCityScales[k] = v;
+          }
+        }
+      }
+    }
+
+    const hasConfirmedDetail = ordered.some(
+      (r) =>
+        Boolean(r.isConfirmed) ||
+        (!r.hypocenterUnknown &&
+          r.hypocenterName !== '震源調査中' &&
+          r.maxScaleCode >= 10 &&
+          r.issueTypeLabel !== '震度速報' &&
+          r.issueTypeLabel !== '震源に関する情報')
+    );
+
+    let issueTypeLabel = base.issueTypeLabel || '震源・震度に関する情報';
+    if (hasConfirmedDetail) {
+      issueTypeLabel = '各地の震度に関する情報';
+    } else if (!hypocenterUnknown && intensitySource.maxScaleCode >= 10) {
+      issueTypeLabel = '震度速報・震源情報（各地の震度集計中）';
+    } else if (hypocenterUnknown && intensitySource.maxScaleCode >= 10) {
+      issueTypeLabel = '震度速報';
+    } else if (!hypocenterUnknown && intensitySource.maxScaleCode < 10) {
+      issueTypeLabel = '震源に関する情報';
+    }
+
+    const maxScaleCode = intensitySource.maxScaleCode;
+    const maxScaleLabel =
+      maxScaleCode >= 10 ? intensitySource.maxScaleLabel : '-';
+    const stations = intensitySource.stations;
+    const isConfirmed = hasConfirmedDetail;
+    const reportKey = `${id}|${issueTypeLabel}|${hypocenterName}|${maxScaleCode}|${stations.length}|${isConfirmed ? 1 : 0}`;
+
+    return {
+      ...base,
+      id,
+      issueTime: base.issueTime,
+      occurrenceTime: hypoSource.occurrenceTime || base.occurrenceTime,
+      hypocenterName,
+      regionId: hypoSource.regionId,
+      lat: hypoSource.lat,
+      lon: hypoSource.lon,
+      depthKm: hypoSource.depthKm,
+      magnitude: hypoSource.magnitude,
+      maxScaleCode,
+      maxScaleLabel,
+      domesticTsunami:
+        hypoSource.domesticTsunami || base.domesticTsunami,
+      foreignTsunami:
+        hypoSource.foreignTsunami || base.foreignTsunami,
+      sourceOffice: jmaIdReport
+        ? jmaIdReport.sourceOffice
+        : base.sourceOffice,
+      issueTypeLabel,
+      hypocenterUnknown,
+      isConfirmed,
+      reportKey,
+      areaMaxScales:
+        Object.keys(mergedAreaScales).length > 0
+          ? mergedAreaScales
+          : undefined,
+      cityMaxScales:
+        Object.keys(mergedCityScales).length > 0
+          ? mergedCityScales
+          : undefined,
+      stations,
+    };
+  });
+
+  return sortEarthquakesByNewest(mergedList);
 }
 
 export type WarningMapZoomTier = 'prefecture' | 'division' | 'municipality';
@@ -2627,6 +2889,744 @@ export const AMEDAS_PATROL_STOPS: AmedasPatrolStop[] = [
   { id: 'okinawa', label: '沖縄', center: [26.2, 127.6], zoom: 7.5 },
   { id: 'national_end', label: '全国表示', center: [36.8, 137.5], zoom: 5 },
 ];
+
+export type WeatherBaseKind = 'sunny' | 'cloudy' | 'rain' | 'snow';
+export type WeatherCompositionPattern = 'single' | 'sometimes' | 'later';
+
+export interface WeatherVisualDescriptor {
+  pattern: WeatherCompositionPattern;
+  primary: WeatherBaseKind;
+  secondary?: WeatherBaseKind;
+  shortLabel: string;
+}
+
+export interface MajorForecastCityTarget {
+  id: string;
+  cityName: string;
+  officeCode: string;
+  areaCode: string;
+  tempStationCode: string;
+}
+
+/**
+ * 18 major forecast cities across Japan (Hokkaido to Yaeyama & Ogasawara):
+ * 旭川・札幌・釧路・秋田・仙台・新潟・金沢・長野・東京・小笠原諸島・名古屋・大阪・広島・高知・福岡・鹿児島・那覇・石垣島
+ */
+export const MAJOR_FORECAST_CITY_TARGETS: MajorForecastCityTarget[] = [
+  { id: 'fc-012000', cityName: '旭川', officeCode: '012000', areaCode: '012010', tempStationCode: '12442' },
+  { id: 'fc-016000', cityName: '札幌', officeCode: '016000', areaCode: '016010', tempStationCode: '14163' },
+  { id: 'fc-014100', cityName: '釧路', officeCode: '014100', areaCode: '014020', tempStationCode: '19432' },
+  { id: 'fc-050000', cityName: '秋田', officeCode: '050000', areaCode: '050010', tempStationCode: '32402' },
+  { id: 'fc-040000', cityName: '仙台', officeCode: '040000', areaCode: '040010', tempStationCode: '34392' },
+  { id: 'fc-150000', cityName: '新潟', officeCode: '150000', areaCode: '150010', tempStationCode: '54232' },
+  { id: 'fc-170000', cityName: '金沢', officeCode: '170000', areaCode: '170010', tempStationCode: '56227' },
+  { id: 'fc-200000', cityName: '長野', officeCode: '200000', areaCode: '200010', tempStationCode: '48156' },
+  { id: 'fc-130000', cityName: '東京', officeCode: '130000', areaCode: '130010', tempStationCode: '44132' },
+  { id: 'fc-130040', cityName: '小笠原諸島', officeCode: '130000', areaCode: '130040', tempStationCode: '44301' },
+  { id: 'fc-230000', cityName: '名古屋', officeCode: '230000', areaCode: '230010', tempStationCode: '51106' },
+  { id: 'fc-270000', cityName: '大阪', officeCode: '270000', areaCode: '270000', tempStationCode: '62078' },
+  { id: 'fc-340000', cityName: '広島', officeCode: '340000', areaCode: '340010', tempStationCode: '67437' },
+  { id: 'fc-390000', cityName: '高知', officeCode: '390000', areaCode: '390010', tempStationCode: '74182' },
+  { id: 'fc-400000', cityName: '福岡', officeCode: '400000', areaCode: '400010', tempStationCode: '82182' },
+  { id: 'fc-460100', cityName: '鹿児島', officeCode: '460100', areaCode: '460010', tempStationCode: '88317' },
+  { id: 'fc-471000', cityName: '那覇', officeCode: '471000', areaCode: '471010', tempStationCode: '91197' },
+  { id: 'fc-474000', cityName: '石垣島', officeCode: '474000', areaCode: '474010', tempStationCode: '94081' },
+];
+
+const JMA_CODE_DESCRIPTOR_MAP: Record<
+  string,
+  { pattern: WeatherCompositionPattern; primary: WeatherBaseKind; secondary?: WeatherBaseKind }
+> = {
+  // 100s: Sunny primary
+  '100': { pattern: 'single', primary: 'sunny' },
+  '101': { pattern: 'sometimes', primary: 'sunny', secondary: 'cloudy' },
+  '102': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '103': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '104': { pattern: 'sometimes', primary: 'sunny', secondary: 'snow' },
+  '105': { pattern: 'sometimes', primary: 'sunny', secondary: 'snow' },
+  '106': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '107': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '108': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '110': { pattern: 'later', primary: 'sunny', secondary: 'cloudy' },
+  '111': { pattern: 'later', primary: 'sunny', secondary: 'cloudy' },
+  '112': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '113': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '114': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '115': { pattern: 'later', primary: 'sunny', secondary: 'snow' },
+  '116': { pattern: 'later', primary: 'sunny', secondary: 'snow' },
+  '117': { pattern: 'later', primary: 'sunny', secondary: 'snow' },
+  '118': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '119': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '120': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '121': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '122': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '123': { pattern: 'single', primary: 'sunny' },
+  '124': { pattern: 'single', primary: 'sunny' },
+  '125': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '126': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '127': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '128': { pattern: 'later', primary: 'sunny', secondary: 'rain' },
+  '130': { pattern: 'single', primary: 'sunny' },
+  '131': { pattern: 'single', primary: 'sunny' },
+  '132': { pattern: 'sometimes', primary: 'sunny', secondary: 'cloudy' },
+  '140': { pattern: 'sometimes', primary: 'sunny', secondary: 'rain' },
+  '160': { pattern: 'sometimes', primary: 'sunny', secondary: 'snow' },
+  '170': { pattern: 'sometimes', primary: 'sunny', secondary: 'snow' },
+  '181': { pattern: 'later', primary: 'sunny', secondary: 'snow' },
+
+  // 200s: Cloudy primary
+  '200': { pattern: 'single', primary: 'cloudy' },
+  '201': { pattern: 'sometimes', primary: 'cloudy', secondary: 'sunny' },
+  '202': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '203': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '204': { pattern: 'sometimes', primary: 'cloudy', secondary: 'snow' },
+  '205': { pattern: 'sometimes', primary: 'cloudy', secondary: 'snow' },
+  '206': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '207': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '208': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '209': { pattern: 'single', primary: 'cloudy' },
+  '210': { pattern: 'later', primary: 'cloudy', secondary: 'sunny' },
+  '211': { pattern: 'later', primary: 'cloudy', secondary: 'sunny' },
+  '212': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '213': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '214': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '215': { pattern: 'later', primary: 'cloudy', secondary: 'snow' },
+  '216': { pattern: 'later', primary: 'cloudy', secondary: 'snow' },
+  '217': { pattern: 'later', primary: 'cloudy', secondary: 'snow' },
+  '218': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '219': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '220': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '221': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '222': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '223': { pattern: 'sometimes', primary: 'cloudy', secondary: 'sunny' },
+  '224': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '225': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '226': { pattern: 'later', primary: 'cloudy', secondary: 'rain' },
+  '228': { pattern: 'later', primary: 'cloudy', secondary: 'snow' },
+  '229': { pattern: 'later', primary: 'cloudy', secondary: 'snow' },
+  '230': { pattern: 'later', primary: 'cloudy', secondary: 'snow' },
+  '231': { pattern: 'single', primary: 'cloudy' },
+  '240': { pattern: 'sometimes', primary: 'cloudy', secondary: 'rain' },
+  '250': { pattern: 'sometimes', primary: 'cloudy', secondary: 'snow' },
+  '260': { pattern: 'sometimes', primary: 'cloudy', secondary: 'snow' },
+  '270': { pattern: 'sometimes', primary: 'cloudy', secondary: 'snow' },
+  '281': { pattern: 'later', primary: 'cloudy', secondary: 'snow' },
+
+  // 300s: Rain primary (plus 340/361/371 snow codes)
+  '300': { pattern: 'single', primary: 'rain' },
+  '301': { pattern: 'sometimes', primary: 'rain', secondary: 'sunny' },
+  '302': { pattern: 'sometimes', primary: 'rain', secondary: 'cloudy' },
+  '303': { pattern: 'sometimes', primary: 'rain', secondary: 'snow' },
+  '304': { pattern: 'single', primary: 'rain' },
+  '306': { pattern: 'single', primary: 'rain' },
+  '308': { pattern: 'single', primary: 'rain' },
+  '309': { pattern: 'sometimes', primary: 'rain', secondary: 'snow' },
+  '311': { pattern: 'later', primary: 'rain', secondary: 'sunny' },
+  '313': { pattern: 'later', primary: 'rain', secondary: 'cloudy' },
+  '314': { pattern: 'later', primary: 'rain', secondary: 'snow' },
+  '315': { pattern: 'later', primary: 'rain', secondary: 'snow' },
+  '316': { pattern: 'later', primary: 'rain', secondary: 'sunny' },
+  '317': { pattern: 'later', primary: 'rain', secondary: 'cloudy' },
+  '320': { pattern: 'later', primary: 'rain', secondary: 'sunny' },
+  '321': { pattern: 'later', primary: 'rain', secondary: 'cloudy' },
+  '322': { pattern: 'sometimes', primary: 'rain', secondary: 'snow' },
+  '323': { pattern: 'later', primary: 'rain', secondary: 'sunny' },
+  '324': { pattern: 'later', primary: 'rain', secondary: 'sunny' },
+  '325': { pattern: 'later', primary: 'rain', secondary: 'sunny' },
+  '326': { pattern: 'later', primary: 'rain', secondary: 'snow' },
+  '327': { pattern: 'later', primary: 'rain', secondary: 'snow' },
+  '328': { pattern: 'single', primary: 'rain' },
+  '329': { pattern: 'single', primary: 'rain' },
+  '340': { pattern: 'single', primary: 'snow' },
+  '350': { pattern: 'single', primary: 'rain' },
+  '361': { pattern: 'later', primary: 'snow', secondary: 'sunny' },
+  '371': { pattern: 'later', primary: 'snow', secondary: 'cloudy' },
+
+  // 400s: Snow primary
+  '400': { pattern: 'single', primary: 'snow' },
+  '401': { pattern: 'sometimes', primary: 'snow', secondary: 'sunny' },
+  '402': { pattern: 'sometimes', primary: 'snow', secondary: 'cloudy' },
+  '403': { pattern: 'sometimes', primary: 'snow', secondary: 'rain' },
+  '405': { pattern: 'single', primary: 'snow' },
+  '406': { pattern: 'single', primary: 'snow' },
+  '407': { pattern: 'single', primary: 'snow' },
+  '409': { pattern: 'sometimes', primary: 'snow', secondary: 'rain' },
+  '411': { pattern: 'later', primary: 'snow', secondary: 'sunny' },
+  '413': { pattern: 'later', primary: 'snow', secondary: 'cloudy' },
+  '414': { pattern: 'later', primary: 'snow', secondary: 'rain' },
+  '420': { pattern: 'later', primary: 'snow', secondary: 'sunny' },
+  '421': { pattern: 'later', primary: 'snow', secondary: 'cloudy' },
+  '422': { pattern: 'later', primary: 'snow', secondary: 'rain' },
+  '423': { pattern: 'later', primary: 'snow', secondary: 'rain' },
+  '425': { pattern: 'single', primary: 'snow' },
+  '426': { pattern: 'sometimes', primary: 'snow', secondary: 'rain' },
+  '427': { pattern: 'sometimes', primary: 'snow', secondary: 'rain' },
+  '450': { pattern: 'single', primary: 'snow' },
+};
+
+const KIND_KANJI: Record<WeatherBaseKind, string> = {
+  sunny: '晴',
+  cloudy: '曇',
+  rain: '雨',
+  snow: '雪',
+};
+
+function detectKindFromToken(token: string): WeatherBaseKind | null {
+  if (token.includes('雪') || token.includes('ふぶき') || token.includes('みぞれ')) return 'snow';
+  if (token.includes('雨') || token.includes('雷')) return 'rain';
+  if (token.includes('曇') || token.includes('くもり')) return 'cloudy';
+  if (token.includes('晴') || token.includes('はれ')) return 'sunny';
+  return null;
+}
+
+function buildShortLabel(
+  pattern: WeatherCompositionPattern,
+  primary: WeatherBaseKind,
+  secondary?: WeatherBaseKind
+): string {
+  if (pattern === 'single' || !secondary || secondary === primary) {
+    return KIND_KANJI[primary];
+  }
+  if (pattern === 'later') {
+    return `${KIND_KANJI[primary]}のち${KIND_KANJI[secondary]}`;
+  }
+  return `${KIND_KANJI[primary]}時々${KIND_KANJI[secondary]}`;
+}
+
+/**
+ * Classifies a JMA 3-digit weather code and/or Japanese forecast text into a TV broadcast
+ * visual descriptor (`single` / `sometimes` `時々` / `later` `のち`).
+ */
+export function classifyJmaWeatherDescriptor(
+  weatherCode?: string,
+  weatherText?: string
+): WeatherVisualDescriptor {
+  const code = String(weatherCode || '').trim();
+  if (code && JMA_CODE_DESCRIPTOR_MAP[code]) {
+    const mapped = JMA_CODE_DESCRIPTOR_MAP[code];
+    return {
+      ...mapped,
+      shortLabel: buildShortLabel(mapped.pattern, mapped.primary, mapped.secondary),
+    };
+  }
+
+  const text = String(weatherText || '')
+    .replace(/（.*?）/g, '')
+    .replace(/\(.*?\)/g, '')
+    .trim();
+
+  // Check if text has explicit transition ("のち", "後", "から", "夜遅く", "昼過ぎ", "夕方", "夜")
+  const laterMatch = text.split(/のち|後|から|昼前|昼過ぎ|夕方|夜のはじめ頃|夜遅く/);
+  if (laterMatch.length >= 2) {
+    const k1 = detectKindFromToken(laterMatch[0]);
+    const k2 = detectKindFromToken(laterMatch.slice(1).join(' '));
+    if (k1 && k2 && k1 !== k2) {
+      return {
+        pattern: 'later',
+        primary: k1,
+        secondary: k2,
+        shortLabel: buildShortLabel('later', k1, k2),
+      };
+    }
+  }
+
+  const sometimesMatch = text.split(/時々|一時|朝晩|日中|所により/);
+  if (sometimesMatch.length >= 2) {
+    const k1 = detectKindFromToken(sometimesMatch[0]);
+    const k2 = detectKindFromToken(sometimesMatch.slice(1).join(' '));
+    if (k1 && k2 && k1 !== k2) {
+      return {
+        pattern: 'sometimes',
+        primary: k1,
+        secondary: k2,
+        shortLabel: buildShortLabel('sometimes', k1, k2),
+      };
+    }
+  }
+
+  // Fallback by leading code digit or text token
+  if (code.startsWith('1')) {
+    return { pattern: 'single', primary: 'sunny', shortLabel: '晴' };
+  }
+  if (code.startsWith('2')) {
+    return { pattern: 'single', primary: 'cloudy', shortLabel: '曇' };
+  }
+  if (code.startsWith('3')) {
+    return { pattern: 'single', primary: 'rain', shortLabel: '雨' };
+  }
+  if (code.startsWith('4')) {
+    return { pattern: 'single', primary: 'snow', shortLabel: '雪' };
+  }
+
+  const fallbackKind = detectKindFromToken(text) || 'cloudy';
+  return {
+    pattern: 'single',
+    primary: fallbackKind,
+    shortLabel: KIND_KANJI[fallbackKind],
+  };
+}
+
+const BROADCAST_BG_COLOR: Record<WeatherBaseKind, string> = {
+  sunny: '#C2410C',  // Deep warm amber orange
+  cloudy: '#334155', // Muted slate gray
+  rain: '#1E40AF',   // Deep cobalt blue
+  snow: '#0369A1',   // Deep frost cyan
+};
+
+function renderWeatherSymbolGroup(
+  kind: WeatherBaseKind,
+  cx: number,
+  cy: number,
+  scale: number
+): string {
+  const s = scale.toFixed(2);
+  const tx = cx.toFixed(1);
+  const ty = cy.toFixed(1);
+
+  if (kind === 'sunny') {
+    // Crisp white sun with 8 rays
+    return `<g transform="translate(${tx},${ty}) scale(${s})">
+      <circle cx="0" cy="0" r="5.2" fill="#FFFFFF"/>
+      <g stroke="#FFFFFF" stroke-width="2.1" stroke-linecap="round">
+        <line x1="0" y1="-8.2" x2="0" y2="-10.8"/>
+        <line x1="0" y1="8.2" x2="0" y2="10.8"/>
+        <line x1="-8.2" y1="0" x2="-10.8" y2="0"/>
+        <line x1="8.2" y1="0" x2="10.8" y2="0"/>
+        <line x1="-5.8" y1="-5.8" x2="-7.7" y2="-7.7"/>
+        <line x1="5.8" y1="-5.8" x2="7.7" y2="-7.7"/>
+        <line x1="-5.8" y1="5.8" x2="-7.7" y2="7.7"/>
+        <line x1="5.8" y1="5.8" x2="7.7" y2="7.7"/>
+      </g>
+    </g>`;
+  }
+
+  if (kind === 'cloudy') {
+    // Fluffy white broadcast cloud
+    return `<g transform="translate(${tx},${ty}) scale(${s})">
+      <path d="M-8.5,5.2 H8.2 C10.6,5.2 12.2,3.5 12.2,1.2 C12.2,-0.9 10.7,-2.6 8.6,-2.9 C8.1,-6.4 5.1,-8.8 1.5,-8.8 C-1.6,-8.8 -4.2,-7.0 -5.3,-4.3 C-5.8,-4.5 -6.4,-4.6 -7.0,-4.6 C-9.7,-4.6 -11.8,-2.5 -11.8,0.2 C-11.8,2.9 -10.4,5.2 -8.5,5.2 Z" fill="#FFFFFF"/>
+    </g>`;
+  }
+
+  if (kind === 'rain') {
+    // White cloud top + diagonal rain streaks/dots
+    return `<g transform="translate(${tx},${ty}) scale(${s})">
+      <path d="M-7.8,-0.5 H7.5 C9.6,-0.5 11.0,-1.9 11.0,-3.8 C11.0,-5.5 9.7,-6.9 7.9,-7.2 C7.4,-10.0 4.8,-12.0 1.6,-12.0 C-1.1,-12.0 -3.4,-10.5 -4.4,-8.2 C-4.9,-8.4 -5.5,-8.5 -6.0,-8.5 C-8.4,-8.5 -10.2,-6.7 -10.2,-4.4 C-10.2,-2.1 -9.2,-0.5 -7.8,-0.5 Z" fill="#FFFFFF"/>
+      <g stroke="#BAE6FD" stroke-width="1.7" stroke-linecap="round">
+        <line x1="-6.0" y1="2.2" x2="-7.6" y2="6.2"/>
+        <line x1="-1.8" y1="2.2" x2="-3.4" y2="6.2"/>
+        <line x1="2.4" y1="2.2" x2="0.8" y2="6.2"/>
+        <line x1="6.6" y1="2.2" x2="5.0" y2="6.2"/>
+        <line x1="-4.2" y1="7.8" x2="-5.6" y2="11.2"/>
+        <line x1="0.0" y1="7.8" x2="-1.4" y2="11.2"/>
+        <line x1="4.2" y1="7.8" x2="2.8" y2="11.2"/>
+      </g>
+    </g>`;
+  }
+
+  // 'snow': Cute broadcast snowman (2 stacked white circles) + snowflakes
+  return `<g transform="translate(${tx},${ty}) scale(${s})">
+    <circle cx="-1.5" cy="-4.6" r="4.0" fill="#FFFFFF"/>
+    <circle cx="-1.5" cy="3.8" r="5.6" fill="#FFFFFF"/>
+    <circle cx="6.8" cy="-5.2" r="1.3" fill="#FFFFFF" opacity="0.95"/>
+    <circle cx="8.2" cy="0.5" r="1.3" fill="#FFFFFF" opacity="0.95"/>
+    <circle cx="6.2" cy="6.2" r="1.3" fill="#FFFFFF" opacity="0.95"/>
+    <circle cx="-8.8" cy="-1.5" r="1.2" fill="#FFFFFF" opacity="0.9"/>
+  </g>`;
+}
+
+/**
+ * Renders the composite weather SVG (`viewBox="0 0 48 34"`),
+ * supporting `single`, `sometimes` (`┏ 時々`), and `later` (`|> のち`) in a refined dark aesthetic.
+ */
+export function renderBroadcastWeatherSvg(
+  weatherCode?: string,
+  weatherText?: string,
+  width = 48,
+  height = 34
+): string {
+  const desc = classifyJmaWeatherDescriptor(weatherCode, weatherText);
+  const bg1 = BROADCAST_BG_COLOR[desc.primary];
+  const bg2 = desc.secondary ? BROADCAST_BG_COLOR[desc.secondary] : bg1;
+
+  if (desc.pattern === 'single' || !desc.secondary || desc.secondary === desc.primary) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 48 34" style="display:block;border-radius:2px;overflow:hidden;">
+      <rect x="0" y="0" width="48" height="34" fill="${bg1}"/>
+      ${renderWeatherSymbolGroup(desc.primary, 24, 17, 1.05)}
+    </svg>`;
+  }
+
+  if (desc.pattern === 'later') {
+    // [ |> のち ] Chevron split pointing right
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 48 34" style="display:block;border-radius:2px;overflow:hidden;">
+      <rect x="0" y="0" width="48" height="34" fill="${bg2}"/>
+      <polygon points="0,0 21.5,0 28,17 21.5,34 0,34" fill="${bg1}"/>
+      <polyline points="21.5,0 28,17 21.5,34" fill="none" stroke="#CBD5E1" stroke-width="1.6" stroke-linejoin="round"/>
+      ${renderWeatherSymbolGroup(desc.primary, 11.8, 17, 0.78)}
+      ${renderWeatherSymbolGroup(desc.secondary, 37.8, 17, 0.78)}
+    </svg>`;
+  }
+
+  // [ ┏ 時々 ] Bottom-right trapezoid corner split
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 48 34" style="display:block;border-radius:2px;overflow:hidden;">
+    <rect x="0" y="0" width="48" height="34" fill="${bg1}"/>
+    ${renderWeatherSymbolGroup(desc.primary, 14.2, 16.2, 0.88)}
+    <polygon points="22.5,34 27.2,15.5 48,15.5 48,34" fill="${bg2}"/>
+    <polyline points="22.5,34 27.2,15.5 48,15.5" fill="none" stroke="#CBD5E1" stroke-width="1.6" stroke-linejoin="round"/>
+    ${renderWeatherSymbolGroup(desc.secondary, 37.8, 25.2, 0.6)}
+  </svg>`;
+}
+
+const SINGLE_KIND_CODE: Record<WeatherBaseKind, string> = {
+  sunny: '100',
+  cloudy: '200',
+  rain: '300',
+  snow: '400',
+};
+
+/**
+ * Generates 8 upcoming 3-hourly forecast slots (`03時, 06時, 09時, 12時, 15時, 18時, 21時, 24時`)
+ * from a city's JMA weather code, weather text, 6-hour PoPs, and min/max temperatures.
+ */
+export function buildCity3HourlySlots(params: {
+  weatherCode?: string;
+  weatherText?: string;
+  tempMin: number;
+  tempMax: number;
+  pops: [number, number, number, number];
+}): Forecast3HourlySlot[] {
+  const { weatherCode, weatherText, tempMin, tempMax, pops } = params;
+  const desc = classifyJmaWeatherDescriptor(weatherCode, weatherText);
+  const rawText = String(weatherText || '');
+
+  // Determine transition hour for 'later' (`のち`)
+  let transitionHour = 15;
+  if (rawText.includes('朝') || rawText.includes('昼前')) {
+    transitionHour = 9;
+  } else if (rawText.includes('昼過ぎ')) {
+    transitionHour = 12;
+  } else if (rawText.includes('夕方')) {
+    transitionHour = 15;
+  } else if (rawText.includes('夜のはじめ頃') || rawText.includes('夜')) {
+    transitionHour = 18;
+  } else if (rawText.includes('夜遅く')) {
+    transitionHour = 21;
+  }
+
+  // Diurnal temperature interpolation factors (06:00 = min, 15:00 = max)
+  const diurnalFactors: Record<number, number> = {
+    3: 0.12,
+    6: 0.0,
+    9: 0.45,
+    12: 0.85,
+    15: 1.0,
+    18: 0.65,
+    21: 0.38,
+    24: 0.2,
+  };
+
+  const hours = [3, 6, 9, 12, 15, 18, 21, 24];
+  const span = Math.max(1, tempMax - tempMin);
+
+  return hours.map((hour) => {
+    const popIdx =
+      hour <= 6 ? 0 : hour <= 12 ? 1 : hour <= 18 ? 2 : 3;
+    const slotPop = pops[popIdx] ?? pops[0] ?? 10;
+
+    let slotKind: WeatherBaseKind = desc.primary;
+    if (desc.pattern === 'later' && desc.secondary) {
+      slotKind = hour >= transitionHour ? desc.secondary : desc.primary;
+    } else if (desc.pattern === 'sometimes' && desc.secondary) {
+      if (rawText.includes('朝晩')) {
+        slotKind = hour <= 6 || hour >= 21 ? desc.secondary : desc.primary;
+      } else if (rawText.includes('夜')) {
+        slotKind = hour >= 18 ? desc.secondary : desc.primary;
+      } else if (slotPop >= 50) {
+        slotKind = hour === 12 || hour === 15 ? desc.secondary : desc.primary;
+      } else {
+        slotKind = hour === 15 ? desc.secondary : desc.primary;
+      }
+    }
+
+    const factor = diurnalFactors[hour] ?? 0.5;
+    const temp = Math.round(tempMin + span * factor);
+
+    return {
+      timeLabel: `${String(hour).padStart(2, '0')}時`,
+      hour,
+      weatherCode: SINGLE_KIND_CODE[slotKind],
+      weatherText: KIND_KANJI[slotKind],
+      temp,
+      pop: slotPop,
+    };
+  });
+}
+
+const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
+
+function formatJstDateStr(ms: number): string {
+  const jst = new Date(ms + 9 * 3600 * 1000);
+  const y = jst.getUTCFullYear();
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(jst.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatDateLabelJa(dateStr: string): string {
+  const m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return dateStr;
+  const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  const dayNum = Number(m[3]);
+  const w = WEEKDAY_JA[dt.getUTCDay()] || '';
+  return `${dayNum}日(${w})`;
+}
+
+/**
+ * Parses JMA `bosai/forecast/data/forecast/{officeCode}.json` for a specific target city
+ * (`areaCode` & `tempStationCode`), returning an enriched `CityForecastItem` with Today, Tomorrow,
+ * Day-After-Tomorrow weather codes, temperatures, PoPs, and 3-hourly forecast slots.
+ */
+export function parseJmaCityForecastJson(
+  rawJson: any,
+  target: MajorForecastCityTarget,
+  fallbackCity: CityForecastItem,
+  nowMs: number = Date.now()
+): CityForecastItem {
+  if (!Array.isArray(rawJson) || rawJson.length === 0) {
+    return fallbackCity;
+  }
+
+  const shortTerm = rawJson[0];
+  const weekly = rawJson[1];
+
+  const tsWeather = shortTerm?.timeSeries?.[0];
+  const tsPop = shortTerm?.timeSeries?.[1];
+  const tsTemp = shortTerm?.timeSeries?.[2];
+
+  const tsWeeklyWeather = weekly?.timeSeries?.[0];
+  const tsWeeklyTemp = weekly?.timeSeries?.[1];
+
+  const todayStr = formatJstDateStr(nowMs);
+  const tomorrowStr = formatJstDateStr(nowMs + 86400 * 1000);
+  const dayAfterStr = formatJstDateStr(nowMs + 2 * 86400 * 1000);
+
+  // Find matching sub-area in short-term weather timeSeries
+  const findArea = (areas: any[] | undefined, code: string) => {
+    if (!Array.isArray(areas) || areas.length === 0) return null;
+    return (
+      areas.find((a) => String(a?.area?.code || '') === code) || areas[0]
+    );
+  };
+
+  const weatherArea0 = findArea(tsWeather?.areas, target.areaCode);
+  const popArea0 = findArea(tsPop?.areas, target.areaCode);
+  const tempArea0 = findArea(tsTemp?.areas, target.tempStationCode);
+
+  const weeklyWeatherArea = findArea(tsWeeklyWeather?.areas, target.areaCode);
+  const weeklyTempArea = findArea(tsWeeklyTemp?.areas, target.tempStationCode);
+
+  // Map date `YYYY-MM-DD` -> { weatherCode, weatherText, pop }
+  const dateWeatherMap = new Map<
+    string,
+    { weatherCode?: string; weatherText?: string; pop?: number }
+  >();
+
+  if (Array.isArray(tsWeeklyWeather?.timeDefines) && weeklyWeatherArea) {
+    tsWeeklyWeather.timeDefines.forEach((td: string, idx: number) => {
+      const dStr = String(td || '').slice(0, 10);
+      if (!dStr) return;
+      const wc = String(weeklyWeatherArea.weatherCodes?.[idx] || '').trim();
+      const popRaw = Number(weeklyWeatherArea.pops?.[idx]);
+      dateWeatherMap.set(dStr, {
+        weatherCode: wc || undefined,
+        weatherText: wc
+          ? classifyJmaWeatherDescriptor(wc).shortLabel
+          : undefined,
+        pop: !Number.isNaN(popRaw) && weeklyWeatherArea.pops?.[idx] !== '' ? popRaw : undefined,
+      });
+    });
+  }
+
+  if (Array.isArray(tsWeather?.timeDefines) && weatherArea0) {
+    tsWeather.timeDefines.forEach((td: string, idx: number) => {
+      const dStr = String(td || '').slice(0, 10);
+      if (!dStr) return;
+      const wc = String(weatherArea0.weatherCodes?.[idx] || '').trim();
+      const wt = String(weatherArea0.weathers?.[idx] || '')
+        .replace(/　+/g, ' ')
+        .trim();
+      const prev = dateWeatherMap.get(dStr) || {};
+      dateWeatherMap.set(dStr, {
+        ...prev,
+        weatherCode: wc || prev.weatherCode,
+        weatherText: wt || (wc ? classifyJmaWeatherDescriptor(wc).shortLabel : prev.weatherText),
+      });
+    });
+  }
+
+  // Extract 6-hour PoPs
+  const pops6h: [number, number, number, number] = [...fallbackCity.pops];
+  const dateMaxPopMap = new Map<string, number>();
+  if (Array.isArray(tsPop?.timeDefines) && popArea0 && Array.isArray(popArea0.pops)) {
+    tsPop.timeDefines.forEach((td: string, idx: number) => {
+      const val = Number(popArea0.pops[idx]);
+      if (Number.isNaN(val)) return;
+      if (idx < 4) {
+        pops6h[idx] = val;
+      }
+      const dStr = String(td || '').slice(0, 10);
+      if (dStr) {
+        const cur = dateMaxPopMap.get(dStr) ?? 0;
+        if (val > cur) dateMaxPopMap.set(dStr, val);
+      }
+    });
+  }
+
+  // Map date `YYYY-MM-DD` -> { min?: number, max?: number }
+  const dateTempMap = new Map<string, { min?: number; max?: number }>();
+
+  if (Array.isArray(tsWeeklyTemp?.timeDefines) && weeklyTempArea) {
+    tsWeeklyTemp.timeDefines.forEach((td: string, idx: number) => {
+      const dStr = String(td || '').slice(0, 10);
+      if (!dStr) return;
+      const minRaw = weeklyTempArea.tempsMin?.[idx];
+      const maxRaw = weeklyTempArea.tempsMax?.[idx];
+      const minVal = minRaw !== '' && minRaw !== undefined ? Number(minRaw) : undefined;
+      const maxVal = maxRaw !== '' && maxRaw !== undefined ? Number(maxRaw) : undefined;
+      dateTempMap.set(dStr, {
+        min: minVal !== undefined && !Number.isNaN(minVal) ? minVal : undefined,
+        max: maxVal !== undefined && !Number.isNaN(maxVal) ? maxVal : undefined,
+      });
+    });
+  }
+
+  if (Array.isArray(tsTemp?.timeDefines) && tempArea0 && Array.isArray(tempArea0.temps)) {
+    tsTemp.timeDefines.forEach((td: string, idx: number) => {
+      const rawStr = String(td || '');
+      const dStr = rawStr.slice(0, 10);
+      const tValStr = tempArea0.temps[idx];
+      if (!dStr || tValStr === '' || tValStr === undefined) return;
+      const tVal = Number(tValStr);
+      if (Number.isNaN(tVal)) return;
+      const cur = dateTempMap.get(dStr) || {};
+      if (rawStr.includes('T00:00') || rawStr.includes('T06:00')) {
+        cur.min = tVal;
+      } else if (rawStr.includes('T09:00') || rawStr.includes('T12:00')) {
+        cur.max = tVal;
+      } else if (cur.min === undefined) {
+        cur.min = tVal;
+      } else {
+        cur.max = tVal;
+      }
+      dateTempMap.set(dStr, cur);
+    });
+  }
+
+  // Resolve Today, Tomorrow, Day-After-Tomorrow
+  const todayW = dateWeatherMap.get(todayStr);
+  const tomorrowW = dateWeatherMap.get(tomorrowStr);
+  const dayAfterW = dateWeatherMap.get(dayAfterStr);
+
+  const todayWeatherCode =
+    todayW?.weatherCode ||
+    String(weatherArea0?.weatherCodes?.[0] || fallbackCity.todayWeatherCode || '101');
+  const tomorrowWeatherCode =
+    tomorrowW?.weatherCode ||
+    String(weatherArea0?.weatherCodes?.[1] || fallbackCity.tomorrowWeatherCode || '101');
+  const dayAfterWeatherCode =
+    dayAfterW?.weatherCode ||
+    String(
+      weatherArea0?.weatherCodes?.[2] ||
+        weeklyWeatherArea?.weatherCodes?.[2] ||
+        fallbackCity.dayAfterWeatherCode ||
+        '101'
+    );
+
+  const todayWeather =
+    todayW?.weatherText ||
+    classifyJmaWeatherDescriptor(todayWeatherCode, fallbackCity.todayWeather).shortLabel;
+  const tomorrowWeather =
+    tomorrowW?.weatherText ||
+    classifyJmaWeatherDescriptor(tomorrowWeatherCode, fallbackCity.tomorrowWeather).shortLabel;
+  const dayAfterWeather =
+    dayAfterW?.weatherText ||
+    classifyJmaWeatherDescriptor(dayAfterWeatherCode, fallbackCity.dayAfterWeather).shortLabel;
+
+  const todayT = dateTempMap.get(todayStr);
+  const tomorrowT = dateTempMap.get(tomorrowStr);
+  const dayAfterT = dateTempMap.get(dayAfterStr);
+
+  const todayTempMax =
+    todayT?.max ?? fallbackCity.todayTempMax ?? fallbackCity.tempMax;
+  const todayTempMin =
+    todayT?.min ??
+    (todayT?.max !== undefined ? todayT.max - 6 : undefined) ??
+    fallbackCity.todayTempMin ??
+    fallbackCity.tempMin;
+
+  const tomorrowTempMax =
+    tomorrowT?.max ?? fallbackCity.tomorrowTempMax ?? todayTempMax;
+  const tomorrowTempMin =
+    tomorrowT?.min ?? fallbackCity.tomorrowTempMin ?? todayTempMin;
+
+  const dayAfterTempMax =
+    dayAfterT?.max ?? fallbackCity.dayAfterTempMax ?? tomorrowTempMax;
+  const dayAfterTempMin =
+    dayAfterT?.min ?? fallbackCity.dayAfterTempMin ?? tomorrowTempMin;
+
+  const tomorrowPop =
+    tomorrowW?.pop ??
+    dateMaxPopMap.get(tomorrowStr) ??
+    fallbackCity.tomorrowPop ??
+    Math.max(...pops6h);
+  const dayAfterPop =
+    dayAfterW?.pop ??
+    dateMaxPopMap.get(dayAfterStr) ??
+    fallbackCity.dayAfterPop ??
+    30;
+
+  const hourly3h = buildCity3HourlySlots({
+    weatherCode: todayWeatherCode,
+    weatherText: todayWeather,
+    tempMin: todayTempMin,
+    tempMax: todayTempMax,
+    pops: pops6h,
+  });
+
+  // Format reportDatetime
+  let updatedAt = fallbackCity.updatedAt;
+  if (typeof shortTerm?.reportDatetime === 'string') {
+    const m = shortTerm.reportDatetime.match(/T(\d{2}:\d{2})/);
+    if (m) updatedAt = `${m[1]} 発表`;
+  }
+
+  return {
+    ...fallbackCity,
+    todayWeather,
+    tomorrowWeather,
+    dayAfterWeather,
+    todayWeatherCode,
+    tomorrowWeatherCode,
+    dayAfterWeatherCode,
+    tempMin: todayTempMin,
+    tempMax: todayTempMax,
+    todayTempMin,
+    todayTempMax,
+    tomorrowTempMin,
+    tomorrowTempMax,
+    dayAfterTempMin,
+    dayAfterTempMax,
+    todayDateLabel: formatDateLabelJa(todayStr),
+    tomorrowDateLabel: formatDateLabelJa(tomorrowStr),
+    dayAfterDateLabel: formatDateLabelJa(dayAfterStr),
+    pops: pops6h,
+    tomorrowPop,
+    dayAfterPop,
+    hourly3h,
+    updatedAt,
+    office: String(shortTerm?.publishingOffice || fallbackCity.office),
+  };
+}
+
 
 
 

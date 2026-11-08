@@ -26,12 +26,16 @@ import {
 } from './data/fallbackData';
 import {
   convertP2PQuakeItem,
+  fetchLatestLiveEew,
   fetchMonitorDataBundle,
+  fetchRecentEarthquakes,
 } from './services/jmaClient';
 import {
   AmedasMetric,
   EarthquakeReport,
+  EewDisplayMode,
   EewReport,
+  ForecastViewMode,
   InterruptKind,
   JmaXmlEntry,
   MapViewportState,
@@ -49,14 +53,21 @@ import {
   getNextPatrolStep,
   getNextSceneId,
   getSeismicScaleStyle,
+  mergeProgressiveEarthquakeReports,
+  parseEarthquakeTimeMs,
   REGION_CONFIGS,
   SCENE_LIST,
   sortEarthquakesByNewest,
 } from './utils/jmaParser';
 import {
+  estimateLpgmClassFromScale,
+  getLpgmClassStyle,
   getTsunamiAlertSeverity,
+  isEewStillActive,
   parseP2PEew,
+  parseP2PEewDetection,
   parseP2PTsunami,
+  parseWolfxEew,
   shouldReplaceEew,
 } from './utils/eewTsunami';
 
@@ -160,6 +171,8 @@ export default function App() {
   const [patrolStepIndex, setPatrolStepIndex] = useState<number>(0);
   // Warning patrol step: 0 = initial national view, 1..N = active 警報/特別警報 divisions (North->South), N+1 = final national view
   const [warningPatrolStep, setWarningPatrolStep] = useState<number>(0);
+  // Typhoon patrol step: 0 = overview (all cyclones blocks), 1..M = single cyclone focus, M+1 = return to overview
+  const [typhoonPatrolStep, setTyphoonPatrolStep] = useState<number>(0);
   const [mapViewport, setMapViewport] = useState<MapViewportState | undefined>(
     undefined
   );
@@ -173,6 +186,16 @@ export default function App() {
   const [selectedEarthquake, setSelectedEarthquake] = useState<EarthquakeReport>(
     INITIAL_EARTHQUAKES[0]
   );
+  // 手動で特定の地震が選択・固定されている場合の ID（自動巡回を停止して該当地震を保持）
+  const [pinnedEarthquakeId, setPinnedEarthquakeId] = useState<string | null>(
+    null
+  );
+  const pinnedEarthquakeIdRef = useRef<string | null>(null);
+
+  const updatePinnedEarthquakeId = useCallback((id: string | null) => {
+    pinnedEarthquakeIdRef.current = id;
+    setPinnedEarthquakeId(id);
+  }, []);
   const [selectedTyphoon, setSelectedTyphoon] = useState<TyphoonReport>(
     INITIAL_TYPHOONS[0]
   );
@@ -182,6 +205,14 @@ export default function App() {
   const [activeEew, setActiveEew] = useState<EewReport | null>(null);
   const [isTsunamiDemo, setIsTsunamiDemo] = useState<boolean>(false);
   const [amedasMetric, setAmedasMetric] = useState<AmedasMetric>('temp');
+  const [forecastViewMode, setForecastViewMode] =
+    useState<ForecastViewMode>('today_3h');
+  const [forecast3hIndex, setForecast3hIndex] = useState<number>(() => {
+    const h = new Date().getHours();
+    return Math.min(7, Math.max(0, Math.floor(h / 3)));
+  });
+  const [eewDisplayMode, setEewDisplayMode] =
+    useState<EewDisplayMode>('intensity');
   const eewDemoTimerRef = useRef<NodeJS.Timeout[]>([]);
 
   // XML Inspector & Settings Popup Modal state
@@ -205,6 +236,14 @@ export default function App() {
   }, [data.lastXmlFetchTime]);
 
   const latestEqIdRef = useRef<string>(INITIAL_EARTHQUAKES[0].id);
+  const latestEqReportKeyRef = useRef<string>('');
+  const hasInitializedEqRef = useRef<boolean>(false);
+  // True while an active EEW or an unconfirmed earthquake (震度速報 / 震源情報) is unfolding;
+  // locks the monitor onto the 'earthquake' scene until the final confirmed report (各地の震度に関する情報) arrives!
+  const eqLockUntilConfirmedRef = useRef<boolean>(false);
+  const eqConfirmedHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
   const latestVolcanoXmlIdRef = useRef<string>('');
 
   // Bottom XML Ticker refs (uses tiled scrollLeft with cached copyWidth so it never triggers forced layout reflows)
@@ -251,32 +290,175 @@ export default function App() {
     };
   }, [data.xmlEntries]);
 
-  // Low-frequency JMA XML & JSON fetch (on mount + every 5 minutes)
+  // Unified handler for incoming EEW (緊急地震速報 予報・警報・発表検出)
+  const handleIncomingEew = useCallback((eew: EewReport) => {
+    setActiveEew((prev) => {
+      if (shouldReplaceEew(prev, eew)) {
+        return eew;
+      }
+      return prev;
+    });
+    if (!eew.isCancelled) {
+      eqLockUntilConfirmedRef.current = true;
+      if (eqConfirmedHoldTimerRef.current) {
+        clearTimeout(eqConfirmedHoldTimerRef.current);
+        eqConfirmedHoldTimerRef.current = null;
+      }
+      setEewDisplayMode('intensity');
+      setInterruptKind('eew');
+      setActiveScene('earthquake');
+    }
+  }, []);
+
+  // Unified handler for earthquake list updates (JMA bosai + P2P 551):
+  // Immediately switches to 'earthquake' when a new quake or progressive report upgrade arrives,
+  // and keeps 'earthquake' locked until `isConfirmed === true` (final seismic intensity & hypocenter confirmed).
+  const applyEarthquakeListUpdate = useCallback(
+    (rawList: EarthquakeReport[]) => {
+      if (!rawList || rawList.length === 0) return;
+      const merged = mergeProgressiveEarthquakeReports(rawList);
+      if (merged.length === 0) return;
+      const newest = merged[0];
+      const nextKey =
+        newest.reportKey ||
+        `${newest.id}|${newest.issueTypeLabel || ''}|${newest.maxScaleCode}|${newest.stations.length}|${newest.isConfirmed ? 1 : 0}`;
+
+      if (!hasInitializedEqRef.current) {
+        hasInitializedEqRef.current = true;
+        latestEqIdRef.current = newest.id;
+        latestEqReportKeyRef.current = nextKey;
+        setSelectedEarthquake(newest);
+
+        // If the app starts up while an earthquake is still unconfirmed (e.g. 震度速報 / 震源情報 within the last 15 min),
+        // immediately switch to and lock onto the 'earthquake' tab!
+        const eqTimeMs =
+          parseEarthquakeTimeMs(newest.occurrenceTime) ||
+          parseEarthquakeTimeMs(newest.issueTime);
+        const isRecentUnconfirmed =
+          newest.isConfirmed === false &&
+          eqTimeMs > 0 &&
+          Date.now() - eqTimeMs <= 15 * 60 * 1000;
+        if (isRecentUnconfirmed) {
+          eqLockUntilConfirmedRef.current = true;
+          setInterruptKind('earthquake');
+          setActiveScene('earthquake');
+        }
+        return;
+      }
+
+      const isNewEvent = Boolean(
+        latestEqIdRef.current &&
+          newest.id !== latestEqIdRef.current &&
+          latestEqIdRef.current !== INITIAL_EARTHQUAKES[0].id
+      );
+      const isReportUpgraded = Boolean(
+        latestEqReportKeyRef.current &&
+          nextKey !== latestEqReportKeyRef.current
+      );
+
+      latestEqIdRef.current = newest.id;
+      latestEqReportKeyRef.current = nextKey;
+
+      if (isNewEvent || isReportUpgraded) {
+        updatePinnedEarthquakeId(null);
+        setSelectedEarthquake(newest);
+        setActiveScene('earthquake');
+
+        if (newest.isConfirmed === false) {
+          // Interim report (震度速報 / 震源に関する情報 / 震度速報・震源情報):
+          // Keep locked on 'earthquake' tab continuously until final seismic intensity is confirmed!
+          eqLockUntilConfirmedRef.current = true;
+          if (eqConfirmedHoldTimerRef.current) {
+            clearTimeout(eqConfirmedHoldTimerRef.current);
+            eqConfirmedHoldTimerRef.current = null;
+          }
+          setInterruptKind((prev) => (prev === 'eew' ? 'eew' : 'earthquake'));
+        } else {
+          // Final seismic intensity & hypocenter confirmed (`各地の震度に関する情報` / `isConfirmed: true`)!
+          eqLockUntilConfirmedRef.current = false;
+          setInterruptKind('earthquake');
+          if (eqConfirmedHoldTimerRef.current) {
+            clearTimeout(eqConfirmedHoldTimerRef.current);
+          }
+          // Hold on the confirmed earthquake view for 60 seconds so the user can inspect the final result,
+          // then release the interrupt lock so normal patrol can resume.
+          eqConfirmedHoldTimerRef.current = setTimeout(() => {
+            eqConfirmedHoldTimerRef.current = null;
+            if (!eqLockUntilConfirmedRef.current) {
+              setInterruptKind((prev) =>
+                prev === 'earthquake' || prev === 'eew' ? 'none' : prev
+              );
+            }
+          }, 60000);
+        }
+      } else {
+        setSelectedEarthquake((prev) => {
+          if (prev.isTest) return prev;
+          // ユーザーが手動で特定の地震を選択・固定している場合は勝手に最新に書き換えない
+          if (pinnedEarthquakeIdRef.current) {
+            const matched = merged.find(
+              (e) => e.id === pinnedEarthquakeIdRef.current
+            );
+            return matched || prev;
+          }
+          return newest;
+        });
+      }
+    },
+    []
+  );
+
+  // Fast 10-second background poll specifically for EEW (Wolfx + P2P 556) & Earthquake (JMA + P2P 551)
+  const pollFastEarthquakeAndEew = useCallback(async () => {
+    try {
+      const [liveEew, eqRes] = await Promise.all([
+        fetchLatestLiveEew(),
+        fetchRecentEarthquakes(),
+      ]);
+      if (liveEew && isEewStillActive(liveEew)) {
+        handleIncomingEew(liveEew);
+      }
+      if (eqRes.live && eqRes.earthquakes.length > 0) {
+        setData((prev) => ({
+          ...prev,
+          earthquakes: eqRes.earthquakes,
+          dataSourceStatus: {
+            ...prev.dataSourceStatus,
+            p2pQuakeLive: true,
+          },
+        }));
+        applyEarthquakeListUpdate(eqRes.earthquakes);
+      }
+    } catch {
+      // Ignore fast poll network errors
+    }
+  }, [applyEarthquakeListUpdate, handleIncomingEew]);
+
+  // Full JMA XML & JSON bundle fetch (on mount + every 1 minute)
   const refreshJmaData = useCallback(async () => {
     setIsRefreshingXml(true);
     try {
-      const bundle = await fetchMonitorDataBundle();
+      const [bundle, liveEew] = await Promise.all([
+        fetchMonitorDataBundle(),
+        fetchLatestLiveEew(),
+      ]);
       setData(bundle);
+
+      if (liveEew && isEewStillActive(liveEew)) {
+        handleIncomingEew(liveEew);
+      }
 
       // 0. Sync live typhoon selection
       if (bundle.typhoons.length > 0) {
-        setSelectedTyphoon(bundle.typhoons[0]);
+        setSelectedTyphoon((prev) => {
+          const found = bundle.typhoons.find((t) => t.id === prev.id);
+          return found || bundle.typhoons[0];
+        });
       }
 
-      // 1. Check for new earthquake
+      // 1. Check for new or upgraded earthquake report
       if (bundle.earthquakes.length > 0) {
-        const newest = bundle.earthquakes[0];
-        if (
-          latestEqIdRef.current &&
-          newest.id !== latestEqIdRef.current &&
-          latestEqIdRef.current !== INITIAL_EARTHQUAKES[0].id
-        ) {
-          setSelectedEarthquake(newest);
-          setInterruptKind('earthquake');
-        } else if (interruptKind === 'none') {
-          setSelectedEarthquake(newest);
-        }
-        latestEqIdRef.current = newest.id;
+        applyEarthquakeListUpdate(bundle.earthquakes);
       }
 
       // 2. Check for Volcano Alert Level change in eqvol.xml
@@ -302,89 +484,165 @@ export default function App() {
     } finally {
       setIsRefreshingXml(false);
     }
-  }, [interruptKind]);
+  }, [applyEarthquakeListUpdate, handleIncomingEew]);
 
   useEffect(() => {
     refreshJmaData();
     const pollTimer = setInterval(refreshJmaData, 60000);
-    return () => clearInterval(pollTimer);
-  }, [refreshJmaData]);
+    const fastEqTimer = setInterval(pollFastEarthquakeAndEew, 10000);
+    return () => {
+      clearInterval(pollTimer);
+      clearInterval(fastEqTimer);
+    };
+  }, [refreshJmaData, pollFastEarthquakeAndEew]);
 
-  // Subscribe to P2PQuake WebSocket for low-latency earthquake / EEW / Tsunami push delivery
+  // Subscribe to BOTH P2PQuake WebSocket (`wss://api.p2pquake.net/v2/ws`) AND Wolfx JMA EEW WebSocket (`wss://ws-api.wolfx.jp/jma_eew`)
+  // with automatic reconnection for real-time push delivery of EEW (Forecast & Warning), Earthquake, and Tsunami reports
   useEffect(() => {
-    let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket('wss://api.p2pquake.net/v2/ws');
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (!payload || typeof payload.code !== 'number') return;
+    let p2pWs: WebSocket | null = null;
+    let wolfxWs: WebSocket | null = null;
+    let p2pReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let wolfxReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let unmounted = false;
 
-          // 1. EEW (緊急地震速報（警報） code: 556)
-          if (payload.code === 556) {
-            const eew = parseP2PEew(payload);
-            if (eew) {
-              setActiveEew((prev) => {
-                if (shouldReplaceEew(prev, eew)) {
-                  return eew;
-                }
-                return prev;
-              });
-              setInterruptKind('eew');
-              setActiveScene('earthquake');
-              // Immediately trigger low-latency refresh of earthquake data
-              refreshJmaData();
-            }
-          }
-          // 2. EEW Announcement Detection (NHKチャイム検出 code: 554)
-          else if (payload.code === 554) {
-            setActiveScene('earthquake');
-            refreshJmaData();
-          }
-          // 3. Tsunami forecast (津波予報 code: 552)
-          else if (payload.code === 552) {
-            const tsunami = parseP2PTsunami(payload);
-            if (tsunami) {
-              setData((prev) => ({
-                ...prev,
-                tsunamiForecast: tsunami,
-              }));
-              const sev = getTsunamiAlertSeverity(tsunami);
-              if (sev === 'warning_or_above') {
-                setActiveScene('tsunami');
+    const connectP2p = () => {
+      if (unmounted) return;
+      try {
+        p2pWs = new WebSocket('wss://api.p2pquake.net/v2/ws');
+        p2pWs.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (!payload || typeof payload.code !== 'number') return;
+
+            // 1. EEW Warning (緊急地震速報（警報） code: 556)
+            if (payload.code === 556) {
+              const eew = parseP2PEew(payload);
+              if (eew) {
+                handleIncomingEew(eew);
+                pollFastEarthquakeAndEew();
               }
             }
-          }
-          // 4. Earthquake detail (各地の震度・震源情報 code: 551)
-          else if (payload.code === 551) {
-            const report = convertP2PQuakeItem(payload);
-            if (report && report.id !== latestEqIdRef.current) {
-              latestEqIdRef.current = report.id;
-              setData((prev) => ({
-                ...prev,
-                earthquakes: sortEarthquakesByNewest([
-                  report,
-                  ...prev.earthquakes.filter((e) => e.id !== report.id),
-                ]).slice(0, 20),
-              }));
-              setSelectedEarthquake(report);
-              setInterruptKind('earthquake');
-              setActiveScene('earthquake');
+            // 2. EEW Announcement Detection (緊急地震速報 発表検出 code: 554)
+            else if (payload.code === 554) {
+              const det = parseP2PEewDetection(payload);
+              if (det) {
+                handleIncomingEew(det);
+              } else {
+                eqLockUntilConfirmedRef.current = true;
+                setInterruptKind('eew');
+                setActiveScene('earthquake');
+              }
+              pollFastEarthquakeAndEew();
             }
+            // 3. Tsunami forecast (津波予報 code: 552)
+            else if (payload.code === 552) {
+              const tsunami = parseP2PTsunami(payload);
+              if (tsunami) {
+                setData((prev) => ({
+                  ...prev,
+                  tsunamiForecast: tsunami,
+                }));
+                const sev = getTsunamiAlertSeverity(tsunami);
+                if (sev === 'warning_or_above') {
+                  setActiveScene('tsunami');
+                }
+              }
+            }
+            // 4. Earthquake report (震度速報 / 震源に関する情報 / 各地の震度に関する情報 code: 551)
+            else if (payload.code === 551) {
+              const report = convertP2PQuakeItem(payload);
+              if (report) {
+                setData((prev) => {
+                  const nextList = mergeProgressiveEarthquakeReports([
+                    report,
+                    ...prev.earthquakes,
+                  ]).slice(0, 20);
+                  queueMicrotask(() => applyEarthquakeListUpdate(nextList));
+                  return {
+                    ...prev,
+                    earthquakes: nextList,
+                  };
+                });
+                // Also fetch JMA bosai detail JSON shortly after for exact station lat/lon coordinates
+                setTimeout(() => {
+                  if (!unmounted) pollFastEarthquakeAndEew();
+                }, 1500);
+              }
+            }
+          } catch {
+            // Ignore malformed WS message
           }
-        } catch {
-          // Ignore malformed WS message
+        };
+        p2pWs.onclose = () => {
+          if (!unmounted) {
+            p2pReconnectTimer = setTimeout(connectP2p, 3500);
+          }
+        };
+        p2pWs.onerror = () => {
+          try {
+            p2pWs?.close();
+          } catch {
+            // ignore
+          }
+        };
+      } catch {
+        if (!unmounted) {
+          p2pReconnectTimer = setTimeout(connectP2p, 5000);
         }
-      };
-    } catch {
-      // Ignore WS connection failure
-    }
-    return () => {
-      if (ws && ws.readyState <= 1) {
-        ws.close();
       }
     };
-  }, [refreshJmaData]);
+
+    const connectWolfx = () => {
+      if (unmounted) return;
+      try {
+        wolfxWs = new WebSocket('wss://ws-api.wolfx.jp/jma_eew');
+        wolfxWs.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (!payload || payload.type !== 'jma_eew') return;
+            const eew = parseWolfxEew(payload, Date.now());
+            if (eew && isEewStillActive(eew)) {
+              handleIncomingEew(eew);
+              pollFastEarthquakeAndEew();
+            }
+          } catch {
+            // Ignore heartbeat / malformed message
+          }
+        };
+        wolfxWs.onclose = () => {
+          if (!unmounted) {
+            wolfxReconnectTimer = setTimeout(connectWolfx, 3500);
+          }
+        };
+        wolfxWs.onerror = () => {
+          try {
+            wolfxWs?.close();
+          } catch {
+            // ignore
+          }
+        };
+      } catch {
+        if (!unmounted) {
+          wolfxReconnectTimer = setTimeout(connectWolfx, 5000);
+        }
+      }
+    };
+
+    connectP2p();
+    connectWolfx();
+
+    return () => {
+      unmounted = true;
+      if (p2pReconnectTimer) clearTimeout(p2pReconnectTimer);
+      if (wolfxReconnectTimer) clearTimeout(wolfxReconnectTimer);
+      if (p2pWs && p2pWs.readyState <= 1) {
+        p2pWs.close();
+      }
+      if (wolfxWs && wolfxWs.readyState <= 1) {
+        wolfxWs.close();
+      }
+    };
+  }, [applyEarthquakeListUpdate, handleIncomingEew, pollFastEarthquakeAndEew]);
 
   // Divisions (out of the 57 JMA divisions) that currently have 警報 (warning) or 特別警報 (special), ordered North to South
   const severeWarningDivisions = useMemo(
@@ -465,6 +723,18 @@ export default function App() {
       return;
     }
 
+    // If locked onto earthquake (active EEW or unconfirmed seismic intensity / hypocenter),
+    // stay on the 'earthquake' scene continuously until final seismic intensity is confirmed!
+    if (
+      eqLockUntilConfirmedRef.current ||
+      interruptKind === 'eew' ||
+      interruptKind === 'earthquake' ||
+      (activeEew && isEewStillActive(activeEew))
+    ) {
+      setActiveScene('earthquake');
+      return;
+    }
+
     if (
       activeScene === 'warnings' &&
       (regionScope === 'national' || regionScope === 'auto')
@@ -479,8 +749,7 @@ export default function App() {
       setWarningPatrolStep(0);
     }
 
-    const isRegionalPatrolScene =
-      activeScene === 'forecast' || activeScene === 'weather_info';
+    const isRegionalPatrolScene = activeScene === 'weather_info';
 
     if (regionScope === 'auto' && isRegionalPatrolScene) {
       const { nextStepIndex, regionId, completedCycle } =
@@ -494,15 +763,38 @@ export default function App() {
       setPatrolRegionId('national');
     }
 
-    if (activeScene === 'typhoon' && data.typhoons.length > 1) {
-      const curIdx = data.typhoons.findIndex(
-        (t) => t.id === selectedTyphoon.id
-      );
-      if (curIdx !== -1 && curIdx < data.typhoons.length - 1) {
-        setSelectedTyphoon(data.typhoons[curIdx + 1]);
+    if (activeScene === 'forecast') {
+      // Step through the 3 TV broadcast forecast views on the nationwide map:
+      // 1. 'today_3h' (今日の3時間ごとのこれからの天気)
+      // 2. 'tomorrow' (明日の天気)
+      // 3. 'day_after' (明後日の天気) -> then advance to next scene
+      if (forecastViewMode === 'today_3h') {
+        setForecastViewMode('tomorrow');
         return;
       }
-      setSelectedTyphoon(data.typhoons[0]);
+      if (forecastViewMode === 'tomorrow') {
+        setForecastViewMode('day_after');
+        return;
+      }
+      setForecastViewMode('today_3h');
+      setForecast3hIndex(0);
+    }
+
+    if (activeScene === 'typhoon') {
+      const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+      // Step 0: Overview (all cyclones in blocks, no forecasts)
+      // Step 1..totalTyphoons: Single cyclone detail (header pinned + forecast timeline with ↓ arrows)
+      // Step totalTyphoons + 1: Return to overview (all cyclones in blocks again)
+      if (typhoonPatrolStep <= totalTyphoons) {
+        const nextStep = typhoonPatrolStep + 1;
+        setTyphoonPatrolStep(nextStep);
+        if (nextStep >= 1 && nextStep <= totalTyphoons) {
+          const nextTc = data.typhoons[nextStep - 1] || data.typhoons[0];
+          if (nextTc) setSelectedTyphoon(nextTc);
+        }
+        return;
+      }
+      setTyphoonPatrolStep(0);
     }
 
     if (activeScene === 'amedas') {
@@ -522,8 +814,15 @@ export default function App() {
       if (nextScene === 'amedas') {
         setAmedasMetric('temp');
       }
-      if (nextScene === 'typhoon' && data.typhoons.length > 0) {
-        setSelectedTyphoon(data.typhoons[0]);
+      if (nextScene === 'forecast') {
+        setForecastViewMode('today_3h');
+        setForecast3hIndex(0);
+      }
+      if (nextScene === 'typhoon') {
+        setTyphoonPatrolStep(0);
+        if (data.typhoons.length > 0) {
+          setSelectedTyphoon(data.typhoons[0]);
+        }
       }
       if (regionScope === 'auto') {
         setPatrolStepIndex(0);
@@ -533,10 +832,14 @@ export default function App() {
     });
   }, [
     activeScene,
+    activeEew,
     amedasMetric,
+    forecastViewMode,
     data.amedas,
     data.typhoons,
+    interruptKind,
     selectedTyphoon.id,
+    typhoonPatrolStep,
     effectiveEnabledScenes,
     regionScope,
     patrolStepIndex,
@@ -546,10 +849,20 @@ export default function App() {
   ]);
 
   const handleSelectSceneManual = (sceneId: SceneId) => {
+    eqLockUntilConfirmedRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
     setInterruptKind('none');
     setWarningPatrolStep(0);
+    setTyphoonPatrolStep(0);
     if (sceneId === 'amedas') {
       setAmedasMetric('temp');
+    }
+    if (sceneId === 'forecast') {
+      setForecastViewMode('today_3h');
+      setForecast3hIndex(0);
     }
     if (sceneId === 'typhoon' && data.typhoons.length > 0) {
       setSelectedTyphoon(data.typhoons[0]);
@@ -560,6 +873,13 @@ export default function App() {
     }
     setActiveScene(sceneId);
   };
+
+  const handleChangeForecastViewMode = useCallback((mode: ForecastViewMode) => {
+    setForecastViewMode(mode);
+    if (mode === 'today_3h') {
+      setForecast3hIndex(0);
+    }
+  }, []);
 
   // Test Interrupt 1: Earthquake
   const handleTriggerTestEarthquake = () => {
@@ -575,6 +895,7 @@ export default function App() {
 
     // Step 1: 第1報（M5.9 震度5強以上）
     const r1 = { ...TEST_EEW_REPORTS[0], receivedAtMs: Date.now() };
+    setEewDisplayMode('intensity');
     setActiveEew(r1);
     setInterruptKind('eew');
     setActiveScene('earthquake');
@@ -622,6 +943,11 @@ export default function App() {
   }, []);
 
   const handleDismissInterrupt = () => {
+    eqLockUntilConfirmedRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
     setInterruptKind('none');
     setActiveEew(null);
     eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
@@ -658,13 +984,42 @@ export default function App() {
     [data.earthquakes]
   );
 
-  const handleSelectEarthquakeFromPanel = useCallback((eq: EarthquakeReport) => {
-    setSelectedEarthquake(eq);
-    setActiveScene('earthquake');
-  }, []);
+  // "地震情報でほかの地震を選択したら勝手に巡回するのをやめてそれを表示しておくようにしたい"
+  // 地震を選択したら自動巡回ループを停止し、選択された地震を固定表示する
+  const handleSelectEarthquake = useCallback(
+    (eq: EarthquakeReport) => {
+      setSelectedEarthquake(eq);
+      setActiveScene('earthquake');
+      setIsLoopPaused(true);
+      updatePinnedEarthquakeId(eq.id);
+    },
+    [updatePinnedEarthquakeId]
+  );
 
-  const handleSelectTyphoonFromPanel = useCallback((ty: TyphoonReport) => {
-    setSelectedTyphoon(ty);
+  // 巡回再開: 固定を解除して最新の地震に戻し、自動巡回を再開する
+  const handleResumePatrol = useCallback(() => {
+    setIsLoopPaused(false);
+    updatePinnedEarthquakeId(null);
+    if (interruptKind === 'earthquake') {
+      setInterruptKind('none');
+    }
+    if (sortedEarthquakes.length > 0) {
+      setSelectedEarthquake(sortedEarthquakes[0]);
+    }
+  }, [sortedEarthquakes, interruptKind, updatePinnedEarthquakeId]);
+
+  const handleSelectTyphoonFromPanel = useCallback(
+    (ty: TyphoonReport) => {
+      const idx = data.typhoons.findIndex((t) => t.id === ty.id);
+      setTyphoonPatrolStep(idx !== -1 ? idx + 1 : 1);
+      setSelectedTyphoon(ty);
+      setActiveScene('typhoon');
+    },
+    [data.typhoons]
+  );
+
+  const handleReturnTyphoonOverview = useCallback(() => {
+    setTyphoonPatrolStep(0);
     setActiveScene('typhoon');
   }, []);
 
@@ -676,7 +1031,7 @@ export default function App() {
   }, [regionScope, patrolRegionId]);
 
   const effectiveScene: SceneId =
-    interruptKind === 'earthquake'
+    interruptKind === 'earthquake' || interruptKind === 'eew'
       ? 'earthquake'
       : interruptKind === 'volcano'
         ? 'volcano'
@@ -684,18 +1039,165 @@ export default function App() {
            ? 'tsunami'
            : activeScene;
 
+  // The right detail panel is hidden for 'forecast' (全国天気予報) and 'radar' (雨雲レーダー) scenes,
+  // sliding smoothly out to the right.
+  const isRightPanelHidden =
+    effectiveScene === 'forecast' || effectiveScene === 'radar';
+
+  // Automated sequential playback for the forecast scene:
+  // 1. In 'today_3h': Step through 3-hourly slots from 03時 up to 24時 (index 7).
+  //    Once 24時 has been displayed for its full 1.8s duration, smoothly advance to 'tomorrow' ("24時までを表示してその次に明日にいく").
+  // 2. In 'tomorrow': Display for 6.5s, then advance to 'day_after'.
+  // 3. In 'day_after': Display for 6.5s, then advance to next scene via advanceScene().
+  useEffect(() => {
+    if (effectiveScene !== 'forecast' || isLoopPaused) {
+      return;
+    }
+
+    if (forecastViewMode === 'today_3h') {
+      const timer = setInterval(() => {
+        setForecast3hIndex((prev) => {
+          if (prev >= 7) {
+            clearInterval(timer);
+            setForecastViewMode('tomorrow');
+            return 7;
+          }
+          return prev + 1;
+        });
+      }, 1800);
+      return () => clearInterval(timer);
+    }
+
+    if (forecastViewMode === 'tomorrow') {
+      const timer = setTimeout(() => {
+        setForecastViewMode('day_after');
+      }, 6500);
+      return () => clearTimeout(timer);
+    }
+
+    if (forecastViewMode === 'day_after') {
+      const timer = setTimeout(() => {
+        advanceScene();
+      }, 6500);
+      return () => clearTimeout(timer);
+    }
+  }, [effectiveScene, forecastViewMode, isLoopPaused, advanceScene]);
+
+  // 長周期地震動の表示タイミング制御:
+  // "長周期地震動は震度などが確定してから少しだけ表示するだけでいい"
+  // EEW発令中の頻繁な自動切り替えは行わず、震度確定後に数秒間（4秒間）だけ少し表示して震度に戻す
+  useEffect(() => {
+    if (effectiveScene !== 'earthquake' || isLoopPaused) {
+      setEewDisplayMode('intensity');
+      return;
+    }
+
+    // EEW発令中は予測震度を常時安定して表示
+    if (activeEew && isEewStillActive(activeEew)) {
+      setEewDisplayMode('intensity');
+      return;
+    }
+
+    // 確定後の地震情報表示時: 長周期地震動（震度4以上/M5.8以上/階級1以上）が存在する場合、
+    // 確定震度を十分（8秒間）表示したあと、4秒間だけ長周期地震動を表示して元に戻す
+    const hasLpgm =
+      (selectedEarthquake.maxScaleCode >= 50 ||
+        (selectedEarthquake.maxScaleCode >= 40 &&
+          selectedEarthquake.magnitude >= 5.8)) &&
+      selectedEarthquake.isConfirmed !== false;
+
+    if (!hasLpgm) {
+      setEewDisplayMode('intensity');
+      return;
+    }
+
+    const showLpgmTimer = setTimeout(() => {
+      setEewDisplayMode('lpgm');
+      const revertTimer = setTimeout(() => {
+        setEewDisplayMode('intensity');
+      }, 4000);
+      return () => clearTimeout(revertTimer);
+    }, 8000);
+
+    return () => clearTimeout(showLpgmTimer);
+  }, [
+    effectiveScene,
+    activeEew,
+    selectedEarthquake.id,
+    selectedEarthquake.maxScaleCode,
+    selectedEarthquake.magnitude,
+    selectedEarthquake.isConfirmed,
+    isLoopPaused,
+  ]);
+
   const sceneMeta =
     SCENE_LIST.find((s) => s.id === effectiveScene) || SCENE_LIST[0];
 
   const effectiveSceneTitle = useMemo(() => {
+    if (effectiveScene === 'earthquake') {
+      if (activeEew && isEewStillActive(activeEew)) {
+        return activeEew.isWarning
+          ? '緊急地震速報（警報）'
+          : '緊急地震速報（予報）';
+      }
+      if (eewDisplayMode === 'lpgm') {
+        const estClass = estimateLpgmClassFromScale(
+          selectedEarthquake.maxScaleCode,
+          selectedEarthquake.maxScaleCode,
+          selectedEarthquake.magnitude
+        );
+        const lpgmStyle = getLpgmClassStyle(estClass);
+        return `長周期地震動に関する観測情報（最大${lpgmStyle.label}）`;
+      }
+      return selectedEarthquake.issueTypeLabel || '地震情報（震源・震度に関する情報）';
+    }
     if (effectiveScene === 'amedas') {
       if (amedasMetric === 'precip') return '全国アメダス気象実況（降水量）';
       if (amedasMetric === 'wind') return '全国アメダス気象実況（風向・風速）';
       if (amedasMetric === 'snow') return '全国アメダス気象実況（積雪深）';
       return '全国アメダス気象実況（気温分布）';
     }
+    if (effectiveScene === 'forecast') {
+      const refFc = data.forecasts[0];
+      const todayLabel = refFc?.todayDateLabel || '今日';
+      const tomorrowLabel = refFc?.tomorrowDateLabel || '明日';
+      const dayAfterLabel = refFc?.dayAfterDateLabel || '明後日';
+      const slot =
+        refFc?.hourly3h?.[
+          Math.max(
+            0,
+            Math.min((refFc?.hourly3h?.length || 1) - 1, forecast3hIndex)
+          )
+        ];
+      if (forecastViewMode === 'today_3h') {
+        return `今日のこれからの天気（${todayLabel} ${slot?.timeLabel || '15時'}）`;
+      }
+      if (forecastViewMode === 'tomorrow') {
+        return `全国の天気　明日 ${tomorrowLabel}`;
+      }
+      return `全国の天気　明後日 ${dayAfterLabel}`;
+    }
+    if (effectiveScene === 'typhoon') {
+      const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+      if (typhoonPatrolStep >= 1 && typhoonPatrolStep <= totalTyphoons) {
+        return `${selectedTyphoon.displayNumber}（${selectedTyphoon.nameJp}）実況・進路予想`;
+      }
+      return '全国 台風・熱帯低気圧 進路実況';
+    }
     return sceneMeta.title;
-  }, [effectiveScene, amedasMetric, sceneMeta.title]);
+  }, [
+    effectiveScene,
+    amedasMetric,
+    forecastViewMode,
+    forecast3hIndex,
+    data.forecasts,
+    typhoonPatrolStep,
+    selectedTyphoon,
+    data.typhoons.length,
+    sceneMeta.title,
+    activeEew,
+    eewDisplayMode,
+  ]);
 
   return (
     <div className="h-screen w-screen bg-[#0D0F12] text-white p-1.5 overflow-hidden select-none flex">
@@ -720,10 +1222,28 @@ export default function App() {
           >
             {effectiveScene === 'earthquake' ? (
               <>
-                <span>地震履歴（震源・震度一覧）</span>
-                <span className="font-mono text-[11px] text-amber-300">
-                  {data.earthquakes.length}件取得
-                </span>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="truncate">地震履歴（震源・震度一覧）</span>
+                  {pinnedEarthquakeId && isLoopPaused && (
+                    <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded shrink-0">
+                      固定表示中
+                    </span>
+                  )}
+                </div>
+                {pinnedEarthquakeId && isLoopPaused ? (
+                  <button
+                    type="button"
+                    onClick={handleResumePatrol}
+                    className="font-mono text-[10px] font-bold bg-red-800/90 hover:bg-red-700 text-white px-2 py-0.5 rounded cursor-pointer transition-colors shadow-xs shrink-0"
+                    title="自動巡回を再開して最新の地震に戻す"
+                  >
+                    巡回再開 ▶
+                  </button>
+                ) : (
+                  <span className="font-mono text-[11px] text-amber-300 shrink-0">
+                    {data.earthquakes.length}件取得
+                  </span>
+                )}
               </>
             ) : (
               <>
@@ -744,12 +1264,14 @@ export default function App() {
             >
               {sortedEarthquakes.map((eq) => {
                 const isSelected = selectedEarthquake.id === eq.id;
+                const isPinned =
+                  isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
                 const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
                 return (
                   <button
                     key={eq.id}
                     type="button"
-                    onClick={() => setSelectedEarthquake(eq)}
+                    onClick={() => handleSelectEarthquake(eq)}
                     className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer block ${
                       isSelected
                         ? 'bg-[#251A22] border-l-2 border-red-500'
@@ -757,21 +1279,43 @@ export default function App() {
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-mono text-neutral-400">
-                        {eq.occurrenceTime.replace(' 頃発生', '')}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-mono text-neutral-400">
+                          {eq.occurrenceTime.replace(' 頃発生', '')}
+                        </span>
+                        {isPinned && (
+                          <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded">
+                            固定中
+                          </span>
+                        )}
+                      </div>
                       <span
                         className={`px-1.5 py-0.5 text-[11px] font-mono font-extrabold ${scaleStyle.bg} ${scaleStyle.text}`}
                       >
-                        最大震度{eq.maxScaleLabel}
+                        {eq.maxScaleCode >= 10
+                          ? `最大震度${eq.maxScaleLabel}`
+                          : '震度調査中'}
                       </span>
                     </div>
-                    <div className="text-[14px] font-extrabold text-white mt-1 leading-snug">
-                      {eq.hypocenterName}
+                    <div className="text-[14px] font-extrabold text-white mt-1 leading-snug flex items-center justify-between gap-1">
+                      <span>{eq.hypocenterName}</span>
+                      {eq.isConfirmed === false && (
+                        <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.5 rounded-xs shrink-0">
+                          続報待機中
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center justify-between text-xs font-mono text-neutral-300 mt-1">
-                      <span>M{eq.magnitude.toFixed(1)}</span>
-                      <span>深さ約{eq.depthKm}km</span>
+                      {eq.hypocenterUnknown ? (
+                        <span className="text-amber-300">
+                          {eq.issueTypeLabel || '震度速報'}（震源調査中）
+                        </span>
+                      ) : (
+                        <>
+                          <span>M{eq.magnitude.toFixed(1)}</span>
+                          <span>深さ約{eq.depthKm}km</span>
+                        </>
+                      )}
                     </div>
                   </button>
                 );
@@ -821,14 +1365,20 @@ export default function App() {
           <div className="border-t border-[#5A606D] bg-[#0D0F13] p-2 shrink-0 flex items-center justify-between gap-1.5 text-[11px]">
             <button
               type="button"
-              onClick={() => setIsLoopPaused((p) => !p)}
+              onClick={() => {
+                if (isLoopPaused) {
+                  handleResumePatrol();
+                } else {
+                  setIsLoopPaused(true);
+                }
+              }}
               className={`flex-1 px-2 py-1.5 font-bold border transition-colors text-center cursor-pointer ${
                 isLoopPaused
                   ? 'bg-amber-500/25 border-amber-400 text-amber-200'
                   : 'bg-[#181C24] border-neutral-700 text-neutral-200 hover:bg-neutral-800'
               }`}
             >
-              {isLoopPaused ? '▶ 再開' : '⏸ 巡回中'}
+              {isLoopPaused ? '▶ 巡回再開' : '⏸ 巡回中'}
             </button>
 
             <button
@@ -867,12 +1417,20 @@ export default function App() {
               data={data}
               selectedEarthquake={selectedEarthquake}
               selectedTyphoon={selectedTyphoon}
+              typhoonPatrolStep={typhoonPatrolStep}
               activeVolcano={activeVolcano}
               amedasMetric={amedasMetric}
               onChangeAmedasMetric={setAmedasMetric}
+              forecastViewMode={forecastViewMode}
+              onChangeForecastViewMode={handleChangeForecastViewMode}
+              forecast3hIndex={forecast3hIndex}
+              onChangeForecast3hIndex={setForecast3hIndex}
               onViewportChange={setMapViewport}
               interruptKind={interruptKind}
               isLoopPaused={isLoopPaused}
+              isRightPanelHidden={isRightPanelHidden}
+              eewDisplayMode={eewDisplayMode}
+              onChangeEewDisplayMode={setEewDisplayMode}
               onSceneComplete={advanceScene}
             />
 
@@ -919,8 +1477,14 @@ export default function App() {
               </div>
             </div>
 
-            {/* Floating Right-Side Slim Regional Strip (Matches NERV防災ライブ right strip) */}
-            <div className="absolute top-3 right-3 bottom-3 z-[400] pointer-events-none animate-startup-right">
+            {/* Floating Right-Side Slim Regional Strip (Slides smoothly off-screen for 'forecast' and 'radar' scenes) */}
+            <div
+              className={`absolute top-3 right-3 bottom-3 z-[400] transition-all duration-500 ease-in-out ${
+                isRightPanelHidden
+                  ? 'translate-x-[calc(100%+24px)] opacity-0 pointer-events-none'
+                  : 'translate-x-0 opacity-100 pointer-events-none'
+              }`}
+            >
               <SceneDetailPanel
                 activeScene={activeScene}
                 activeRegionConfig={activeRegionConfig}
@@ -930,18 +1494,26 @@ export default function App() {
                 data={data}
                 selectedEarthquake={selectedEarthquake}
                 selectedTyphoon={selectedTyphoon}
+                typhoonPatrolStep={typhoonPatrolStep}
                 activeVolcano={activeVolcano}
                 activeEew={activeEew}
                 activeTsunamiForecast={data.tsunamiForecast}
                 isTsunamiDemo={isTsunamiDemo}
                 amedasMetric={amedasMetric}
                 onChangeAmedasMetric={setAmedasMetric}
-                onSelectEarthquake={handleSelectEarthquakeFromPanel}
+                forecastViewMode={forecastViewMode}
+                onChangeForecastViewMode={handleChangeForecastViewMode}
+                forecast3hIndex={forecast3hIndex}
+                onChangeForecast3hIndex={setForecast3hIndex}
+                onSelectEarthquake={handleSelectEarthquake}
                 onSelectTyphoon={handleSelectTyphoonFromPanel}
+                onReturnTyphoonOverview={handleReturnTyphoonOverview}
                 interruptKind={interruptKind}
-                onDismissInterrupt={handleDismissInterrupt}
+                onDismissInterrupt={handleResumePatrol}
                 isLoopPaused={isLoopPaused}
                 loopIntervalSec={loopIntervalSec}
+                eewDisplayMode={eewDisplayMode}
+                onChangeEewDisplayMode={setEewDisplayMode}
                 onSceneComplete={advanceScene}
               />
             </div>

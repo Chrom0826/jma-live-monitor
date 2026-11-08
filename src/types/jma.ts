@@ -213,6 +213,23 @@ export interface TsunamiStationItem {
   updatedAt: string;
 }
 
+export type ForecastViewMode = 'today_3h' | 'tomorrow' | 'day_after';
+
+export interface Forecast3HourlySlot {
+  /** 3時間ごとの時刻ラベル（例: '03時', '06時', '09時', '12時', '15時', '18時', '21時', '24時'） */
+  timeLabel: string;
+  /** 時刻（3, 6, 9, 12, 15, 18, 21, 24） */
+  hour: number;
+  /** 気象庁天気コード（例: '100', '200', '300', '400'） */
+  weatherCode: string;
+  /** 天気テキスト（例: '晴', '曇', '雨', '雪'） */
+  weatherText: string;
+  /** その時刻の予想気温（℃） */
+  temp: number;
+  /** 降水確率（%） */
+  pop: number;
+}
+
 export interface CityForecastItem {
   id: string;
   cityName: string;
@@ -223,9 +240,24 @@ export interface CityForecastItem {
   todayWeather: string;
   tomorrowWeather: string;
   dayAfterWeather: string;
+  todayWeatherCode?: string;
+  tomorrowWeatherCode?: string;
+  dayAfterWeatherCode?: string;
   tempMin: number;
   tempMax: number;
+  todayTempMin?: number;
+  todayTempMax?: number;
+  tomorrowTempMin?: number;
+  tomorrowTempMax?: number;
+  dayAfterTempMin?: number;
+  dayAfterTempMax?: number;
+  todayDateLabel?: string;
+  tomorrowDateLabel?: string;
+  dayAfterDateLabel?: string;
   pops: [number, number, number, number];
+  tomorrowPop?: number;
+  dayAfterPop?: number;
+  hourly3h?: Forecast3HourlySlot[];
   overviewText: string;
   updatedAt: string;
   office: string;
@@ -261,6 +293,10 @@ export interface EarthquakeReport {
   issueTypeLabel?: string;
   /** 震度速報など震源未確定（hypocenter.latitude = -200）の場合 true */
   hypocenterUnknown?: boolean;
+  /** 震源および各地の震度が確定した最終報（各地の震度に関する情報 / 震源・震度に関する情報）かどうか */
+  isConfirmed?: boolean;
+  /** 同一地震IDで震度速報→震源情報→各地の震度へ更新されたことを検知する署名キー */
+  reportKey?: string;
   /** 気象庁震度細分区域コード（100, 704等）ごとの最大観測震度 */
   areaMaxScales?: Record<string, { scaleCode: number; scaleLabel: string; name?: string }>;
   /** 市区町村コード（3520300等）ごとの最大観測震度（拡大時に使用） */
@@ -268,7 +304,7 @@ export interface EarthquakeReport {
   stations: EarthquakeStationIntensity[];
 }
 
-/** P2P地震情報 code 556（緊急地震速報（警報））の細分区域ごとの予測震度 */
+/** P2P地震情報 code 556（緊急地震速報（警報））の細分区域ごとの予測震度・長周期地震動 */
 export interface EewForecastArea {
   pref: string;
   name: string;
@@ -280,9 +316,14 @@ export interface EewForecastArea {
   kindCode: string;
   /** 主要動の到達予測時刻（JST "YYYY/MM/DD HH:mm:ss"）。到達済み・PLUM法の場合 null */
   arrivalTime: string | null;
+  /** 長周期地震動予測階級（0: 階級0, 1: 階級1, 2: 階級2, 3: 階級3, 4: 階級4） */
+  lpgmClass?: 0 | 1 | 2 | 3 | 4;
 }
 
-/** P2P地震情報 code 556（緊急地震速報（警報））を正規化したレポート（第n報） */
+/** 緊急地震速報の表示モード: 震度予測 vs 長周期地震動階級 */
+export type EewDisplayMode = 'intensity' | 'lpgm';
+
+/** P2P地震情報 code 556 / Wolfx JMA EEW（緊急地震速報 警報・予報）を正規化したレポート（第n報） */
 export interface EewReport {
   id: string;
   eventId: string;
@@ -297,11 +338,19 @@ export interface EewReport {
   magnitude: number;
   isCancelled: boolean;
   isTest: boolean;
+  /** 警報（true）か予報（false）か */
+  isWarning?: boolean;
+  /** 最終報かどうか */
+  isFinal?: boolean;
   /** 仮定震源要素（PLUM法等で震源が仮定されている） */
   isAssumedHypocenter: boolean;
   /** 全区域の最大予測震度（scaleTo の最大値、99 の場合は scaleFrom を採用） */
   maxScaleCode: number;
   maxScaleLabel: string;
+  /** 長周期地震動 最大予測階級（0〜4） */
+  maxLpgmClass?: 0 | 1 | 2 | 3 | 4;
+  /** 長周期地震動 最大予測階級ラベル（階級1〜階級4） */
+  maxLpgmLabel?: string;
   areas: EewForecastArea[];
   receivedAtMs: number;
   isDemo?: boolean;

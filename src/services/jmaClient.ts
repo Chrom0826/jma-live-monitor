@@ -17,8 +17,10 @@ import {
 } from '../data/fallbackData';
 import {
   AmedasStationData,
+  CityForecastItem,
   EarthquakeReport,
   EarthquakeStationIntensity,
+  EewReport,
   JmaXmlEntry,
   LightningPoint,
   MonitorDataBundle,
@@ -32,8 +34,11 @@ import {
 } from '../types/jma';
 import {
   formatSeismicScale,
+  MAJOR_FORECAST_CITY_TARGETS,
+  mergeProgressiveEarthquakeReports,
   parseJmaAmedasNationwide,
   parseJmaAtomXml,
+  parseJmaCityForecastJson,
   parseJmaQuakeDetailJson,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
@@ -41,10 +46,14 @@ import {
   sortEarthquakesByNewest,
 } from '../utils/jmaParser';
 import {
+  isEewStillActive,
   isTsunamiForecastActive,
   P2P_QUAKE_ISSUE_TYPE_LABELS,
   parseJmaTsunamiDetail,
+  parseP2PEew,
   parseP2PTsunami,
+  parseWolfxEew,
+  shouldReplaceEew,
 } from '../utils/eewTsunami';
 
 const JMA_XML_URLS: Record<XmlFeedType, string> = {
@@ -535,11 +544,14 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
     const eq = item.earthquake;
     if (!eq || !eq.hypocenter) return null;
     const hypo = eq.hypocenter;
-    const hypocenterName = hypo.name || '震源調査中';
-    const maxScaleCode = typeof eq.maxScale === 'number' ? eq.maxScale : 10;
+    const rawHypoName = String(hypo.name || '').trim();
+    const hypocenterName = rawHypoName || '震源調査中';
+    const rawMaxScale = typeof eq.maxScale === 'number' ? eq.maxScale : -1;
+    const maxScaleCode = rawMaxScale >= 10 ? rawMaxScale : -1;
     const rawPoints = Array.isArray(item.points) ? item.points : [];
     const hypocenterUnknown =
-      typeof hypo.latitude === 'number' && hypo.latitude <= -100;
+      (typeof hypo.latitude === 'number' && hypo.latitude <= -100) ||
+      !rawHypoName;
     const hypoLat =
       typeof hypo.latitude === 'number' && hypo.latitude > 0
         ? hypo.latitude
@@ -555,7 +567,7 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       (issueType ? `地震情報（${issueType}）` : '地震情報');
 
     const stations: EarthquakeStationIntensity[] = [];
-    for (let i = 0; i < Math.min(rawPoints.length, 45); i++) {
+    for (let i = 0; i < Math.min(rawPoints.length, 60); i++) {
       const pt = rawPoints[i];
       const pref = String(pt.pref || '');
       const addr = String(pt.addr || '');
@@ -589,21 +601,35 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
 
     stations.sort((a, b) => b.scaleCode - a.scaleCode);
 
+    const isConfirmed =
+      !hypocenterUnknown &&
+      maxScaleCode >= 10 &&
+      issueType !== 'ScalePrompt' &&
+      issueType !== 'Destination';
+
+    const id = String(item.id || `p2p-${eq.time}`);
+    const finalLat =
+      hypocenterUnknown && stations[0]?.lat ? stations[0].lat : hypoLat;
+    const finalLon =
+      hypocenterUnknown && stations[0]?.lon ? stations[0].lon : hypoLon;
+
+    const reportKey = `${id}|${issueTypeLabel}|${hypocenterName}|${maxScaleCode}|${stations.length}|${isConfirmed ? 1 : 0}`;
+
     return {
-      id: String(item.id || `p2p-${eq.time}`),
+      id,
       issueTime: `${item.issue?.time || eq.time || ''} 発表`,
       occurrenceTime: `${eq.time || ''} 頃発生`,
       hypocenterName,
-      regionId: guessRegionFromName(hypocenterName),
-      lat: hypoLat,
-      lon: hypoLon,
+      regionId: guessRegionFromName(hypocenterName || stations[0]?.prefecture || ''),
+      lat: finalLat,
+      lon: finalLon,
       depthKm: typeof hypo.depth === 'number' && hypo.depth >= 0 ? hypo.depth : 10,
       magnitude:
         typeof hypo.magnitude === 'number' && hypo.magnitude >= 0
           ? Number(hypo.magnitude.toFixed(1))
           : 4.0,
       maxScaleCode,
-      maxScaleLabel: formatSeismicScale(maxScaleCode),
+      maxScaleLabel: maxScaleCode >= 10 ? formatSeismicScale(maxScaleCode) : '-',
       domesticTsunami:
         TSUNAMI_LABEL_MAP[eq.domesticTsunami] ||
         'この地震による津波の心配はありません。',
@@ -611,20 +637,24 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       sourceOffice: item.issue?.source || '気象庁（P2P地震情報経由）',
       issueTypeLabel,
       hypocenterUnknown,
+      isConfirmed,
+      reportKey,
       stations:
         stations.length > 0
           ? stations
-          : [
-              {
-                prefecture: hypocenterName,
-                city: '震源周辺地域',
-                stationName: '各地の検震点',
-                scaleCode: maxScaleCode,
-                scaleLabel: formatSeismicScale(maxScaleCode),
-                lat: hypoLat,
-                lon: hypoLon,
-              },
-            ],
+          : maxScaleCode >= 10
+            ? [
+                {
+                  prefecture: hypocenterName,
+                  city: '震源周辺地域',
+                  stationName: '各地の検震点',
+                  scaleCode: maxScaleCode,
+                  scaleLabel: formatSeismicScale(maxScaleCode),
+                  lat: finalLat,
+                  lon: finalLon,
+                },
+              ]
+            : [],
     };
   } catch {
     return null;
@@ -632,32 +662,108 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
 }
 
 /**
- * Fetches recent earthquakes and exact seismic intensity station coordinates (`IntensityStation` with `latlon`)
- * directly from JMA's official `bosai/quake/data/list.json` and detail JSONs, with fallback to P2PQuake.
+ * Fetches active live EEW (both `緊急地震速報（予報）` and `緊急地震速報（警報）`)
+ * from Wolfx (`https://api.wolfx.jp/jma_eew.json`) and P2PQuake (`codes=556`),
+ * returning the active `EewReport` if one was issued within `EEW_DISPLAY_HOLD_MS`.
  */
-async function fetchRecentEarthquakes(): Promise<{
+export async function fetchLatestLiveEew(
+  nowMs: number = Date.now()
+): Promise<EewReport | null> {
+  try {
+    const [wolfxRes, p2pRes] = await Promise.all([
+      fetchWithTimeout('https://api.wolfx.jp/jma_eew.json', 3000).catch(
+        () => null
+      ),
+      fetchWithTimeout(
+        'https://api.p2pquake.net/v2/history?codes=556&limit=2',
+        3000
+      ).catch(() => null),
+    ]);
+
+    let candidate: EewReport | null = null;
+
+    if (wolfxRes && wolfxRes.ok) {
+      const wolfxJson = await wolfxRes.json().catch(() => null);
+      const parsedWolfx = wolfxJson ? parseWolfxEew(wolfxJson, nowMs) : null;
+      if (parsedWolfx && isEewStillActive(parsedWolfx, nowMs)) {
+        candidate = parsedWolfx;
+      }
+    }
+
+    if (p2pRes && p2pRes.ok) {
+      const p2pJson = await p2pRes.json().catch(() => null);
+      if (Array.isArray(p2pJson) && p2pJson.length > 0) {
+        const latest556 = p2pJson[0];
+        const issueMs = Date.parse(
+          String(latest556?.issue?.time || latest556?.time || '').replace(
+            /\//g,
+            '-'
+          )
+        );
+        const recMs = !Number.isNaN(issueMs) ? issueMs : nowMs;
+        const parsed556 = parseP2PEew(latest556, recMs);
+        if (
+          parsed556 &&
+          isEewStillActive(parsed556, nowMs) &&
+          shouldReplaceEew(candidate, parsed556)
+        ) {
+          candidate = parsed556;
+        }
+      }
+    }
+
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches recent earthquakes and exact seismic intensity station coordinates (`IntensityStation` with `latlon`)
+ * from BOTH JMA's official `bosai/quake/data/list.json` AND P2P地震情報 (`codes=551`),
+ * merging progressive reports (`震度速報` + `震源に関する情報` + `各地の震度に関する情報`).
+ */
+export async function fetchRecentEarthquakes(): Promise<{
   earthquakes: EarthquakeReport[];
   live: boolean;
 }> {
-  // 1. Primary: Official JMA Bosai Earthquake JSON (includes exact lat/lon for every seismic intensity meter)
-  try {
-    const listRes = await fetchWithTimeout(JMA_QUAKE_LIST_URL, 4000);
-    if (listRes.ok) {
-      const listJson = (await listRes.json()) as Array<Record<string, any>>;
-      if (Array.isArray(listJson) && listJson.length > 0) {
-        const seenEids = new Set<string>();
-        const targetEntries: Array<Record<string, any>> = [];
+  const [jmaReports, p2pReports] = await Promise.all([
+    (async (): Promise<EarthquakeReport[]> => {
+      try {
+        const listRes = await fetchWithTimeout(JMA_QUAKE_LIST_URL, 3800);
+        if (!listRes.ok) return [];
+        const listJson = (await listRes.json()) as Array<Record<string, any>>;
+        if (!Array.isArray(listJson) || listJson.length === 0) return [];
+
+        const eidEntriesMap = new Map<string, Array<Record<string, any>>>();
+        const orderedEids: string[] = [];
 
         for (const entry of listJson) {
           const jsonFile = String(entry?.json || '');
           const eid = String(entry?.eid || jsonFile);
-          if (!jsonFile || !eid || seenEids.has(eid)) continue;
-          // Prefer entries that have both hypocenter (cod) and intensity (maxi)
+          if (!jsonFile || !eid) continue;
           if (!entry.cod && !entry.maxi) continue;
-          seenEids.add(eid);
-          targetEntries.push(entry);
-          if (targetEntries.length >= 10) break;
+          let arr = eidEntriesMap.get(eid);
+          if (!arr) {
+            if (orderedEids.length >= 10) continue;
+            arr = [];
+            eidEntriesMap.set(eid, arr);
+            orderedEids.push(eid);
+          }
+          // Keep up to 2 progressive entries per eid (e.g., VXSE52 震源情報 + VXSE51 震度速報)
+          if (arr.length === 0) {
+            arr.push(entry);
+          } else if (
+            arr.length === 1 &&
+            ((!arr[0].maxi && entry.maxi) || (!arr[0].cod && entry.cod))
+          ) {
+            arr.push(entry);
+          }
         }
+
+        const targetEntries = orderedEids.flatMap(
+          (eid) => eidEntriesMap.get(eid) || []
+        );
 
         const detailReports = await Promise.all(
           targetEntries.map(async (entry) => {
@@ -682,37 +788,38 @@ async function fetchRecentEarthquakes(): Promise<{
           })
         );
 
-        const validReports = sortEarthquakesByNewest(
-          detailReports.filter((r): r is EarthquakeReport => r !== null)
+        return detailReports.filter(
+          (r): r is EarthquakeReport => r !== null
         );
-        if (validReports.length > 0) {
-          return { earthquakes: validReports, live: true };
-        }
+      } catch {
+        return [];
       }
-    }
-  } catch {
-    // Fall through to P2PQuake fallback
+    })(),
+    (async (): Promise<EarthquakeReport[]> => {
+      try {
+        const res = await fetchWithTimeout(P2P_QUAKE_HISTORY_URL, 3800);
+        if (!res.ok) return [];
+        const json = (await res.json()) as Array<Record<string, any>>;
+        if (!Array.isArray(json)) return [];
+        return json
+          .map(convertP2PQuakeItem)
+          .filter((x): x is EarthquakeReport => x !== null);
+      } catch {
+        return [];
+      }
+    })(),
+  ]);
+
+  const combined = mergeProgressiveEarthquakeReports([
+    ...jmaReports,
+    ...p2pReports,
+  ]);
+
+  if (combined.length > 0) {
+    return { earthquakes: combined.slice(0, 15), live: true };
   }
 
-  // 2. Secondary fallback: P2PQuake API
-  try {
-    const res = await fetchWithTimeout(P2P_QUAKE_HISTORY_URL, 4000);
-    if (!res.ok) {
-      return { earthquakes: INITIAL_EARTHQUAKES, live: false };
-    }
-    const json = (await res.json()) as Array<Record<string, any>>;
-    const parsed = sortEarthquakesByNewest(
-      json
-        .map(convertP2PQuakeItem)
-        .filter((x): x is EarthquakeReport => x !== null)
-    );
-    if (parsed.length > 0) {
-      return { earthquakes: parsed, live: true };
-    }
-    return { earthquakes: INITIAL_EARTHQUAKES, live: false };
-  } catch {
-    return { earthquakes: INITIAL_EARTHQUAKES, live: false };
-  }
+  return { earthquakes: INITIAL_EARTHQUAKES, live: false };
 }
 
 async function fetchJmaOverviewForecast(): Promise<{
@@ -735,6 +842,54 @@ async function fetchJmaOverviewForecast(): Promise<{
     return { overviewText: null, live: false };
   } catch {
     return { overviewText: null, live: false };
+  }
+}
+
+async function fetchLiveJmaForecasts(): Promise<{
+  forecasts: CityForecastItem[];
+  live: boolean;
+}> {
+  try {
+    const uniqueOfficeCodes = Array.from(
+      new Set(MAJOR_FORECAST_CITY_TARGETS.map((t) => t.officeCode))
+    );
+    const officeJsonMap = new Map<string, any>();
+
+    await Promise.all(
+      uniqueOfficeCodes.map(async (officeCode) => {
+        try {
+          const res = await fetchWithTimeout(
+            `https://www.jma.go.jp/bosai/forecast/data/forecast/${officeCode}.json`,
+            3800
+          );
+          if (!res.ok) return;
+          const json = await res.json();
+          if (Array.isArray(json) && json.length > 0) {
+            officeJsonMap.set(officeCode, json);
+          }
+        } catch {
+          // Ignore individual office fetch errors
+        }
+      })
+    );
+
+    if (officeJsonMap.size === 0) {
+      return { forecasts: INITIAL_FORECASTS, live: false };
+    }
+
+    const nowMs = Date.now();
+    const forecasts = MAJOR_FORECAST_CITY_TARGETS.map((target) => {
+      const fallbackCity =
+        INITIAL_FORECASTS.find((fc) => fc.id === target.id) ||
+        INITIAL_FORECASTS[0];
+      const rawJson = officeJsonMap.get(target.officeCode);
+      if (!rawJson) return fallbackCity;
+      return parseJmaCityForecastJson(rawJson, target, fallbackCity, nowMs);
+    });
+
+    return { forecasts, live: true };
+  } catch {
+    return { forecasts: INITIAL_FORECASTS, live: false };
   }
 }
 
@@ -917,6 +1072,7 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     liveAmedasRes,
     quakeRes,
     tsunamiRes,
+    liveForecastsRes,
     tokyoOverview,
   ] = await Promise.all([
     fetchSingleJmaXmlFeed('eqvol'),
@@ -928,6 +1084,7 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     fetchLiveAmedasData(),
     fetchRecentEarthquakes(),
     fetchLiveTsunami(),
+    fetchLiveJmaForecasts(),
     fetchJmaOverviewForecast(),
   ]);
 
@@ -940,7 +1097,7 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
   const xmlEntries =
     liveXmlEntries.length > 0 ? liveXmlEntries : INITIAL_XML_ENTRIES;
 
-  const forecasts = INITIAL_FORECASTS.map((fc) => {
+  const forecasts = liveForecastsRes.forecasts.map((fc) => {
     if (fc.id === 'fc-130000' && tokyoOverview.overviewText) {
       return {
         ...fc,
@@ -979,6 +1136,7 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
         liveWarningsRes.live ||
         liveTyphoonsRes.live ||
         liveAmedasRes.live ||
+        liveForecastsRes.live ||
         tokyoOverview.live ||
         tsunamiRes.live,
       p2pQuakeLive: quakeRes.live,
