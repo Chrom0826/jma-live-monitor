@@ -71,7 +71,8 @@ export interface LightningPoint {
   validtime?: string;
 }
 
-export type WarningSeverity = 'special' | 'warning' | 'advisory' | 'normal';
+/** special=レベル5 特別警報, danger=レベル4 危険警報, warning=レベル3 警報, advisory=レベル2 注意報 */
+export type WarningSeverity = 'special' | 'danger' | 'warning' | 'advisory' | 'normal';
 
 export interface WarningBadgeItem {
   code: string;
@@ -323,7 +324,7 @@ export interface EewForecastArea {
 /** 緊急地震速報の表示モード: 震度予測 vs 長周期地震動階級 */
 export type EewDisplayMode = 'intensity' | 'lpgm';
 
-/** P2P地震情報 code 556 / Wolfx JMA EEW（緊急地震速報 警報・予報）を正規化したレポート（第n報） */
+/** 緊急地震速報（警報: P2P code 556 / 予報・警報: Wolfx jma_eew）を正規化したレポート（第n報） */
 export interface EewReport {
   id: string;
   eventId: string;
@@ -338,10 +339,6 @@ export interface EewReport {
   magnitude: number;
   isCancelled: boolean;
   isTest: boolean;
-  /** 警報（true）か予報（false）か */
-  isWarning?: boolean;
-  /** 最終報かどうか */
-  isFinal?: boolean;
   /** 仮定震源要素（PLUM法等で震源が仮定されている） */
   isAssumedHypocenter: boolean;
   /** 全区域の最大予測震度（scaleTo の最大値、99 の場合は scaleFrom を採用） */
@@ -354,6 +351,15 @@ export interface EewReport {
   areas: EewForecastArea[];
   receivedAtMs: number;
   isDemo?: boolean;
+  /**
+   * 緊急地震速報（警報）を含むか。false = 緊急地震速報（予報）のみ。
+   * 未指定は警報扱い（P2P code 556 / デモ）。同一イベントで一度警報になれば以降も警報扱い。
+   */
+  isWarning?: boolean;
+  /** 最終報か（Wolfx isFinal）。未指定時は従来どおり serial >= 5 で推定（isEewFinal） */
+  isFinal?: boolean;
+  /** 受信元 */
+  source?: 'p2p' | 'wolfx' | 'demo';
 }
 
 export type TsunamiGrade =

@@ -10,10 +10,14 @@ import {
   getTsunamiAlertSeverity,
   isEewStillActive,
   parseJmaTsunamiDetail,
+  isEewFinal,
+  isEewWarning,
+  mergeEew,
   parseP2PEew,
   parseP2PEewDetection,
   parseP2PTsunami,
   parseWolfxEew,
+  parseWolfxShindo,
   shouldReplaceEew,
 } from './eewTsunami';
 import {
@@ -21,6 +25,8 @@ import {
   AUTO_PATROL_SEQUENCE,
   buildCity3HourlySlots,
   classifyJmaWeatherDescriptor,
+  decideIncomingEarthquake,
+  isSameEarthquakeEvent,
   classifyXmlEntryScene,
   computeAmedasTop5Rankings,
   computeTyphoonConeEnvelope,
@@ -1651,3 +1657,206 @@ test('findSubdivisionAreaCodes correctly maps EEW prefectures and area names to 
 
 
 
+
+test('r8 map.json: municipalities reported as clear stay normal even when their division has a warning (山形市 regression)', () => {
+  // 山形県 is ONE warning division. 庄内 (鶴岡市) has 波浪警報, 置賜 (小国町) has 土砂災害注意報 (new R8 code 29),
+  // 山形市 had 雷注意報 which was lifted (解除) in a later VPWW61 report.
+  const raw = [
+    {
+      reportDatetime: '2026-11-07T01:04:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW59',
+      warning: {
+        class10Items: [{ areaCode: '060030', kinds: [{ code: '07', status: '継続' }] }],
+        class20Items: [
+          { areaCode: '0620100', kinds: [{ status: '発表警報・注意報はなし' }] },
+          { areaCode: '0620300', kinds: [{ code: '07', status: '継続' }] },
+        ],
+      },
+    },
+    {
+      reportDatetime: '2026-11-07T14:56:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW56',
+      warning: {
+        class10Items: [{ areaCode: '060020', kinds: [{ code: '29', status: '発表' }] }],
+        class20Items: [
+          { areaCode: '0620100', kinds: [{ status: '発表警報・注意報はなし' }] },
+          { areaCode: '0636500', kinds: [{ code: '29', status: '発表' }] },
+        ],
+      },
+    },
+    {
+      reportDatetime: '2026-11-07T17:59:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW61',
+      warning: {
+        class10Items: [{ areaCode: '060010', kinds: [{ code: '14', status: '解除' }] }],
+        class20Items: [{ areaCode: '0620100', kinds: [{ code: '14', status: '解除' }] }],
+      },
+    },
+    // Older VPWW61 report for the same office: must be ignored (superseded by the 17:59 report)
+    {
+      reportDatetime: '2026-11-07T09:00:00+09:00',
+      infoType: '発表',
+      publishingOffice: '山形地方気象台',
+      dataTypeCode: 'VPWW61',
+      warning: {
+        class10Items: [{ areaCode: '060010', kinds: [{ code: '14', status: '発表' }] }],
+        class20Items: [{ areaCode: '0620100', kinds: [{ code: '14', status: '発表' }] }],
+      },
+    },
+  ];
+  const parsed = parseJmaWarningMapData(raw);
+  assert.equal(parsed.muniSeverityMap['0620100'], 'normal', '山形市 must be explicitly normal');
+  assert.equal(parsed.muniSeverityMap['0620300'], 'warning', '鶴岡市 波浪警報');
+  assert.equal(parsed.muniSeverityMap['0636500'], 'advisory', '小国町 土砂災害注意報 (code 29)');
+  assert.ok(!parsed.municipalityWarnings.some((m) => m.muniCode === '0620100'));
+  const yamagata = parsed.warnings.find((w) => w.divisionCode === '060000');
+  assert.ok(yamagata);
+  assert.equal(yamagata!.severity, 'warning');
+  assert.ok(yamagata!.badgeItems.some((b) => b.name === '土砂災害' && b.severity === 'advisory'));
+  assert.ok(!yamagata!.badgeItems.some((b) => b.name === '雷'));
+});
+
+test('r8 level-4 危険警報 codes (43/48/49) are parsed as danger and count as warning-or-above', () => {
+  const raw = [
+    {
+      reportDatetime: '2026-11-07T10:00:00+09:00',
+      infoType: '発表',
+      publishingOffice: '高知地方気象台',
+      dataTypeCode: 'VPWW57',
+      warning: {
+        class10Items: [{ areaCode: '390010', kinds: [{ code: '48', status: '発表' }] }],
+        class20Items: [{ areaCode: '3920100', kinds: [{ code: '48', status: '発表' }] }],
+      },
+    },
+    {
+      reportDatetime: '2026-11-07T10:00:00+09:00',
+      infoType: '発表',
+      publishingOffice: '高知地方気象台',
+      dataTypeCode: 'VPWW55',
+      warning: {
+        class10Items: [{ areaCode: '390010', kinds: [{ code: '43', status: '発表' }] }],
+        class20Items: [{ areaCode: '3920200', kinds: [{ code: '43', status: '発表' }] }],
+      },
+    },
+  ];
+  const parsed = parseJmaWarningMapData(raw);
+  assert.equal(parsed.muniSeverityMap['3920100'], 'danger');
+  assert.equal(parsed.muniSeverityMap['3920200'], 'danger');
+  const kochi = parsed.warnings.find((w) => w.divisionCode === '390000');
+  assert.equal(kochi?.severity, 'danger');
+  assert.ok(kochi?.badgeItems.some((b) => b.name === '高潮' && b.severity === 'danger'));
+  assert.equal(getActiveSevereWarningDivisions(parsed.warnings).length, 1);
+  assert.equal(computeWarningSummary(parsed.warnings).dangerCount, 1);
+});
+
+test('earthquake events are matched across feeds by origin time (P2P vs 気象庁 ids differ)', () => {
+  const p2p = { occurrenceTime: '2026/11/07 20:12:00 頃発生', issueTime: '2026/11/07 20:14:00 発表' };
+  const jma = { occurrenceTime: '2026-11-07T20:11:47+09:00', issueTime: '2026-11-07T20:16:00+09:00' };
+  const other = { occurrenceTime: '2026/11/07 20:40:00 頃発生', issueTime: '2026/11/07 20:42:00 発表' };
+  assert.equal(isSameEarthquakeEvent(p2p, jma), true);
+  assert.equal(isSameEarthquakeEvent(p2p, other), false);
+});
+
+test('decideIncomingEarthquake: newer event interrupts, follow-ups update, older/stale are ignored', () => {
+  const now = Date.parse('2026-11-07T20:20:00+09:00');
+  const shown = { occurrenceTime: '2026/11/07 20:12:00 頃発生', issueTime: '2026/11/07 20:14:00 発表' };
+  const followUp = { occurrenceTime: '2026-11-07T20:11:47+09:00', issueTime: '2026-11-07T20:16:00+09:00' };
+  const newer = { occurrenceTime: '2026/11/07 20:18:30 頃発生', issueTime: '2026/11/07 20:19:30 発表' };
+  const older = { occurrenceTime: '2026/11/07 19:00:00 頃発生', issueTime: '2026/11/07 19:02:00 発表' };
+  assert.equal(decideIncomingEarthquake(newer, shown, now), 'interrupt');
+  assert.equal(decideIncomingEarthquake(followUp, shown, now), 'update');
+  assert.equal(decideIncomingEarthquake(older, shown, now), 'ignore');
+  assert.equal(decideIncomingEarthquake(newer, null, now), 'interrupt');
+  assert.equal(decideIncomingEarthquake(older, null, now, 10 * 60 * 1000), 'ignore');
+});
+
+test('parseWolfxEew: 緊急地震速報（予報）と警報、P2Pとの統合', () => {
+  // Real Wolfx jma_eew frame (2026/11/07 茨城県沖 予報 第8報 最終報)
+  const forecast = parseWolfxEew(
+    {
+      type: 'jma_eew',
+      Title: '緊急地震速報（予報）',
+      EventID: '20261107200747',
+      Serial: 8,
+      AnnouncedTime: '2026/11/07 20:08:46',
+      OriginTime: '2026/11/07 20:07:41',
+      Hypocenter: '茨城県沖',
+      Latitude: 36.2,
+      Longitude: 141.5,
+      Magunitude: 5.4,
+      Magnitude: 5.4,
+      Depth: 40,
+      MaxIntensity: '3',
+      WarnArea: [],
+      isSea: true,
+      isTraining: false,
+      isAssumption: false,
+      isWarn: false,
+      isFinal: true,
+      isCancel: false,
+    },
+    1000
+  );
+  assert.ok(forecast);
+  assert.equal(forecast!.isWarning, false);
+  assert.equal(isEewWarning(forecast), false);
+  assert.equal(isEewFinal(forecast), true);
+  assert.equal(forecast!.maxScaleCode, 30);
+  assert.equal(forecast!.maxScaleLabel, '3');
+  assert.equal(forecast!.magnitude, 5.4);
+  assert.equal(forecast!.depthKm, 40);
+  assert.equal(forecast!.areas.length, 0);
+
+  assert.equal(parseWolfxEew({ type: 'heartbeat', ver: 25 }), null);
+  assert.equal(parseWolfxEew({ type: 'jma_eew', EventID: 'x', isTraining: true }), null);
+  assert.equal(parseWolfxShindo('5弱'), 45);
+  assert.equal(parseWolfxShindo('6+'), 60);
+  assert.equal(parseWolfxShindo('不明'), -1);
+
+  const warn = parseWolfxEew({
+    type: 'jma_eew',
+    Title: '緊急地震速報（警報）',
+    EventID: '20261107200747',
+    Serial: 9,
+    AnnouncedTime: '2026/11/07 20:08:50',
+    OriginTime: '2026/11/07 20:07:41',
+    Hypocenter: '茨城県沖',
+    Latitude: 36.2,
+    Longitude: 141.5,
+    Magnitude: 6.1,
+    Depth: 40,
+    MaxIntensity: '5強',
+    WarnArea: [
+      { Chiiki: '茨城県南部', Shindo1: '5強', Shindo2: '5弱', Type: '警報', Arrive: false },
+      { Chiiki: '茨城県北部', Shindo1: '5弱', Shindo2: '4', Type: '警報', Arrive: true },
+    ],
+    isWarn: true,
+    isFinal: false,
+    isCancel: false,
+  })!;
+  assert.equal(warn.isWarning, true);
+  assert.equal(warn.areas[0].name, '茨城県南部');
+  assert.equal(warn.areas[0].pref, '茨城県');
+  assert.equal(formatEewScaleRange(warn.areas[0].scaleFrom, warn.areas[0].scaleTo), '5弱～5強');
+  assert.equal(formatEewArrivalLabel(warn.areas[1]), '既に到達と予測');
+
+  // forecast -> warning: newer serial wins; older serial from the other feed is ignored
+  const m1 = mergeEew(forecast, warn);
+  assert.equal(m1.serial, 9);
+  assert.equal(isEewWarning(m1), true);
+  assert.equal(mergeEew(m1, forecast!), m1);
+  // a later 予報-less serial of the same event stays 警報 and keeps the area list
+  const later = { ...forecast!, serial: 10, isWarning: false, areas: [] };
+  const m2 = mergeEew(m1, later);
+  assert.equal(isEewWarning(m2), true);
+  assert.equal(m2.areas.length, 2);
+  // a different event always replaces
+  const other = { ...forecast!, eventId: '20261107210000', serial: 1 };
+  assert.equal(mergeEew(m2, other), other);
+});

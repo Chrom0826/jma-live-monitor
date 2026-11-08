@@ -107,8 +107,13 @@ export function formatSeismicScaleJa(scaleCode: number): string {
  * - `-1` -> `"不明"`
  */
 export function formatEewScaleRange(scaleFrom: number, scaleTo: number): string {
-  const from = Math.trunc(Number(scaleFrom));
-  const to = Math.trunc(Number(scaleTo));
+  let from = Math.trunc(Number(scaleFrom));
+  let to = Math.trunc(Number(scaleTo));
+  if (from > to && to > 0 && to !== 99) {
+    const tmp = from;
+    from = to;
+    to = tmp;
+  }
   if (Number.isNaN(from) || from < 0) return '不明';
   const fromLabel = formatSeismicScaleJa(from);
   if (to === 99) return `${fromLabel}以上`;
@@ -136,6 +141,7 @@ export function parseP2PEew(
   const issue = item.issue || {};
   const eventId = String(issue.eventId || '');
   if (!eventId) return null;
+  if (item.isTraining === true) return null;
 
   const serialNum = Number.parseInt(String(issue.serial ?? '1'), 10);
   const serial = Number.isNaN(serialNum) ? 1 : serialNum;
@@ -214,12 +220,30 @@ export function parseP2PEew(
     maxLpgmLabel,
     areas,
     receivedAtMs,
+    source: 'p2p',
   };
 }
 
 /**
  * Maps a Japanese/JMA intensity string (e.g. "3", "5弱", "5-", "6強", "不明") to P2P numeric scaleCode.
  */
+/** Wolfx の震度文字列（"3", "5弱", "5-", "6強", "7", "不明"）→ 10倍値の震度コード。不明は -1 */
+export function parseWolfxShindo(raw: unknown): number {
+  const s = String(raw ?? '')
+    .trim()
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/^震度/, '');
+  const m = /^([0-7])\s*(弱|強|-|\+|－|＋)?/.exec(s);
+  if (!m) return -1;
+  const n = Number(m[1]);
+  const mod = m[2];
+  if (n === 5 || n === 6) {
+    const strong = mod === '強' || mod === '+' || mod === '＋';
+    return n === 5 ? (strong ? 50 : 45) : strong ? 60 : 55;
+  }
+  return n === 0 ? 0 : n * 10;
+}
+
 function parseEewIntensityStringToCode(raw: unknown): {
   scaleCode: number;
   scaleLabel: string;
@@ -298,6 +322,7 @@ export function parseWolfxEew(
 ): EewReport | null {
   if (!item || typeof item !== 'object') return null;
   if (item.type && item.type !== 'jma_eew') return null;
+  if (item.isTraining === true) return null;
 
   const eventId = String(item.EventID || '').trim();
   if (!eventId) return null;
@@ -341,6 +366,8 @@ export function parseWolfxEew(
           ? { scaleCode: 99, scaleLabel: '以上' }
           : parseEewIntensityStringToCode(a?.Shindo2);
       const arrived =
+        a?.Arrive === true ||
+        a?.Arrive === 'true' ||
         String(a?.Arrive || '').includes('到達') ||
         String(a?.Time || '').includes('//');
       let arrivalTime: string | null = null;
@@ -348,15 +375,17 @@ export function parseWolfxEew(
       if (/^\d{2}:\d{2}:\d{2}$/.test(rawTime) && issueTime.length >= 10) {
         arrivalTime = `${issueTime.slice(0, 10)} ${rawTime}`;
       }
-      const scaleFrom = s1.scaleCode;
-      const scaleTo = s2.scaleCode > 0 ? s2.scaleCode : s1.scaleCode;
+      const c1 = s1.scaleCode;
+      const c2 = s2.scaleCode;
+      const scaleFrom = c2 === 99 ? c1 : c2 > 0 ? Math.min(c1, c2) : c1;
+      const scaleTo = c2 === 99 ? 99 : c2 > 0 ? Math.max(c1, c2) : c1;
       const rawLpgm = Number(a?.lpgmClass ?? a?.Lpgm ?? -1);
       const lpgmClass =
         rawLpgm >= 1 && rawLpgm <= 4
           ? (rawLpgm as 1 | 2 | 3 | 4)
           : estimateLpgmClassFromScale(scaleFrom, scaleTo, rawMag);
       return {
-        pref: name.slice(0, 3),
+        pref: /^(.+?[都道府県])/.exec(name)?.[1] || name.slice(0, 3),
         name,
         scaleFrom,
         scaleTo,
@@ -409,7 +438,64 @@ export function parseWolfxEew(
     maxLpgmLabel,
     areas,
     receivedAtMs: refTimeMs,
+    source: 'wolfx',
   };
+}
+
+/** 警報を含むか（未指定は警報扱い: P2P 556 / デモ） */
+export function isEewWarning(eew: EewReport | null | undefined): boolean {
+  return Boolean(eew) && eew!.isWarning !== false;
+}
+
+/** 最終報か（Wolfx は isFinal、それ以外は従来どおり第5報以降を最終報扱い） */
+export function isEewFinal(eew: EewReport | null | undefined): boolean {
+  if (!eew) return false;
+  return eew.isFinal ?? eew.serial >= 5;
+}
+
+/**
+ * Merges an incoming EEW (P2P 警報 or Wolfx 予報/警報) into the currently displayed one.
+ * - Different event: the incoming report wins.
+ * - Same event, older serial: ignored (out-of-order / duplicate delivery from the other feed).
+ * - Same event: once a 警報 was issued the event stays 警報; area lists (with P2P arrival
+ *   times) are kept when the newer report carries none (Wolfx 予報 has no WarnArea).
+ * Returns `prev` itself when nothing changed so React can bail out.
+ */
+export function mergeEew(prev: EewReport | null | undefined, next: EewReport): EewReport {
+  if (!prev || prev.eventId !== next.eventId) return next;
+  if (next.serial < prev.serial && !next.isCancelled) return prev;
+  if (next.serial === prev.serial && !next.isCancelled && prev.isCancelled) return prev;
+
+  const isWarning = isEewWarning(prev) || isEewWarning(next);
+  let areas = next.areas;
+  if (next.serial === prev.serial) {
+    const prevTimed = prev.areas.some((a) => a.arrivalTime);
+    const nextTimed = next.areas.some((a) => a.arrivalTime);
+    if ((prevTimed && !nextTimed) || (next.areas.length === 0 && prev.areas.length > 0)) {
+      areas = prev.areas;
+    }
+  } else if (next.areas.length === 0 && prev.areas.length > 0 && !next.isCancelled && isWarning) {
+    areas = prev.areas;
+  }
+  const merged: EewReport = {
+    ...next,
+    areas,
+    isWarning,
+    isFinal: next.isFinal ?? prev.isFinal,
+    maxScaleCode: Math.max(next.maxScaleCode, areas === next.areas ? -1 : prev.maxScaleCode),
+    receivedAtMs: next.serial === prev.serial ? prev.receivedAtMs : next.receivedAtMs,
+  };
+  if (merged.maxScaleCode !== next.maxScaleCode) merged.maxScaleLabel = prev.maxScaleLabel;
+  if (
+    next.serial === prev.serial &&
+    merged.isWarning === isEewWarning(prev) &&
+    merged.areas === prev.areas &&
+    merged.isFinal === prev.isFinal &&
+    merged.isCancelled === prev.isCancelled
+  ) {
+    return prev;
+  }
+  return merged;
 }
 
 /**
