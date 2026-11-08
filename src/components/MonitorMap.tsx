@@ -881,6 +881,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const preCompiledAmedas = useMemo(() => {
     const candidates = data.amedas.filter((st) => {
       if (amedasMetric === 'temp') return st.hasTemp !== false;
+      if (amedasMetric === 'precip') return (st.precip1h ?? 0) > 0;
       if (amedasMetric === 'snow') return (st.snowCm ?? 0) > 0;
       return true;
     });

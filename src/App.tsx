@@ -70,6 +70,7 @@ import {
   parseWolfxEew,
   shouldReplaceEew,
 } from './utils/eewTsunami';
+import { buildSceneFeed } from './utils/sceneFeedBuilder';
 
 const INITIAL_BUNDLE: MonitorDataBundle = {
   xmlEntries: INITIAL_XML_ENTRIES,
@@ -250,45 +251,6 @@ export default function App() {
   const tickerTrackRef = useRef<HTMLDivElement | null>(null);
   const tickerFirstCopyRef = useRef<HTMLDivElement | null>(null);
   const tickerCopyWidthRef = useRef<number>(0);
-
-  // Smooth scrollLeft-based bottom XML ticker with cached width (zero layout thrashing)
-  useEffect(() => {
-    const measureCopyWidth = () => {
-      if (tickerFirstCopyRef.current) {
-        tickerCopyWidthRef.current = tickerFirstCopyRef.current.offsetWidth;
-      }
-    };
-    measureCopyWidth();
-    window.addEventListener('resize', measureCopyWidth);
-
-    // Compositor-driven ticker: the track is moved by a CSS `transform` animation (no main-thread timer,
-    // no scrollLeft layout/paint work). Only the loop distance (one copy's width) and duration are set here.
-    const track = tickerTrackRef.current;
-    const copy = tickerFirstCopyRef.current;
-    const speedPxPerSec = 57;
-    const applyTickerGeometry = () => {
-      if (!track || !copy) return;
-      const w = copy.offsetWidth;
-      if (w <= 0) return;
-      tickerCopyWidthRef.current = w;
-      track.style.setProperty('--ticker-shift', `${w}px`);
-      track.style.setProperty(
-        '--ticker-duration',
-        `${Math.max(10, w / speedPxPerSec)}s`
-      );
-    };
-    applyTickerGeometry();
-    const resizeObserver =
-      copy && typeof ResizeObserver !== 'undefined'
-        ? new ResizeObserver(applyTickerGeometry)
-        : null;
-    if (resizeObserver && copy) resizeObserver.observe(copy);
-
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', measureCopyWidth);
-    };
-  }, [data.xmlEntries]);
 
   // Unified handler for incoming EEW (緊急地震速報 予報・警報・発表検出)
   const handleIncomingEew = useCallback((eew: EewReport) => {
@@ -1199,12 +1161,79 @@ export default function App() {
     eewDisplayMode,
   ]);
 
+  // Real-time scene-aware broadcast feed (Pattern B: 画面の現在情報に完全に合致するリアルタイムテロップ)
+  const sceneFeed = useMemo(
+    () =>
+      buildSceneFeed({
+        effectiveScene,
+        data,
+        activeEew,
+        selectedEarthquake,
+        pinnedEarthquakeId,
+        activeWarningDivision,
+        selectedTyphoon,
+        activeVolcano,
+        amedasMetric,
+      }),
+    [
+      effectiveScene,
+      data,
+      activeEew,
+      selectedEarthquake,
+      pinnedEarthquakeId,
+      activeWarningDivision,
+      selectedTyphoon,
+      activeVolcano,
+      amedasMetric,
+    ]
+  );
+
+  // Smooth scrollLeft-based bottom XML ticker with cached width (zero layout thrashing)
+  useEffect(() => {
+    const measureCopyWidth = () => {
+      if (tickerFirstCopyRef.current) {
+        tickerCopyWidthRef.current = tickerFirstCopyRef.current.offsetWidth;
+      }
+    };
+    measureCopyWidth();
+    window.addEventListener('resize', measureCopyWidth);
+
+    // Compositor-driven ticker: the track is moved by a CSS `transform` animation (no main-thread timer,
+    // no scrollLeft layout/paint work). Only the loop distance (one copy's width) and duration are set here.
+    const track = tickerTrackRef.current;
+    const copy = tickerFirstCopyRef.current;
+    const speedPxPerSec = 72;
+    const applyTickerGeometry = () => {
+      if (!track || !copy) return;
+      const w = copy.offsetWidth;
+      if (w <= 0) return;
+      tickerCopyWidthRef.current = w;
+      track.style.setProperty('--ticker-shift', `${w}px`);
+      track.style.setProperty(
+        '--ticker-duration',
+        `${Math.max(10, w / speedPxPerSec)}s`
+      );
+    };
+    applyTickerGeometry();
+    const resizeObserver =
+      copy && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(applyTickerGeometry)
+        : null;
+    if (resizeObserver && copy) resizeObserver.observe(copy);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', measureCopyWidth);
+    };
+  }, [sceneFeed.textKey]);
+
+
   return (
     <div className="h-screen w-screen bg-[#0D0F12] text-white p-1.5 overflow-hidden select-none flex">
       {/* Outer Broadcast Frame with NERV-inspired crisp border */}
       <div className="flex-1 flex border border-[#5A606D] bg-[#0E1014] overflow-hidden relative">
         {/* ==================== LEFT COLUMN (Clock + Dynamic XML Timeline OR Earthquake History + Compact Settings) ==================== */}
-        <aside
+          <aside
           aria-label="時計および履歴タイムライン"
           className="w-[264px] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden animate-startup-left z-20"
         >
@@ -1519,57 +1548,73 @@ export default function App() {
             </div>
           </div>
 
-          {/* Slim Single-Row Full-Text XML Feed Ticker (ScrollLeft-driven so text never disappears mid-scroll) */}
+          {/* ==================== BROADCAST FEED FOOTER (Pattern B: Scene-Aware Large Ticker) ==================== */}
           <footer
-            aria-label="気象解説情報および全文フィード"
-            className="border-t border-[#5A606D] bg-[#111318] px-3 py-1.5 shrink-0 flex items-center gap-2.5 overflow-hidden animate-startup-bottom z-20"
+            aria-label="気象防災ライブフィード"
+            className="h-[84px] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
           >
-            <span className="bg-[#2B303C] text-amber-300 px-2 py-0.5 text-[11px] font-mono font-bold shrink-0">
-              XML全文FEED
-            </span>
-            <div
-              data-testid="xml-ticker-scroll-container"
-              className="ticker-viewport flex-1 overflow-hidden whitespace-nowrap relative"
-            >
-              <div ref={tickerTrackRef} className="ticker-track">
-              <div
-                ref={tickerFirstCopyRef}
-                className="inline-flex items-center gap-10 pr-10 text-xs text-neutral-200"
-              >
-                {data.xmlEntries.map((entry, idx) => (
-                  <span
-                    key={`${entry.id}-copy1-${idx}`}
-                    className="inline-flex items-center gap-2"
-                  >
-                    <span className="font-mono text-amber-400 font-bold">
-                      [{entry.feedType}.xml]
-                    </span>
-                    <span className="font-bold text-white">{entry.title}:</span>
-                    <span className="text-neutral-200">{entry.content}</span>
-                    <span aria-hidden="true" className="text-neutral-600 ml-4">
-                      ｜
-                    </span>
+            {/* Main Feed Box: Two-Row Layout (Title Bar + Large Bold Ticker) */}
+            <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
+              {/* Row 1: Headline Bar */}
+              <div className="flex items-center gap-2 min-w-0">
+                <span
+                  className="w-1.5 h-4 rounded-xs shrink-0"
+                  style={{ backgroundColor: sceneFeed.accentColor }}
+                />
+                <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
+                  {sceneFeed.title}
+                </span>
+                <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300">
+                  <span>{sceneFeed.timeLabel}</span>
+                  <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold">
+                    気象庁発表
                   </span>
-                ))}
+                </div>
               </div>
+
+              {/* Row 2: Large Continuous Ticker (Even Bigger Font) */}
               <div
-                aria-hidden="true"
-                className="inline-flex items-center gap-10 pr-10 text-xs text-neutral-200"
+                data-testid="xml-ticker-scroll-container"
+                className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
               >
-                {data.xmlEntries.map((entry, idx) => (
-                  <span
-                    key={`${entry.id}-copy2-${idx}`}
-                    className="inline-flex items-center gap-2"
+                <div ref={tickerTrackRef} className="ticker-track">
+                  <div
+                    ref={tickerFirstCopyRef}
+                    className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
                   >
-                    <span className="font-mono text-amber-400 font-bold">
-                      [{entry.feedType}.xml]
-                    </span>
-                    <span className="font-bold text-white">{entry.title}:</span>
-                    <span className="text-neutral-200">{entry.content}</span>
-                    <span className="text-neutral-600 ml-4">｜</span>
-                  </span>
-                ))}
-              </div>
+                    {sceneFeed.items.map((item, idx) => (
+                      <span key={`feed-item-copy1-${idx}`} className="inline-flex items-center gap-2.5 shrink-0">
+                        {item.prefix && (
+                          <span className="font-extrabold" style={{ color: sceneFeed.accentColor }}>
+                            {item.prefix}
+                          </span>
+                        )}
+                        <span className="text-neutral-100">{item.text}</span>
+                        <span aria-hidden="true" className="text-neutral-600 ml-4 font-normal">
+                          ｜
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                  <div
+                    aria-hidden="true"
+                    className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
+                  >
+                    {sceneFeed.items.map((item, idx) => (
+                      <span key={`feed-item-copy2-${idx}`} className="inline-flex items-center gap-2.5 shrink-0">
+                        {item.prefix && (
+                          <span className="font-extrabold" style={{ color: sceneFeed.accentColor }}>
+                            {item.prefix}
+                          </span>
+                        )}
+                        <span className="text-neutral-100">{item.text}</span>
+                        <span aria-hidden="true" className="text-neutral-600 ml-4 font-normal">
+                          ｜
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           </footer>
