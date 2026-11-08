@@ -960,7 +960,8 @@ export function parseJmaTyphoonSpecifications(
 
 /**
  * Computes the left and right outer boundary polylines for a typhoon forecast cone
- * (予報円の包絡線・扇形) connecting consecutive track points and their probability circle radii.
+ * (予報円の包絡線・扇形) connecting consecutive track points and their probability circle radii
+ * using geometric bitangents between circles.
  */
 export function computeTyphoonConeEnvelope(points: TyphoonTrackPoint[]): {
   leftEdge: Array<[number, number]>;
@@ -971,37 +972,79 @@ export function computeTyphoonConeEnvelope(points: TyphoonTrackPoint[]): {
     return { leftEdge: [], rightEdge: [], polygon: [] };
   }
 
+  const M = points.length;
+  const segTangents: Array<{
+    theta: number;
+    betaLeft: number;
+    betaRight: number;
+    tALeft: [number, number];
+    tBLeft: [number, number];
+    tARight: [number, number];
+    tBRight: [number, number];
+    cosPhi: number;
+  }> = [];
+
+  for (let i = 0; i < M - 1; i++) {
+    const A = points[i];
+    const B = points[i + 1];
+    const rA = A.probabilityCircleRadiusKm || 0;
+    const rB = B.probabilityCircleRadiusKm || 0;
+
+    const phiAvg = ((A.lat + B.lat) / 2) * (Math.PI / 180);
+    const cosPhi = Math.max(0.2, Math.cos(phiAvg));
+
+    const dx = (B.lon - A.lon) * cosPhi * 111.32;
+    const dy = (B.lat - A.lat) * 111.32;
+    const d = Math.hypot(dx, dy) || 1;
+
+    const theta = Math.atan2(dy, dx);
+    const deltaR = rA - rB;
+    const sinAlpha = Math.max(-0.999, Math.min(0.999, deltaR / d));
+    const alpha = Math.asin(sinAlpha);
+
+    const betaLeft = theta + Math.PI / 2 - alpha;
+    const betaRight = theta - Math.PI / 2 + alpha;
+
+    const toLatLon = (
+      center: { lat: number; lon: number },
+      r: number,
+      ang: number,
+      cPhi: number
+    ): [number, number] => [
+      Number((center.lat + (r * Math.sin(ang)) / 111.32).toFixed(4)),
+      Number((center.lon + (r * Math.cos(ang)) / (111.32 * cPhi)).toFixed(4)),
+    ];
+
+    const tALeft = toLatLon(A, rA, betaLeft, cosPhi);
+    const tBLeft = toLatLon(B, rB, betaLeft, cosPhi);
+    const tARight = toLatLon(A, rA, betaRight, cosPhi);
+    const tBRight = toLatLon(B, rB, betaRight, cosPhi);
+
+    segTangents.push({
+      theta,
+      betaLeft,
+      betaRight,
+      tALeft,
+      tBLeft,
+      tARight,
+      tBRight,
+      cosPhi,
+    });
+  }
+
   const leftEdge: Array<[number, number]> = [];
   const rightEdge: Array<[number, number]> = [];
 
-  for (let i = 0; i < points.length; i++) {
-    const pt = points[i];
-    const rKm = pt.probabilityCircleRadiusKm || 0;
+  for (let i = 0; i < M - 1; i++) {
+    const seg = segTangents[i];
+    if (i === 0) leftEdge.push(seg.tALeft);
+    leftEdge.push(seg.tBLeft);
+  }
 
-    // Determine forward bearing vector in degrees
-    const prev = i > 0 ? points[i - 1] : pt;
-    const next = i < points.length - 1 ? points[i + 1] : pt;
-    const dLat = next.lat - prev.lat;
-    const cosLat = Math.max(0.2, Math.cos((pt.lat * Math.PI) / 180));
-    const dLonScaled = (next.lon - prev.lon) * cosLat;
-    const len = Math.hypot(dLat, dLonScaled) || 1;
-
-    // Perpendicular unit vector (left & right of track direction)
-    const perpLat = -dLonScaled / len;
-    const perpLonScaled = dLat / len;
-
-    // 1 degree of latitude is ~111.32 km
-    const rDegLat = rKm / 111.32;
-    const rDegLon = rDegLat / cosLat;
-
-    leftEdge.push([
-      Number((pt.lat + perpLat * rDegLat).toFixed(4)),
-      Number((pt.lon + perpLonScaled * rDegLon).toFixed(4)),
-    ]);
-    rightEdge.push([
-      Number((pt.lat - perpLat * rDegLat).toFixed(4)),
-      Number((pt.lon - perpLonScaled * rDegLon).toFixed(4)),
-    ]);
+  for (let i = 0; i < M - 1; i++) {
+    const seg = segTangents[i];
+    if (i === 0) rightEdge.push(seg.tARight);
+    rightEdge.push(seg.tBRight);
   }
 
   const polygon: Array<[number, number]> = [
@@ -1010,11 +1053,17 @@ export function computeTyphoonConeEnvelope(points: TyphoonTrackPoint[]): {
   ];
 
   return { leftEdge, rightEdge, polygon };
-}
+}
+
 /**
  * Computes the continuous connected storm warning area envelope (暴風警戒域の包絡線)
  * connecting consecutive track points that have storm-force wind radii (stormRadiusKm > 0),
  * forming a single unified polygon shape with tangent boundaries and rounded end/start caps.
+ *
+ * NOTE: For forecast points (i >= 1), JMA's item.stormWarning.range.km is ALREADY the total
+ * 暴風警戒域半径 (R_prob + r_25ms). Do NOT add probabilityCircleRadiusKm again.
+ * When a typhoon weakens and loses storm warning (wind < 25 m/s, e.g. at 93h / 117h),
+ * stormRadiusKm becomes 0 and the storm envelope gracefully ends at that point.
  */
 export function computeTyphoonStormEnvelope(points: TyphoonTrackPoint[]): {
   leftEdge: Array<[number, number]>;
@@ -1024,18 +1073,12 @@ export function computeTyphoonStormEnvelope(points: TyphoonTrackPoint[]): {
   const stormCircles: Array<{ lat: number; lon: number; rKm: number }> = [];
   for (let i = 0; i < points.length; i++) {
     const pt = points[i];
-    if (i === 0) {
-      const rKm = pt.stormRadiusKm || 0;
-      if (rKm > 0) {
-        stormCircles.push({ lat: pt.lat, lon: pt.lon, rKm });
-      }
-    } else {
-      if (pt.stormRadiusKm > 0) {
-        const rKm = (pt.probabilityCircleRadiusKm || 0) + pt.stormRadiusKm;
-        if (rKm > 0) {
-          stormCircles.push({ lat: pt.lat, lon: pt.lon, rKm });
-        }
-      }
+    const rKm = pt.stormRadiusKm || 0;
+    if (rKm > 0) {
+      stormCircles.push({ lat: pt.lat, lon: pt.lon, rKm });
+    } else if (stormCircles.length > 0) {
+      // Typhoon loses storm warning in later forecast steps -> envelope ends here
+      break;
     }
   }
 
@@ -1076,18 +1119,18 @@ export function computeTyphoonStormEnvelope(points: TyphoonTrackPoint[]): {
 
     const toLatLon = (
       center: { lat: number; lon: number },
-      tx: number,
-      ty: number,
+      r: number,
+      ang: number,
       cPhi: number
     ): [number, number] => [
-      Number((center.lat + ty / 111.32).toFixed(4)),
-      Number((center.lon + tx / (111.32 * cPhi)).toFixed(4)),
+      Number((center.lat + (r * Math.sin(ang)) / 111.32).toFixed(4)),
+      Number((center.lon + (r * Math.cos(ang)) / (111.32 * cPhi)).toFixed(4)),
     ];
 
-    const tALeft = toLatLon(A, A.rKm * Math.cos(betaLeft), A.rKm * Math.sin(betaLeft), cosPhi);
-    const tBLeft = toLatLon(B, B.rKm * Math.cos(betaLeft), B.rKm * Math.sin(betaLeft), cosPhi);
-    const tARight = toLatLon(A, A.rKm * Math.cos(betaRight), A.rKm * Math.sin(betaRight), cosPhi);
-    const tBRight = toLatLon(B, B.rKm * Math.cos(betaRight), B.rKm * Math.sin(betaRight), cosPhi);
+    const tALeft = toLatLon(A, A.rKm, betaLeft, cosPhi);
+    const tBLeft = toLatLon(B, B.rKm, betaLeft, cosPhi);
+    const tARight = toLatLon(A, A.rKm, betaRight, cosPhi);
+    const tBRight = toLatLon(B, B.rKm, betaRight, cosPhi);
 
     segTangents.push({
       theta,
@@ -1107,11 +1150,26 @@ export function computeTyphoonStormEnvelope(points: TyphoonTrackPoint[]): {
   // 1. Build Left Edge from circle 0 to circle M-1
   for (let i = 0; i < M - 1; i++) {
     const seg = segTangents[i];
-    leftEdge.push(seg.tALeft);
+    if (i === 0) {
+      leftEdge.push(seg.tALeft);
+    } else {
+      const prevSeg = segTangents[i - 1];
+      const circle = stormCircles[i];
+      const a1 = prevSeg.betaLeft;
+      const a2 = seg.betaLeft;
+      const steps = 4;
+      for (let s = 1; s < steps; s++) {
+        const ang = a1 + (a2 - a1) * (s / steps);
+        leftEdge.push([
+          Number((circle.lat + (circle.rKm * Math.sin(ang)) / 111.32).toFixed(4)),
+          Number((circle.lon + (circle.rKm * Math.cos(ang)) / (111.32 * seg.cosPhi)).toFixed(4)),
+        ]);
+      }
+    }
     leftEdge.push(seg.tBLeft);
   }
 
-  // 2. End Cap around Circle M-1
+  // 2. End Cap around Circle M-1 (smooth forward-facing arc)
   const lastSeg = segTangents[M - 2];
   const lastCircle = stormCircles[M - 1];
   const lastCosPhi = lastSeg.cosPhi;
@@ -1121,41 +1179,51 @@ export function computeTyphoonStormEnvelope(points: TyphoonTrackPoint[]): {
   let endAng = lastSeg.betaRight;
   while (endAng > startAng) endAng -= 2 * Math.PI;
 
-  const numCapSteps = 12;
+  const numCapSteps = 16;
   for (let s = 1; s < numCapSteps; s++) {
     const ang = startAng + (endAng - startAng) * (s / numCapSteps);
-    const tx = lastCircle.rKm * Math.cos(ang);
-    const ty = lastCircle.rKm * Math.sin(ang);
     endCap.push([
-      Number((lastCircle.lat + ty / 111.32).toFixed(4)),
-      Number((lastCircle.lon + tx / (111.32 * lastCosPhi)).toFixed(4)),
+      Number((lastCircle.lat + (lastCircle.rKm * Math.sin(ang)) / 111.32).toFixed(4)),
+      Number((lastCircle.lon + (lastCircle.rKm * Math.cos(ang)) / (111.32 * lastCosPhi)).toFixed(4)),
     ]);
   }
 
   // 3. Build Right Edge from circle M-1 back to circle 0
   for (let i = M - 2; i >= 0; i--) {
     const seg = segTangents[i];
-    rightEdge.push(seg.tBRight);
+    if (i === M - 2) {
+      rightEdge.push(seg.tBRight);
+    } else {
+      const nextSeg = segTangents[i + 1];
+      const circle = stormCircles[i + 1];
+      const a1 = nextSeg.betaRight;
+      const a2 = seg.betaRight;
+      const steps = 4;
+      for (let s = 1; s < steps; s++) {
+        const ang = a1 + (a2 - a1) * (s / steps);
+        rightEdge.push([
+          Number((circle.lat + (circle.rKm * Math.sin(ang)) / 111.32).toFixed(4)),
+          Number((circle.lon + (circle.rKm * Math.cos(ang)) / (111.32 * seg.cosPhi)).toFixed(4)),
+        ]);
+      }
+    }
     rightEdge.push(seg.tARight);
   }
 
-  // 4. Start Cap around Circle 0
+  // 4. Start Cap around Circle 0 (smooth rear-facing arc)
   const firstSeg = segTangents[0];
   const firstCircle = stormCircles[0];
   const firstCosPhi = firstSeg.cosPhi;
   const startCap: Array<[number, number]> = [];
 
   const sStartAng = firstSeg.betaRight;
-  let sEndAng = firstSeg.betaLeft;
-  while (sEndAng > sStartAng) sEndAng -= 2 * Math.PI;
+  const sEndAng = firstSeg.betaLeft - 2 * Math.PI;
 
   for (let s = 1; s < numCapSteps; s++) {
     const ang = sStartAng + (sEndAng - sStartAng) * (s / numCapSteps);
-    const tx = firstCircle.rKm * Math.cos(ang);
-    const ty = firstCircle.rKm * Math.sin(ang);
     startCap.push([
-      Number((firstCircle.lat + ty / 111.32).toFixed(4)),
-      Number((firstCircle.lon + tx / (111.32 * firstCosPhi)).toFixed(4)),
+      Number((firstCircle.lat + (firstCircle.rKm * Math.sin(ang)) / 111.32).toFixed(4)),
+      Number((firstCircle.lon + (firstCircle.rKm * Math.cos(ang)) / (111.32 * firstCosPhi)).toFixed(4)),
     ]);
   }
 

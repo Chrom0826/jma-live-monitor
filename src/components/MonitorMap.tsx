@@ -1231,10 +1231,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             galeNormRadius: kmToNormRadius(p.galeRadiusKm, p.lat),
             stormNormRadius: kmToNormRadius(p.stormRadiusKm, p.lat),
             probNormRadius: kmToNormRadius(p.probabilityCircleRadiusKm, p.lat),
-            stormProbNormRadius: kmToNormRadius(
-              p.probabilityCircleRadiusKm + p.stormRadiusKm,
-              p.lat
-            ),
+            stormProbNormRadius: kmToNormRadius(p.stormRadiusKm, p.lat),
             compactTime: formatCompactTyphoonTime(p.timeLabel),
             labelOffset: null as { dx: number; dy: number } | null,
           };
@@ -2505,7 +2502,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.restore();
           }
 
-          // 1. Connected Storm Warning Area Envelope (暴風警戒域の包絡線: Single Continuous Shape)
+          // 1. Connected Storm Warning Area Envelope (暴風警戒域の包絡線: Single Continuous Solid Red Shape)
           if (!extratropical && stormPolygonNorm && stormPolygonNorm.length >= 4) {
             ctx.save();
             ctx.beginPath();
@@ -2520,37 +2517,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               );
             }
             ctx.closePath();
-            ctx.fillStyle = 'rgba(239, 68, 68, 0.20)';
-            ctx.fill();
-
-            ctx.setLineDash([6, 4]);
+            ctx.setLineDash([]);
             ctx.strokeStyle = '#EF4444';
-            ctx.lineWidth = 1.8;
+            ctx.lineWidth = 2.0;
+            ctx.lineJoin = 'round';
             ctx.stroke();
             ctx.restore();
           }
 
-          // 2. Forecast Cone Envelope
-          if (conePolygonNorm.length >= 4) {
+          // 2. Forecast Cone Envelope (予報円の包絡線: Solid White Tangent Boundary Lines)
+          if (!extratropical) {
             ctx.save();
-            ctx.beginPath();
-            ctx.moveTo(
-              conePolygonNorm[0].normX * worldScale - originX,
-              conePolygonNorm[0].normY * worldScale - originY
-            );
-            for (let i = 1; i < conePolygonNorm.length; i++) {
-              ctx.lineTo(
-                conePolygonNorm[i].normX * worldScale - originX,
-                conePolygonNorm[i].normY * worldScale - originY
-              );
-            }
-            ctx.closePath();
-            ctx.fillStyle = 'rgba(248, 250, 252, 0.12)';
-            ctx.fill();
-
-            ctx.setLineDash([6, 4]);
-            ctx.strokeStyle = '#E2E8F0';
+            ctx.setLineDash([]);
+            ctx.strokeStyle = '#FFFFFF';
             ctx.lineWidth = 1.8;
+            ctx.lineJoin = 'round';
             if (coneLeftNorm.length >= 2) {
               ctx.beginPath();
               ctx.moveTo(
@@ -2582,7 +2563,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.restore();
           }
 
-          // 2. Analysis Gale Warning Zone (yellow) & Storm Warning Zone (red)
+          // 3. Analysis Gale Warning Zone (15m/s yellow outline) & Storm Warning Zone (25m/s red outline)
           const p0 = ptsNorm[0];
           const p0x = p0.normX * worldScale - originX;
           const p0y = p0.normY * worldScale - originY;
@@ -2590,8 +2571,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.save();
             ctx.beginPath();
             ctx.arc(p0x, p0y, p0.galeNormRadius * worldScale, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(234, 179, 8, 0.18)';
-            ctx.fill();
             ctx.strokeStyle = '#FACC15';
             ctx.lineWidth = 2.0;
             ctx.stroke();
@@ -2601,20 +2580,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.save();
             ctx.beginPath();
             ctx.arc(p0x, p0y, p0.stormNormRadius * worldScale, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(220, 38, 38, 0.30)';
-            ctx.fill();
             ctx.strokeStyle = '#EF4444';
-            ctx.lineWidth = 2.5;
+            ctx.lineWidth = 2.0;
             ctx.stroke();
             ctx.restore();
           }
 
-          // 3. Forecast Center Track Polyline (dashed cyan)
+          // 4. Forecast Center Track Polyline (dashed cyan)
           if (ptsNorm.length >= 2) {
             ctx.save();
             ctx.setLineDash([6, 4]);
             ctx.strokeStyle = '#38BDF8';
-            ctx.lineWidth = 2.5;
+            ctx.lineWidth = 2.0;
             ctx.beginPath();
             ctx.moveTo(p0x, p0y);
             for (let i = 1; i < ptsNorm.length; i++) {
@@ -2627,7 +2604,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.restore();
           }
 
-          // 4. Forecast Probability Circles & Storm Warning Probability Circles
+          // 5. Forecast Probability Circles (white dashed circles, no opaque fill)
           for (let idx = 1; idx < ptsNorm.length; idx++) {
             const pn = ptsNorm[idx];
             if (pn.probNormRadius <= 0) continue;
@@ -2635,13 +2612,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             const py = pn.normY * worldScale - originY;
 
             ctx.save();
-            ctx.setLineDash([5, 5]);
+            ctx.setLineDash([6, 5]);
             ctx.beginPath();
             ctx.arc(px, py, pn.probNormRadius * worldScale, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-            ctx.fill();
             ctx.strokeStyle = '#FFFFFF';
-            ctx.lineWidth = 1.8;
+            ctx.lineWidth = 1.6;
             ctx.stroke();
             ctx.restore();
           }
