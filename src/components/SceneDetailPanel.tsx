@@ -1951,17 +1951,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                           {selectedEarthquake.hypocenterName ||
                             (selectedEarthquake.hypocenterUnknown ? '震源精査中' : '震源情報')}
                         </div>
-                        <div className="text-xs font-mono text-neutral-200 flex items-center justify-between">
-                          <span>
-                            {selectedEarthquake.hypocenterUnknown
-                              ? '震源・規模 調査中'
-                              : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
-                          </span>
-                          <span className="text-amber-300 font-bold">
-                            {selectedEarthquake.issueTypeLabel === '震度速報'
-                              ? `観測地域 ${selectedEarthquake.stations.length}地域`
-                              : `観測点 ${selectedEarthquake.stations.length}箇所`}
-                          </span>
+                        <div className="text-xs font-mono text-neutral-200">
+                          {selectedEarthquake.hypocenterUnknown
+                            ? '震源・規模 調査中'
+                            : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
                         </div>
                         <div className="text-[11px] font-mono text-neutral-400">
                           {selectedEarthquake.occurrenceTime}
