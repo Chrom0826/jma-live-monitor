@@ -344,7 +344,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
     // When in 'forecast', scene progression is managed by App.tsx's dedicated timer
     // (stepping 03時..24時 -> tomorrow -> day_after -> next scene)
-    if (effectiveScene === 'forecast') {
+    if (effectiveScene === 'forecast' || effectiveScene === 'earthquake') {
       return;
     }
 

@@ -1391,6 +1391,7 @@ export default function App() {
         activeEew,
         selectedEarthquake,
         pinnedEarthquakeId,
+        isLiveInterrupt: interruptKind === 'earthquake' || interruptKind === 'eew',
       }),
     [
       effectiveScene,
@@ -1398,22 +1399,62 @@ export default function App() {
       activeEew,
       selectedEarthquake,
       pinnedEarthquakeId,
+      interruptKind,
     ]
   );
 
   const isFlipFeedActive = Boolean(flipFeed && flipFeed.cards.length > 0);
   const [bottomFlipIndex, setBottomFlipIndex] = useState<number>(0);
+  const [flipCompletedRounds, setFlipCompletedRounds] = useState<number>(0);
+
+  // Reset flip index and rounds counter whenever scene or target quake changes
+  useEffect(() => {
+    setBottomFlipIndex(0);
+    setFlipCompletedRounds(0);
+  }, [effectiveScene, selectedEarthquake?.id]);
 
   useEffect(() => {
-    if (!isFlipFeedActive || !flipFeed || flipFeed.cards.length <= 1) {
+    if (!isFlipFeedActive || !flipFeed || flipFeed.cards.length === 0) {
       setBottomFlipIndex(0);
+      setFlipCompletedRounds(0);
       return;
     }
+    const cardCount = flipFeed.cards.length;
+    // Slightly longer duration per card (~4.8s) as requested
+    const intervalMs = 4800;
     const timer = setInterval(() => {
-      setBottomFlipIndex((prev) => (prev + 1) % flipFeed.cards.length);
-    }, 3500);
+      setBottomFlipIndex((prev) => {
+        const next = (prev + 1) % cardCount;
+        if (next === 0) {
+          setFlipCompletedRounds((r) => r + 1);
+        }
+        return next;
+      });
+    }, intervalMs);
     return () => clearInterval(timer);
   }, [isFlipFeedActive, flipFeed?.cards.length]);
+
+  // When in 'earthquake' scene during normal patrol loop, advance after completing 2 full cycles/rounds
+  useEffect(() => {
+    if (
+      effectiveScene === 'earthquake' &&
+      !isLoopPaused &&
+      interruptKind === 'none' &&
+      !pinnedEarthquakeId &&
+      !(activeEew && isEewStillActive(activeEew)) &&
+      flipCompletedRounds >= 2
+    ) {
+      advanceScene();
+    }
+  }, [
+    effectiveScene,
+    isLoopPaused,
+    interruptKind,
+    pinnedEarthquakeId,
+    activeEew,
+    flipCompletedRounds,
+    advanceScene,
+  ]);
 
   const safeFlipIndex =
     flipFeed && flipFeed.cards.length > 0
@@ -1837,9 +1878,10 @@ export default function App() {
                 </div>
               ) : mobileBottomTab === 'earthquake' ? (
                 <div
+                  key="mobile-quake-history-list"
                   aria-label="地震履歴一覧"
                   data-testid="left-earthquake-history-list"
-                  className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
+                  className="flex-1 overflow-y-auto divide-y divide-[#2B303C] animate-title-swap"
                 >
                   {isEewActive && (
                     <div
@@ -1924,8 +1966,9 @@ export default function App() {
 
             {/* Left Column Mode Header: Switches to Earthquake History ONLY when effectiveScene === 'earthquake' */}
             <div
+              key={effectiveScene === 'earthquake' ? 'desktop-left-hdr-quake' : 'desktop-left-hdr-xml'}
               data-testid="left-panel-mode-header"
-              className={`px-3 py-1.5 border-b border-[#2B303C] text-xs font-bold flex items-center justify-between shrink-0 ${
+              className={`px-3 py-1.5 border-b border-[#2B303C] text-xs font-bold flex items-center justify-between shrink-0 animate-title-swap ${
                 effectiveScene === 'earthquake'
                   ? 'bg-red-950/80 text-red-200'
                   : 'bg-[#171A21] text-neutral-300'
@@ -1969,9 +2012,10 @@ export default function App() {
             {/* Middle List: Earthquake History when effectiveScene === 'earthquake', otherwise XML Feed Timeline */}
             {effectiveScene === 'earthquake' ? (
               <div
+                key="desktop-quake-history-list"
                 aria-label="地震履歴一覧"
                 data-testid="left-earthquake-history-list"
-                className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
+                className="flex-1 overflow-y-auto divide-y divide-[#2B303C] animate-title-swap"
               >
                 {isEewActive && (
                   <div

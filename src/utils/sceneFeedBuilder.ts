@@ -22,6 +22,7 @@ import {
   isEewStillActive,
   isEewWarning,
   isTsunamiForecastActive,
+  parseJstDateTimeMs,
 } from './eewTsunami';
 
 export interface SceneFeedItem {
@@ -748,6 +749,7 @@ export interface BuildBottomFlipFeedOptions {
   activeEew: EewReport | null;
   selectedEarthquake?: EarthquakeReport | null;
   pinnedEarthquakeId?: string | null;
+  isLiveInterrupt?: boolean;
   currentTime?: string;
 }
 
@@ -760,6 +762,33 @@ export interface BuildBottomFlipFeedOptions {
  *
  * Cards flip vertically (bottom-to-top) every ~3.5s without horizontal scrolling.
  */
+
+/**
+ * Formats occurrence time for past earthquake headlines during normal patrol loop:
+ * e.g. "2026/11/09 16:30 頃発生" -> "2026 11/9 16:30"
+ */
+export function formatQuakePastHeadlineTime(
+  timeStr: string | null | undefined
+): string {
+  if (!timeStr) return '';
+  const s = String(timeStr).trim();
+  const ms = parseJstDateTimeMs(s);
+  if (!Number.isNaN(ms)) {
+    const d = new Date(ms + 9 * 3600 * 1000);
+    const y = d.getUTCFullYear();
+    const mo = d.getUTCMonth() + 1;
+    const date = d.getUTCDate();
+    const h = d.getUTCHours();
+    const mi = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${y} ${mo}/${date} ${h}:${mi}`;
+  }
+  return s
+    .replace(/[-/]/g, ' ')
+    .replace('頃発生', '')
+    .replace('発表', '')
+    .trim();
+}
+
 export function buildBottomFlipFeed(
   options: BuildBottomFlipFeedOptions
 ): BottomFlipFeedResult | null {
@@ -769,6 +798,7 @@ export function buildBottomFlipFeed(
     activeEew,
     selectedEarthquake,
     pinnedEarthquakeId,
+    isLiveInterrupt = false,
     currentTime = '',
   } = options;
 
@@ -998,7 +1028,7 @@ export function buildBottomFlipFeed(
 
     const cards: BottomFlipCard[] = [];
 
-    // 1. Max Intensity Prefecture(s) ("愛知県で震度5強を観測")
+    // 1. Max Intensity Prefecture(s)
     const maxStations = targetQuake.stations.filter(
       (s) =>
         s.scaleCode === targetQuake.maxScaleCode ||
@@ -1008,12 +1038,17 @@ export function buildBottomFlipFeed(
       new Set(maxStations.map((s) => s.prefecture).filter(Boolean))
     );
     let maxPrefText = '';
+    let prefOnlyText = '';
+
     if (distinctPrefs.length === 1) {
       maxPrefText = `${distinctPrefs[0]}で震度${targetQuake.maxScaleLabel}を観測`;
+      prefOnlyText = distinctPrefs[0];
     } else if (distinctPrefs.length === 2) {
-      maxPrefText = `${distinctPrefs[0]}、${distinctPrefs[1]}で震度${targetQuake.maxScaleLabel}を観測`;
+      maxPrefText = `${distinctPrefs[0]}・${distinctPrefs[1]}で震度${targetQuake.maxScaleLabel}を観測`;
+      prefOnlyText = `${distinctPrefs[0]}・${distinctPrefs[1]}`;
     } else if (distinctPrefs.length >= 3) {
-      maxPrefText = `${distinctPrefs[0]}、${distinctPrefs[1]}などで震度${targetQuake.maxScaleLabel}を観測`;
+      maxPrefText = `${distinctPrefs[0]}・${distinctPrefs[1]}などで震度${targetQuake.maxScaleLabel}を観測`;
+      prefOnlyText = `${distinctPrefs.slice(0, 3).join('・')}など`;
     } else if (targetQuake.areaMaxScales && Object.keys(targetQuake.areaMaxScales).length > 0) {
       const matchingAreas = Object.entries(targetQuake.areaMaxScales)
         .filter(
@@ -1024,14 +1059,28 @@ export function buildBottomFlipFeed(
         .map(([k, v]) => v.name || k);
       if (matchingAreas.length > 0) {
         maxPrefText = `${matchingAreas[0]}などで震度${targetQuake.maxScaleLabel}を観測`;
+        prefOnlyText = `${matchingAreas.slice(0, 2).join('・')}など`;
       } else {
         maxPrefText = `最大震度${targetQuake.maxScaleLabel}を観測`;
+        prefOnlyText = '各地';
       }
     } else {
       maxPrefText = targetQuake.hypocenterName
         ? `${targetQuake.hypocenterName}周辺で震度${targetQuake.maxScaleLabel}を観測`
         : `最大震度${targetQuake.maxScaleLabel}を観測`;
+      prefOnlyText = targetQuake.hypocenterName || '各地';
     }
+
+    const timePrefix = formatQuakePastHeadlineTime(
+      targetQuake.occurrenceTime || targetQuake.issueTime
+    );
+
+    // "下の情報は巡回で、過去の情報を表示するときは「岩手県・茨城県で震度3を観測」ではなく、「2026 11/9 16:30ごろ岩手県・茨城県で最大地震3の地震がありました」をメインに表示する。"
+    const pastHeadline = `${timePrefix}ごろ${prefOnlyText}で最大震度${targetQuake.maxScaleLabel}の地震がありました`;
+    const card1Main = isLiveInterrupt ? maxPrefText : pastHeadline;
+    const card1Sub = isLiveInterrupt
+      ? `${targetQuake.occurrenceTime.replace(' 頃発生', '')}ころ 地震がありました`
+      : `震源: ${targetQuake.hypocenterName}　規模: M${targetQuake.magnitude >= 0 ? targetQuake.magnitude.toFixed(1) : '不明'}　深さ: ${targetQuake.depthKm >= 0 ? `約${targetQuake.depthKm}km` : 'ごく浅い'}`;
 
     const maxScale = targetQuake.maxScaleCode || 0;
     const maxScaleBadgeBg =
@@ -1043,10 +1092,10 @@ export function buildBottomFlipFeed(
 
     cards.push({
       id: `eq-card-max-${targetQuake.id}`,
-      badge: targetQuake.issueTypeLabel === '震度速報' ? '震度速報' : '最大震度',
+      badge: isLiveInterrupt ? (targetQuake.issueTypeLabel === '震度速報' ? '震度速報' : '最大震度') : '地震情報',
       badgeBg: maxScaleBadgeBg,
-      mainText: maxPrefText,
-      subText: `${targetQuake.occurrenceTime.replace(' 頃発生', '')}ころ 地震がありました`,
+      mainText: card1Main,
+      subText: card1Sub,
       accentColor: maxScale >= 50 ? '#EF4444' : maxScale >= 40 ? '#F59E0B' : '#0EA5E9',
     });
 

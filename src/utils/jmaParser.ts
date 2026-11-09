@@ -1351,9 +1351,9 @@ export function getSeismicScaleStyle(scaleCode: number): {
   return {
     bg: 'bg-slate-800/90',
     text: 'text-slate-200',
-    border: 'border-slate-500',
-    hex: '#64748B',
-    badgeText: '#F8FAFC',
+    border: 'border-slate-400',
+    hex: '#8FA0B5',
+    badgeText: '#07090E',
   };
 }
 
@@ -2609,9 +2609,8 @@ export function computeEarthquakeAreaScales(
     }
   }
 
-  // 2. Point-in-polygon fallback from stations into earthquake.json features
+  // 2. Ingest stations into earthquake.json features via point-in-polygon
   if (
-    areaScales.size === 0 &&
     earthquakeGeoJson &&
     Array.isArray(earthquakeGeoJson.features) &&
     Array.isArray(eq.stations) &&
@@ -2662,16 +2661,28 @@ export function computeEarthquakeCityScales(
 ): Map<string, number> {
   const cityScales = new Map<string, number>();
 
+  // 1. Ingest official JMA cityMaxScales if present
   if (eq.cityMaxScales) {
     for (const [code, scale] of Object.entries(eq.cityMaxScales)) {
-      if (typeof scale === 'number') {
+      if (typeof scale === 'number' && scale >= 10) {
         cityScales.set(code, scale);
+        // Map parent designated city code (e.g. 0410000 for 仙台市) to its subdivision parts (0410001, 0410002)
+        if (code.endsWith('000') && class20GeoJson?.features) {
+          const prefix = code.slice(0, 5);
+          for (const f of class20GeoJson.features) {
+            const fCode = String(f?.properties?.code || '');
+            if (fCode.startsWith(prefix) && fCode !== code) {
+              const cur = cityScales.get(fCode) || 0;
+              if (scale > cur) cityScales.set(fCode, scale);
+            }
+          }
+        }
       }
     }
   }
 
+  // 2. ALWAYS incorporate all stations from eq.stations via point-in-polygon
   if (
-    cityScales.size === 0 &&
     class20GeoJson &&
     Array.isArray(class20GeoJson.features) &&
     Array.isArray(eq.stations) &&

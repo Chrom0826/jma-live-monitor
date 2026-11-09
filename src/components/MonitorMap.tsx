@@ -1024,7 +1024,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     const c20Shapes = class20CompiledRef.current;
     for (let i = 0; i < c20Shapes.length; i++) {
       const sh = c20Shapes[i];
-      const scale = cityScaleMap.get(sh.id) || 0;
+      let scale = cityScaleMap.get(sh.id) || 0;
+      if (scale < 10 && sh.divisionCode) {
+        scale = areaScaleMap.get(sh.divisionCode) || 0;
+      }
       if (scale >= 10) {
         let list = cityByScale.get(scale);
         if (!list) {
@@ -1733,7 +1736,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
                 if (anyInBucket) {
                   bCtx.fillStyle = bucket.hex;
-                  bCtx.globalAlpha = hasActiveEew ? 0.65 : 0.55;
+                  bCtx.globalAlpha = hasActiveEew ? 0.65 : bucket.scale === 10 ? 0.65 : 0.60;
                   bCtx.fill();
                   bCtx.globalAlpha = 1.0;
                   bCtx.strokeStyle = bucket.hex;
@@ -1929,7 +1932,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
                 if (anyInBucket) {
                   bCtx.fillStyle = bucket.hex;
-                  bCtx.globalAlpha = 0.55;
+                  bCtx.globalAlpha = bucket.scale === 10 ? 0.65 : 0.60;
                   bCtx.fill();
                   bCtx.globalAlpha = 1.0;
                   bCtx.strokeStyle = bucket.hex;

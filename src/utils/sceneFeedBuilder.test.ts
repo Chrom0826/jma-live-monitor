@@ -178,23 +178,36 @@ test('buildBottomFlipFeed: returns null for normal radar scene without active ts
 });
 
 test('buildBottomFlipFeed: produces flip cards for earthquake scene (pref, hypocenter, tsunami status, stations)', () => {
+  // 1. Normal patrol loop (past earthquakes headline format)
   const result = buildBottomFlipFeed({
     effectiveScene: 'earthquake',
     data: mockBundle,
     activeEew: null,
     selectedEarthquake: mockBundle.earthquakes[0],
+    isLiveInterrupt: false,
   });
 
   assert.ok(result);
   assert.equal(result.isFlipMode, true);
   assert.ok(result.cards.length >= 3);
-  // Card 1: 茨城県で震度4を観測
-  assert.ok(result.cards[0].mainText.includes('で震度4を観測'));
+  // Card 1: 2026 11/5 13:39ごろ茨城県で最大震度4の地震がありました
+  assert.ok(result.cards[0].mainText.includes('ごろ茨城県で最大震度4の地震がありました'));
   // Card 2: 震源: 茨城県沖　最大震度4　M4.8
   assert.ok(result.cards[1].mainText.includes('震源: 茨城県沖'));
   assert.ok(result.cards[1].mainText.includes('最大震度4'));
   // Card 3: 津波の心配なし
   assert.ok(result.cards[2].mainText.includes('津波の心配なし'));
+
+  // 2. Breaking live interrupt headline format
+  const resultLive = buildBottomFlipFeed({
+    effectiveScene: 'earthquake',
+    data: mockBundle,
+    activeEew: null,
+    selectedEarthquake: mockBundle.earthquakes[0],
+    isLiveInterrupt: true,
+  });
+  assert.ok(resultLive);
+  assert.ok(resultLive.cards[0].mainText.includes('茨城県で震度4を観測'));
 });
 
 test('buildBottomFlipFeed: produces EEW flip cards during active EEW', () => {
