@@ -1718,10 +1718,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               const hasActiveEew = Boolean(
                 activeEew && isEewStillActive(activeEew)
               );
+              const isPreliminaryScalePrompt =
+                selectedEarthquake.issueTypeLabel === '震度速報' ||
+                selectedEarthquake.isConfirmed === false;
               const isZoomedIn = currentZoom >= 6.8;
               const eqBuckets = hasActiveEew
                 ? preCompiledEew.areaBuckets
-                : isZoomedIn && preCompiledEarthquake.cityBuckets.length > 0
+                : !isPreliminaryScalePrompt && isZoomedIn && preCompiledEarthquake.cityBuckets.length > 0
                   ? preCompiledEarthquake.cityBuckets
                   : preCompiledEarthquake.areaBuckets;
               for (let b = 0; b < eqBuckets.length; b++) {
@@ -1740,7 +1743,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                   bCtx.fill();
                   bCtx.globalAlpha = 1.0;
                   bCtx.strokeStyle = bucket.hex;
-                  bCtx.lineWidth = hasActiveEew ? 1.8 : isZoomedIn ? 1.5 : 1.8;
+                  bCtx.lineWidth = hasActiveEew ? 1.8 : (!isPreliminaryScalePrompt && isZoomedIn) ? 1.5 : 1.8;
                   bCtx.stroke();
                 }
               }
@@ -1914,9 +1917,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               bCtx.fill();
 
               // 2. Batched Seismic-Intensity Colored Polygons (Municipality level when zoom >= 6.8, 188-Area level when zoom < 6.8)
+              const isPreliminaryScalePrompt =
+                selectedEarthquake.issueTypeLabel === '震度速報' ||
+                selectedEarthquake.isConfirmed === false;
               const isZoomedIn = currentZoom >= 6.8;
               const buckets =
-                isZoomedIn && preCompiledEarthquake.cityBuckets.length > 0
+                !isPreliminaryScalePrompt && isZoomedIn && preCompiledEarthquake.cityBuckets.length > 0
                   ? preCompiledEarthquake.cityBuckets
                   : preCompiledEarthquake.areaBuckets;
 
@@ -1936,7 +1942,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                   bCtx.fill();
                   bCtx.globalAlpha = 1.0;
                   bCtx.strokeStyle = bucket.hex;
-                  bCtx.lineWidth = isZoomedIn ? 1.5 : 1.8;
+                  bCtx.lineWidth = (!isPreliminaryScalePrompt && isZoomedIn) ? 1.5 : 1.8;
                   bCtx.stroke();
                 }
               }

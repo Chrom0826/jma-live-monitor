@@ -2350,14 +2350,14 @@ export function mergeProgressiveEarthquakeReports(
       }
     }
 
+    // Comprehensive detail report (`各地の震度に関する情報`) contains all stations down to intensity 1/2.
+    // Interim reports (`震度速報`, `震源に関する情報`, or interim `震源・震度に関する情報` without intensity 1 stations)
+    // must NOT be marked confirmed so interrupt locks stay active until final detail arrives!
     const hasConfirmedDetail = ordered.some(
       (r) =>
-        Boolean(r.isConfirmed) ||
-        (!r.hypocenterUnknown &&
-          r.hypocenterName !== '震源調査中' &&
-          r.maxScaleCode >= 10 &&
-          r.issueTypeLabel !== '震度速報' &&
-          r.issueTypeLabel !== '震源に関する情報')
+        r.issueTypeLabel === '各地の震度に関する情報' ||
+        (Boolean(r.isConfirmed) &&
+          (r.stations.some((s) => s.scaleCode <= 20) || r.maxScaleCode < 30))
     );
 
     let issueTypeLabel = base.issueTypeLabel || '震源・震度に関する情報';

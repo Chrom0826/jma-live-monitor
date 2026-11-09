@@ -48,15 +48,18 @@ import {
   sortEarthquakesByNewest,
 } from '../utils/jmaParser';
 import {
+  findSubdivisionAreaCodes,
   isEewStillActive,
   isTsunamiForecastActive,
   P2P_QUAKE_ISSUE_TYPE_LABELS,
   parseJmaTsunamiDetail,
   parseP2PEew,
+  parseP2PEewDetection,
   parseP2PTsunami,
   parseWolfxEew,
   shouldReplaceEew,
 } from '../utils/eewTsunami';
+import { JMA_SUBDIVISION_CENTERS } from '../data/jmaSubdivisionCenters';
 
 const JMA_XML_URLS: Record<XmlFeedType, string> = {
   regular: 'https://www.data.jma.go.jp/developer/xml/feed/regular.xml',
@@ -563,46 +566,97 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       P2P_QUAKE_ISSUE_TYPE_LABELS[issueType] ||
       (issueType ? `地震情報（${issueType}）` : '地震情報');
 
-    const stations: EarthquakeStationIntensity[] = [];
-    for (let i = 0; i < Math.min(rawPoints.length, 60); i++) {
+    // Extract 188-area subdivision scales from P2PQuake points
+    const areaMaxScales: Record<
+      string,
+      { scaleCode: number; scaleLabel: string; name?: string }
+    > = {};
+
+    for (let i = 0; i < rawPoints.length; i++) {
       const pt = rawPoints[i];
       const pref = String(pt.pref || '');
       const addr = String(pt.addr || '');
       const scale = typeof pt.scale === 'number' ? pt.scale : 10;
-      const base = findPrefectureBaseCoords(pref, hypoLat, hypoLon);
-
-      // Deterministic small spatial offset around prefecture/hypocenter when P2PQuake point lacks lat/lon
-      let hash = 0;
-      for (let c = 0; c < addr.length; c++) {
-        hash = (hash * 31 + addr.charCodeAt(c)) & 0xffff;
+      const matchedCodes = findSubdivisionAreaCodes(pref, addr);
+      for (const code of matchedCodes) {
+        const cur = areaMaxScales[code];
+        if (!cur || scale > cur.scaleCode) {
+          areaMaxScales[code] = {
+            scaleCode: scale,
+            scaleLabel: formatSeismicScale(scale),
+            name: addr,
+          };
+        }
       }
-      const dLat = (((hash % 17) - 8) * 0.045);
-      const dLon = ((((hash >> 4) % 17) - 8) * 0.045);
+    }
 
-      stations.push({
-        prefecture: pref,
-        city: addr,
-        stationName: addr,
-        scaleCode: scale,
-        scaleLabel: formatSeismicScale(scale),
-        lat:
-          typeof pt.lat === 'number'
-            ? pt.lat
-            : Number((base.lat + dLat).toFixed(4)),
-        lon:
-          typeof pt.lon === 'number'
-            ? pt.lon
-            : Number((base.lon + dLon).toFixed(4)),
-      });
+    const stations: EarthquakeStationIntensity[] = [];
+
+    if (issueType === 'ScalePrompt') {
+      // In 震度速報 (ScalePrompt), each reported subdivision area gets its intensity badge
+      // accurately centered in the subdivision polygon!
+      for (const [code, info] of Object.entries(areaMaxScales)) {
+        const center = JMA_SUBDIVISION_CENTERS[code];
+        const name = info.name || code;
+        const pt = rawPoints.find((p: any) =>
+          findSubdivisionAreaCodes(String(p.pref || ''), String(p.addr || '')).includes(code)
+        );
+        const pref = String(pt?.pref || '');
+        const base = findPrefectureBaseCoords(pref, hypoLat, hypoLon);
+
+        stations.push({
+          prefecture: pref,
+          city: name,
+          stationName: name,
+          scaleCode: info.scaleCode,
+          scaleLabel: info.scaleLabel,
+          lat: center ? center[1] : base.lat,
+          lon: center ? center[0] : base.lon,
+        });
+      }
+    } else {
+      for (let i = 0; i < Math.min(rawPoints.length, 60); i++) {
+        const pt = rawPoints[i];
+        const pref = String(pt.pref || '');
+        const addr = String(pt.addr || '');
+        const scale = typeof pt.scale === 'number' ? pt.scale : 10;
+        const base = findPrefectureBaseCoords(pref, hypoLat, hypoLon);
+
+        let hash = 0;
+        for (let c = 0; c < addr.length; c++) {
+          hash = (hash * 31 + addr.charCodeAt(c)) & 0xffff;
+        }
+        const dLat = (((hash % 17) - 8) * 0.045);
+        const dLon = ((((hash >> 4) % 17) - 8) * 0.045);
+
+        stations.push({
+          prefecture: pref,
+          city: addr,
+          stationName: addr,
+          scaleCode: scale,
+          scaleLabel: formatSeismicScale(scale),
+          lat:
+            typeof pt.lat === 'number'
+              ? pt.lat
+              : Number((base.lat + dLat).toFixed(4)),
+          lon:
+            typeof pt.lon === 'number'
+              ? pt.lon
+              : Number((base.lon + dLon).toFixed(4)),
+        });
+      }
     }
 
     stations.sort((a, b) => b.scaleCode - a.scaleCode);
 
+    // isConfirmed is true ONLY when comprehensive detail reports (DetailScale / 各地の震度に関する情報)
+    // or reports with known hypocenter and stations down to intensity 1/2 (or small maxScale < 30) are present!
     const isConfirmed =
       !hypocenterUnknown &&
       maxScaleCode >= 10 &&
       issueType !== 'ScalePrompt' &&
-      issueType !== 'Destination';
+      issueType !== 'Destination' &&
+      (issueType === 'DetailScale' || stations.some((s) => s.scaleCode <= 20) || maxScaleCode < 30);
 
     const id = String(item.id || `p2p-${eq.time}`);
     const finalLat =
@@ -636,6 +690,7 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       hypocenterUnknown,
       isConfirmed,
       reportKey,
+      areaMaxScales: Object.keys(areaMaxScales).length > 0 ? areaMaxScales : undefined,
       stations:
         stations.length > 0
           ? stations
@@ -672,7 +727,7 @@ export async function fetchLatestLiveEew(
         () => null
       ),
       fetchWithTimeout(
-        'https://api.p2pquake.net/v2/history?codes=556&limit=2',
+        'https://api.p2pquake.net/v2/history?codes=554,556&limit=4',
         3000
       ).catch(() => null),
     ]);
@@ -690,21 +745,22 @@ export async function fetchLatestLiveEew(
     if (p2pRes && p2pRes.ok) {
       const p2pJson = await p2pRes.json().catch(() => null);
       if (Array.isArray(p2pJson) && p2pJson.length > 0) {
-        const latest556 = p2pJson[0];
-        const issueMs = Date.parse(
-          String(latest556?.issue?.time || latest556?.time || '').replace(
-            /\//g,
-            '-'
-          )
-        );
-        const recMs = !Number.isNaN(issueMs) ? issueMs : nowMs;
-        const parsed556 = parseP2PEew(latest556, recMs);
-        if (
-          parsed556 &&
-          isEewStillActive(parsed556, nowMs) &&
-          shouldReplaceEew(candidate, parsed556)
-        ) {
-          candidate = parsed556;
+        for (const item of p2pJson) {
+          const issueMs = Date.parse(
+            String(item?.issue?.time || item?.time || '').replace(/\//g, '-')
+          );
+          const recMs = !Number.isNaN(issueMs) ? issueMs : nowMs;
+          const parsed =
+            item.code === 554
+              ? parseP2PEewDetection(item, recMs)
+              : parseP2PEew(item, recMs);
+          if (
+            parsed &&
+            isEewStillActive(parsed, nowMs) &&
+            shouldReplaceEew(candidate, parsed)
+          ) {
+            candidate = parsed;
+          }
         }
       }
     }

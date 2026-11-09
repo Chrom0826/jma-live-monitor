@@ -25,6 +25,7 @@ import {
   TEST_TSUNAMI_FORECAST_DEMO,
   TEST_VOLCANO_LEVEL_CHANGE,
 } from './data/fallbackData';
+import { connectWolfxEewSocket } from './services/wolfxEewSocket';
 import {
   convertP2PQuakeItem,
   fetchLatestLiveEew,
@@ -515,9 +516,15 @@ export default function App() {
         setSelectedEarthquake(newest);
         setActiveScene('earthquake');
 
-        if (newest.isConfirmed === false) {
-          // Interim report (震度速報 / 震源に関する情報 / 震度速報・震源情報):
-          // Keep locked on 'earthquake' tab continuously until final seismic intensity is confirmed!
+        const isAwaitingDetail =
+          newest.isConfirmed === false ||
+          newest.issueTypeLabel === '震度速報' ||
+          newest.issueTypeLabel === '震源に関する情報' ||
+          (newest.maxScaleCode >= 30 && newest.issueTypeLabel !== '各地の震度に関する情報');
+
+        if (isAwaitingDetail) {
+          // Interim report (震度速報 / 震源に関する情報 / 震源・震度に関する情報):
+          // Keep locked on 'earthquake' tab continuously until all stations down to intensity 1 arrive!
           eqLockUntilConfirmedRef.current = true;
           if (eqConfirmedHoldTimerRef.current) {
             clearTimeout(eqConfirmedHoldTimerRef.current);
@@ -525,7 +532,7 @@ export default function App() {
           }
           setInterruptKind((prev) => (prev === 'eew' ? 'eew' : 'earthquake'));
         } else {
-          // Final seismic intensity & hypocenter confirmed (`各地の震度に関する情報` / `isConfirmed: true`)!
+          // Final comprehensive seismic intensity & hypocenter confirmed (`各地の震度に関する情報` with all stations)!
           eqLockUntilConfirmedRef.current = false;
           setInterruptKind('earthquake');
           if (eqConfirmedHoldTimerRef.current) {
@@ -651,9 +658,7 @@ export default function App() {
   // with automatic reconnection for real-time push delivery of EEW (Forecast & Warning), Earthquake, and Tsunami reports
   useEffect(() => {
     let p2pWs: WebSocket | null = null;
-    let wolfxWs: WebSocket | null = null;
     let p2pReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let wolfxReconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let unmounted = false;
 
     const connectP2p = () => {
@@ -743,55 +748,28 @@ export default function App() {
       }
     };
 
-    const connectWolfx = () => {
-      if (unmounted) return;
-      try {
-        wolfxWs = new WebSocket('wss://ws-api.wolfx.jp/jma_eew');
-        wolfxWs.onmessage = (event) => {
-          try {
-            const payload = JSON.parse(event.data);
-            if (!payload || payload.type !== 'jma_eew') return;
-            const eew = parseWolfxEew(payload, Date.now());
-            if (eew && isEewStillActive(eew)) {
-              handleIncomingEew(eew);
-              pollFastEarthquakeAndEew();
-            }
-          } catch {
-            // Ignore heartbeat / malformed message
-          }
-        };
-        wolfxWs.onclose = () => {
-          if (!unmounted) {
-            wolfxReconnectTimer = setTimeout(connectWolfx, 3500);
-          }
-        };
-        wolfxWs.onerror = () => {
-          try {
-            wolfxWs?.close();
-          } catch {
-            // ignore
-          }
-        };
-      } catch {
-        if (!unmounted) {
-          wolfxReconnectTimer = setTimeout(connectWolfx, 5000);
-        }
-      }
-    };
-
     connectP2p();
-    connectWolfx();
+
+    // Resilient Wolfx client: connects to WebSocket, sends query on open,
+    // sends ping keepalives, and automatically runs fallback HTTP polling if WS is blocked/down.
+    const stopWolfx = connectWolfxEewSocket({
+      onMessage: (payload) => {
+        if (unmounted) return;
+        const eew = parseWolfxEew(payload, Date.now());
+        if (eew && isEewStillActive(eew)) {
+          handleIncomingEew(eew);
+          pollFastEarthquakeAndEew();
+        }
+      },
+    });
 
     return () => {
       unmounted = true;
       if (p2pReconnectTimer) clearTimeout(p2pReconnectTimer);
-      if (wolfxReconnectTimer) clearTimeout(wolfxReconnectTimer);
       if (p2pWs && p2pWs.readyState <= 1) {
         p2pWs.close();
       }
-      if (wolfxWs && wolfxWs.readyState <= 1) {
-        wolfxWs.close();
-      }
+      stopWolfx();
     };
   }, [applyEarthquakeListUpdate, handleIncomingEew, pollFastEarthquakeAndEew]);
 
@@ -875,11 +853,18 @@ export default function App() {
     }
 
     // If locked onto earthquake (active EEW or unconfirmed seismic intensity / hypocenter),
-    // stay on the 'earthquake' scene continuously until final seismic intensity is confirmed!
+    // stay on the 'earthquake' scene continuously until final comprehensive report (各地の震度に関する情報) arrives!
+    const isAwaitingDetail =
+      selectedEarthquake.isConfirmed === false ||
+      selectedEarthquake.issueTypeLabel === '震度速報' ||
+      selectedEarthquake.issueTypeLabel === '震源に関する情報' ||
+      (selectedEarthquake.maxScaleCode >= 30 && selectedEarthquake.issueTypeLabel !== '各地の震度に関する情報');
+
     if (
       eqLockUntilConfirmedRef.current ||
       interruptKind === 'eew' ||
       interruptKind === 'earthquake' ||
+      isAwaitingDetail ||
       (activeEew && isEewStillActive(activeEew))
     ) {
       setActiveScene('earthquake');

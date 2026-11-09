@@ -1007,6 +1007,18 @@ export function estimateLpgmClassFromScale(
   return 0;
 }
 
+// 北海道の4大予報区（緊急地震速報・震度速報用）と気象庁細分区域コード（100〜167番台）の対応
+const HOKKAIDO_DO_O_CODES = ['100', '101', '102', '115', '116', '117', '120', '121', '122', '145', '146', '150', '151', '152'];
+const HOKKAIDO_DO_NAN_CODES = ['105', '106', '107', '110', '119'];
+const HOKKAIDO_DO_HOKU_CODES = ['125', '126', '127', '130', '131', '135', '136', '139'];
+const HOKKAIDO_DO_TO_CODES = ['140', '141', '142', '155', '156', '157', '160', '161', '165', '166', '167'];
+const HOKKAIDO_ALL_CODES = [
+  ...HOKKAIDO_DO_O_CODES,
+  ...HOKKAIDO_DO_NAN_CODES,
+  ...HOKKAIDO_DO_HOKU_CODES,
+  ...HOKKAIDO_DO_TO_CODES,
+];
+
 /**
  * EEW 電文の府県名（pref）と細分区域名（name）から
  * 気象庁震度細分区域コード（100〜790番台）を照合・取得する
@@ -1019,6 +1031,15 @@ export function findSubdivisionAreaCodes(pref: string, name: string): string[] {
     .trim();
   const normName = rawCleanName.replace(/(都|府|県)$/, '').trim();
 
+  // 北海道の緊急地震速報・震度速報の4大予報区域（道央・道南・道北・道東）
+  const isHokkaido = normPref === '北海道' || rawCleanName.includes('北海道') || pref === '北海道';
+  if (isHokkaido) {
+    if (rawCleanName.includes('道央')) return [...HOKKAIDO_DO_O_CODES];
+    if (rawCleanName.includes('道南')) return [...HOKKAIDO_DO_NAN_CODES];
+    if (rawCleanName.includes('道北')) return [...HOKKAIDO_DO_HOKU_CODES];
+    if (rawCleanName.includes('道東')) return [...HOKKAIDO_DO_TO_CODES];
+  }
+
   // 都道府県名そのものが指定されている場合（例: pref="福岡県", name="福岡県" または name=""）
   // は、その都道府県の全細分区域を返す
   const isWholePrefecture =
@@ -1026,9 +1047,11 @@ export function findSubdivisionAreaCodes(pref: string, name: string): string[] {
     rawCleanName === pref ||
     (Boolean(normPref) && rawCleanName === `${normPref}県`) ||
     (Boolean(normPref) && rawCleanName === `${normPref}府`) ||
-    (Boolean(normPref) && rawCleanName === `${normPref}都`);
+    (Boolean(normPref) && rawCleanName === `${normPref}都`) ||
+    (Boolean(normPref) && rawCleanName === '北海道');
 
   if (isWholePrefecture) {
+    if (normPref === '北海道') return [...HOKKAIDO_ALL_CODES];
     const list: string[] = [];
     for (const [code, fullName] of Object.entries(JMA_SUBDIVISION_AREAS)) {
       if (normPref && fullName.includes(normPref)) list.push(code);
@@ -1083,6 +1106,7 @@ export function findSubdivisionAreaCodes(pref: string, name: string): string[] {
   if (matches.length > 0) return matches;
 
   // 3. 固有の細分区域にヒットしなかった場合のフォールバック（都道府県全域）
+  if (normPref === '北海道') return [...HOKKAIDO_ALL_CODES];
   if (normPref) {
     const list: string[] = [];
     for (const [code, fullName] of Object.entries(JMA_SUBDIVISION_AREAS)) {

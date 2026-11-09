@@ -1660,6 +1660,75 @@ test('findSubdivisionAreaCodes correctly maps EEW prefectures and area names to 
   assert.equal(scaleMap.get('741'), 50); // 熊本 -> 震度5強
   assert.equal(scaleMap.get('743'), 40); // 天草・芦北 -> 震度4
   assert.equal(scaleMap.get('710'), 30); // 福岡 -> 震度3
+
+  // Hokkaido 4 major forecast areas (道央・道南・道北・道東)
+  const dooCodes = findSubdivisionAreaCodes('北海道', '北海道道央');
+  assert.ok(dooCodes.includes('100')); // 石狩北部
+  assert.ok(dooCodes.includes('115')); // 後志北部
+  assert.ok(dooCodes.includes('120')); // 空知北部
+  assert.ok(dooCodes.includes('145')); // 胆振西部
+  assert.ok(dooCodes.includes('150')); // 日高西部
+
+  const donanCodes = findSubdivisionAreaCodes('北海道', '道南');
+  assert.ok(donanCodes.includes('105')); // 渡島北部
+  assert.ok(donanCodes.includes('110')); // 檜山
+  assert.ok(donanCodes.includes('119')); // 奥尻島
+
+  const dohokuCodes = findSubdivisionAreaCodes('北海道', '道北');
+  assert.ok(dohokuCodes.includes('125')); // 上川北部
+  assert.ok(dohokuCodes.includes('130')); // 留萌中北部
+  assert.ok(dohokuCodes.includes('135')); // 宗谷北部
+  assert.ok(dohokuCodes.includes('139')); // 利尻礼文
+
+  const dotoCodes = findSubdivisionAreaCodes('北海道', '道東');
+  assert.ok(dotoCodes.includes('140')); // 網走
+  assert.ok(dotoCodes.includes('155')); // 十勝北部
+  assert.ok(dotoCodes.includes('160')); // 釧路北部
+  assert.ok(dotoCodes.includes('165')); // 根室北部
+
+  const hokkaidoAll = findSubdivisionAreaCodes('北海道', '北海道');
+  assert.equal(hokkaidoAll.length, 38); // All 38 subdivisions in Hokkaido
+
+  // Verify convertP2PQuakeItem populates areaMaxScales for ScalePrompt (震度速報)
+  const { convertP2PQuakeItem } = await import('../services/jmaClient');
+  const mockP2P551ScalePrompt = {
+    code: 551,
+    time: '2026/11/09 13:52:00',
+    issue: {
+      type: 'ScalePrompt',
+      time: '2026/11/09 13:54:00',
+      source: '気象庁',
+    },
+    earthquake: {
+      time: '2026/11/09 13:52:00',
+      maxScale: 30,
+      domesticTsunami: 'None',
+      foreignTsunami: 'None',
+      hypocenter: { name: '', latitude: -200, longitude: -200, depth: -1, magnitude: -1 },
+    },
+    points: [
+      { pref: '福島県', addr: '福島県中通り', scale: 30 },
+      { pref: '福島県', addr: '福島県浜通り', scale: 30 },
+      { pref: '宮城県', addr: '宮城県中部', scale: 30 },
+      { pref: '茨城県', addr: '茨城県北部', scale: 30 },
+      { pref: '栃木県', addr: '栃木県南部', scale: 30 },
+    ],
+  };
+
+  const converted = convertP2PQuakeItem(mockP2P551ScalePrompt);
+  assert.ok(converted);
+  assert.equal(converted.issueTypeLabel, '震度速報');
+  assert.equal(converted.isConfirmed, false);
+  assert.ok(converted.areaMaxScales);
+  assert.equal(converted.areaMaxScales['250']?.scaleCode, 30); // 福島県中通り
+  assert.equal(converted.areaMaxScales['251']?.scaleCode, 30); // 福島県浜通り
+  assert.equal(converted.areaMaxScales['222']?.scaleCode, 30); // 宮城県中部
+  assert.equal(converted.areaMaxScales['300']?.scaleCode, 30); // 茨城県北部
+  assert.equal(converted.areaMaxScales['311']?.scaleCode, 30); // 栃木県南部
+  assert.equal(converted.stations.length, 5);
+  // Verify stations are placed at subdivision centroids
+  const nakadori = converted.stations.find((s) => s.city === '福島県中通り')!;
+  assert.ok(Math.abs(nakadori.lat - 37.38) < 0.2);
 });
 
 
