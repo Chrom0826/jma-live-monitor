@@ -749,6 +749,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
   const isSingleTyphoonMode = useMemo(() => {
     const total = data.typhoons.length > 0 ? data.typhoons.length : 1;
+    if (total <= 1) return effectiveScene === 'typhoon';
     return (
       effectiveScene === 'typhoon' &&
       typeof typhoonPatrolStep === 'number' &&
@@ -2399,7 +2400,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       if (effectiveScene === 'typhoon') {
         for (let tIdx = 0; tIdx < preCompiledTyphoons.length; tIdx++) {
           const item = preCompiledTyphoons[tIdx];
-          if (isSingleTyphoonMode && item.tc.id !== selectedTyphoon.id) {
+          if (isSingleTyphoonMode && preCompiledTyphoons.length > 1 && item.tc.id !== selectedTyphoon.id) {
             continue;
           }
           const {
@@ -3607,17 +3608,33 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.2, 3.0);
     }
     if (effectiveScene === 'typhoon') {
+      const activeTyphoon =
+        data.typhoons.find((t) => t.id === selectedTyphoon.id) ||
+        data.typhoons[0] ||
+        selectedTyphoon;
       const targetList = isSingleTyphoonMode
-        ? [selectedTyphoon]
+        ? (activeTyphoon ? [activeTyphoon] : [])
         : data.typhoons.length > 0
         ? data.typhoons
-        : [selectedTyphoon];
+        : (activeTyphoon ? [activeTyphoon] : []);
       const allLats: number[] = [];
       const allLons: number[] = [];
       for (const tc of targetList) {
         for (const p of tc.points) {
           allLats.push(p.lat);
           allLons.push(p.lon);
+          // Account for forecast cone radius & storm/gale warning radius so the entire outer envelope is included
+          const maxR = Math.max(
+            p.probabilityCircleRadiusKm || 0,
+            p.stormRadiusKm || 0,
+            p.galeRadiusKm || 0,
+            80
+          );
+          const dLat = maxR / 110.5;
+          const cosLat = Math.max(0.2, Math.cos((p.lat * Math.PI) / 180));
+          const dLon = maxR / (111.0 * cosLat);
+          allLats.push(p.lat - dLat, p.lat + dLat);
+          allLons.push(p.lon - dLon, p.lon + dLon);
         }
         if (Array.isArray(tc.pastTrack)) {
           for (const [lat, lon] of tc.pastTrack) {
@@ -3627,20 +3644,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         }
       }
       if (allLats.length > 0) {
-        if (isSingleTyphoonMode) {
-          const minLat = Math.min(...allLats) - 1.2;
-          const maxLat = Math.max(...allLats) + 1.2;
-          const minLon = Math.min(...allLons) - 1.5;
-          const maxLon = Math.max(...allLons) + 1.5;
-          return fitLatLonBoundsToSafeViewport(minLat, maxLat, minLon, maxLon, 6.0, 3.0);
-        } else {
-          const minLat = Math.min(...allLats, 30.0) - 0.8;
-          const maxLat = Math.max(...allLats, 45.75) + 0.8;
-          const minLon = Math.min(...allLons, 128.8) - 1.0;
-          const maxLon = Math.max(...allLons, 146.0) + 1.0;
-          return fitLatLonBoundsToSafeViewport(minLat, maxLat, minLon, maxLon, 5.2, 2.8);
-        }
+        // いかなる状況でも、台風の全体と日本の本島（本州・北海道・四国・九州）が両方とも
+        // 画面内に収まるように境界を算出して拡大表示する
+        // 日本の本島主要部（屋久島・鹿児島南部 ~30.0°N 〜 北海道稚内 ~45.5°N、長崎・五島 ~128.8°E 〜 根室 ~145.8°E）
+        const minLat = Math.min(...allLats, 30.0) - 0.6;
+        const maxLat = Math.max(...allLats, 45.5) + 0.6;
+        const minLon = Math.min(...allLons, 128.8) - 0.8;
+        const maxLon = Math.max(...allLons, 145.8) + 0.8;
+        return fitLatLonBoundsToSafeViewport(minLat, maxLat, minLon, maxLon, 6.0, 2.5);
       }
+      return fitLatLonBoundsToSafeViewport(30.0, 45.5, 128.8, 145.8, 5.1, 3.0);
     }
     if (effectiveScene === 'warnings' && activeWarningDivision) {
       // Find bounding box of the active division to center it perfectly in the unobstructed viewport

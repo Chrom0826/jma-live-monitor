@@ -239,9 +239,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
   const isSingleTyphoonMode =
     effectiveScene === 'typhoon' &&
-    typeof typhoonPatrolStep === 'number' &&
-    typhoonPatrolStep >= 1 &&
-    typhoonPatrolStep <= totalTyphoons;
+    (totalTyphoons <= 1 ||
+      (typeof typhoonPatrolStep === 'number' &&
+        typhoonPatrolStep >= 1 &&
+        typhoonPatrolStep <= totalTyphoons));
 
   // Reset scroll position to top when scene, zoomed region, typhoon, or AMeDAS metric changes
   useEffect(() => {
@@ -325,7 +326,8 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     // M+1 = return to overview
     if (effectiveScene === 'typhoon') {
       const isOverview =
-        typhoonPatrolStep === 0 || typhoonPatrolStep > totalTyphoons;
+        totalTyphoons > 1 &&
+        (typhoonPatrolStep === 0 || typhoonPatrolStep > totalTyphoons);
       const holdMs = isOverview
         ? Math.min(Math.max(5500, loopIntervalSec * 400), 7000)
         : Math.min(Math.max(7000, loopIntervalSec * 500), 9000);
@@ -725,9 +727,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 <div className="flex items-center justify-between text-xs pb-0.5">
                   <div className="flex items-center gap-1.5 text-sky-300 font-bold shrink-0 whitespace-nowrap">
                     <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
-                    <span>低気圧詳細 ({typhoonPatrolStep}/{totalTyphoons})</span>
+                    <span>低気圧詳細{totalTyphoons > 1 ? ` (${typhoonPatrolStep}/${totalTyphoons})` : ''}</span>
                   </div>
-                  {onReturnTyphoonOverview && (
+                  {totalTyphoons > 1 && onReturnTyphoonOverview && (
                     <button
                       type="button"
                       onClick={onReturnTyphoonOverview}

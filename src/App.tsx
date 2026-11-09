@@ -325,7 +325,10 @@ export default function App() {
   // Warning patrol step: 0 = initial national view, 1..N = active 警報/特別警報 divisions (North->South), N+1 = final national view
   const [warningPatrolStep, setWarningPatrolStep] = useState<number>(0);
   // Typhoon patrol step: 0 = overview (all cyclones blocks), 1..M = single cyclone focus, M+1 = return to overview
-  const [typhoonPatrolStep, setTyphoonPatrolStep] = useState<number>(0);
+  // When total typhoons <= 1, overview is never shown, start directly at step 1
+  const [typhoonPatrolStep, setTyphoonPatrolStep] = useState<number>(
+    INITIAL_TYPHOONS.length <= 1 ? 1 : 0
+  );
   const [mapViewport, setMapViewport] = useState<MapViewportState | undefined>(
     undefined
   );
@@ -918,10 +921,10 @@ export default function App() {
 
     if (activeScene === 'typhoon') {
       const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
-      // Step 0: Overview (all cyclones in blocks, no forecasts)
+      // Step 0: Overview (all cyclones in blocks, no forecasts) - only when totalTyphoons > 1
       // Step 1..totalTyphoons: Single cyclone detail (header pinned + forecast timeline with ↓ arrows)
       // Step totalTyphoons + 1: Return to overview (all cyclones in blocks again)
-      if (typhoonPatrolStep <= totalTyphoons) {
+      if (totalTyphoons > 1 && typhoonPatrolStep <= totalTyphoons) {
         const nextStep = typhoonPatrolStep + 1;
         setTyphoonPatrolStep(nextStep);
         if (nextStep >= 1 && nextStep <= totalTyphoons) {
@@ -930,7 +933,7 @@ export default function App() {
         }
         return;
       }
-      setTyphoonPatrolStep(0);
+      setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
     }
 
     if (activeScene === 'amedas') {
@@ -955,7 +958,8 @@ export default function App() {
         setForecast3hIndex(0);
       }
       if (nextScene === 'typhoon') {
-        setTyphoonPatrolStep(0);
+        const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+        setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
         if (data.typhoons.length > 0) {
           setSelectedTyphoon(data.typhoons[0]);
         }
@@ -992,7 +996,8 @@ export default function App() {
     }
     setInterruptKind('none');
     setWarningPatrolStep(0);
-    setTyphoonPatrolStep(0);
+    const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+    setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
     if (sceneId === 'amedas') {
       setAmedasMetric('temp');
     }
@@ -1159,9 +1164,10 @@ export default function App() {
   );
 
   const handleReturnTyphoonOverview = useCallback(() => {
-    setTyphoonPatrolStep(0);
+    const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+    setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
     setActiveScene('typhoon');
-  }, []);
+  }, [data.typhoons.length]);
 
   const activeRegionConfig = useMemo(() => {
     const targetId = regionScope === 'auto' ? patrolRegionId : regionScope;
@@ -1319,7 +1325,7 @@ export default function App() {
     }
     if (effectiveScene === 'typhoon') {
       const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
-      if (typhoonPatrolStep >= 1 && typhoonPatrolStep <= totalTyphoons) {
+      if (totalTyphoons <= 1 || (typhoonPatrolStep >= 1 && typhoonPatrolStep <= totalTyphoons)) {
         return `${selectedTyphoon.displayNumber}（${selectedTyphoon.nameJp}）実況・進路予想`;
       }
       return '全国 台風・熱帯低気圧 進路実況';

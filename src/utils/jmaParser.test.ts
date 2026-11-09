@@ -1727,8 +1727,8 @@ test('findSubdivisionAreaCodes correctly maps EEW prefectures and area names to 
   assert.equal(converted.areaMaxScales['311']?.scaleCode, 30); // 栃木県南部
   assert.equal(converted.stations.length, 5);
   // Verify stations are placed at subdivision centroids
-  const nakadori = converted.stations.find((s) => s.city === '福島県中通り')!;
-  assert.ok(Math.abs(nakadori.lat - 37.38) < 0.2);
+  const nakadori = converted.stations.find((s) => s.city === '福島県中通り');
+  assert.ok(nakadori && typeof nakadori.lat === 'number' && Math.abs(nakadori.lat - 37.38) < 0.2);
 });
 
 
