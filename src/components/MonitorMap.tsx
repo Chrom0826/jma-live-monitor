@@ -504,6 +504,7 @@ interface MonitorMapProps {
   interruptKind: InterruptKind;
   isLoopPaused: boolean;
   isRightPanelHidden?: boolean;
+  isMobilePortrait?: boolean;
   eewDisplayMode?: EewDisplayMode;
   onChangeEewDisplayMode?: (mode: EewDisplayMode) => void;
   onSceneComplete: () => void;
@@ -653,6 +654,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   interruptKind,
   isLoopPaused,
   isRightPanelHidden = false,
+  isMobilePortrait = false,
   eewDisplayMode = 'intensity',
   onChangeEewDisplayMode,
   onSceneComplete,
@@ -2917,17 +2919,17 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     // so `isMovingRef` alone is not enough: require the scene camera target to be reached (or give up
     // waiting for it after a few seconds, e.g. the user zoomed manually) and the view to stay unchanged
     // with no Leaflet animation for SETTLE_MS.
-    const SETTLE_MS = 220;
-    const TARGET_WAIT_MAX_MS = 4000;
-    const { center: target, zoom: targetZoom } = getSceneCameraTargetRef.current();
+    const SETTLE_MS = 80;
+    const TARGET_WAIT_MAX_MS = 1400;
     const waitStart = performance.now();
     let lastKey = '';
-    let stableSince = 0;
+    let stableSince = waitStart;
     const waitForSettle = (now: number) => {
       if (cancelled) return;
+      const { center: target, zoom: targetZoom } = getSceneCameraTargetRef.current();
       const c = map.getCenter();
       const z = map.getZoom();
-      const key = `${c.lat.toFixed(5)},${c.lng.toFixed(5)},${z.toFixed(4)}`;
+      const key = `${c.lat.toFixed(4)},${c.lng.toFixed(4)},${z.toFixed(3)}`;
       const animating =
         isMovingRef.current ||
         isFlyingRef.current ||
@@ -2937,9 +2939,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         stableSince = now;
       }
       const atTarget =
-        Math.abs(c.lat - target[0]) < 0.02 &&
-        Math.abs(c.lng - target[1]) < 0.02 &&
-        Math.abs(z - targetZoom) < 0.01;
+        Math.abs(c.lat - target[0]) < 0.05 &&
+        Math.abs(c.lng - target[1]) < 0.05 &&
+        Math.abs(z - targetZoom) < 0.05;
       const targetOk = atTarget || now - waitStart > TARGET_WAIT_MAX_MS;
       if (!animating && targetOk && now - stableSince >= SETTLE_MS) {
         runEntering();
@@ -3106,7 +3108,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       }
       lastEmitTime = now;
 
-      (overlayRendererRef.current as any)?._reset?.();
+      if ((overlayRendererRef.current as any)?._map) {
+        (overlayRendererRef.current as any)._reset?.();
+      }
       flushFrameUpdate();
       if (onViewportChangeRef.current) {
         const c = map.getCenter();
@@ -3136,14 +3140,57 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     map.on('moveend', emitViewport);
 
     mapInstanceRef.current = map;
+    // Set initial camera view fitted to the actual container dimensions
+    const initialTarget = getSceneCameraTargetRef.current();
+    map.setView(initialTarget.center, initialTarget.zoom, { animate: false });
     emitViewport();
 
+    const containerEl = map.getContainer();
+    let lastObservedW = containerEl.clientWidth;
+    let lastObservedH = containerEl.clientHeight;
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            if (!mapInstanceRef.current) return;
+            const c = map.getContainer();
+            const w = c.clientWidth;
+            const h = c.clientHeight;
+            if (w <= 0 || h <= 0) return;
+            if (w === lastObservedW && h === lastObservedH) return;
+            lastObservedW = w;
+            lastObservedH = h;
+            (map as any)._stop?.();
+            map.invalidateSize({ animate: false, pan: false });
+            syncViewportSize();
+            const { center: targetCenter, zoom: targetZoom } =
+              getSceneCameraTargetRef.current();
+            map.setView(targetCenter, targetZoom, { animate: false });
+            isFlyingRef.current = false;
+            isMovingRef.current = false;
+            flushFrameUpdate();
+          })
+        : null;
+    if (resizeObserver) {
+      resizeObserver.observe(containerEl);
+    }
+
     return () => {
+      resizeObserver?.disconnect();
       cancelAnimationFrame(zoomAnimRaf);
       cancelAnimationFrame(frameRenderRaf);
+      map.off('movestart', handleMoveStart);
+      map.off('zoomstart', handleMoveStart);
+      map.off('move', handleFrameUpdate);
+      map.off('zoom', handleFrameUpdate);
+      map.off('zoomanim', handleZoomAnim);
+      map.off('viewreset', flushFrameUpdate);
+      map.off('resize', handleResize);
+      map.off('zoomend', emitViewport);
+      map.off('moveend', emitViewport);
       detachSmoothWheel();
-      map.remove();
+      overlayRendererRef.current = null;
       mapInstanceRef.current = null;
+      map.remove();
     };
   }, []);
 
@@ -3287,6 +3334,71 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     tsunamiGeoJsonLayerRef.current = tsunamiLayer;
   }, [effectiveScene, tsunamiGeoJsonData, activeTsunamiForecast]);
 
+  /**
+   * Computes the exact camera [lat, lon] and zoom level that fits a geographic bounding box
+   * [minLat, maxLat, minLon, maxLon] strictly inside the unobstructed portion of the map container,
+   * accounting for actual container width/height and any UI chrome padding.
+   */
+  const fitLatLonBoundsToSafeViewport = (
+    minLat: number,
+    maxLat: number,
+    minLon: number,
+    maxLon: number,
+    maxZoom = 5.4,
+    minZoom = 3.0
+  ): { center: [number, number]; zoom: number } => {
+    const container = mapContainerRef.current;
+    const vpW =
+      (container && container.clientWidth > 0 ? container.clientWidth : 0) ||
+      viewportSizeRef.current?.width ||
+      (isMobilePortrait ? 390 : 1280);
+    const vpH =
+      (container && container.clientHeight > 0 ? container.clientHeight : 0) ||
+      viewportSizeRef.current?.height ||
+      (isMobilePortrait ? 320 : 720);
+
+    // Safe margins inside the map canvas so the landmass never touches edges or floating controls:
+    // On mobile portrait, the top-left zoom toolbar is ~28px tall (sitting over the Sea of Japan while Hokkaido is on the right).
+    // On desktop, the right detail panel is 244px wide on the right and bottom bars are ~54px tall.
+    const leftPad = isMobilePortrait ? 10 : 20;
+    const rightPad = isMobilePortrait ? 10 : isRightPanelHidden ? 20 : 256;
+    const topPad = isMobilePortrait ? 32 : 44;
+    const bottomPad = isMobilePortrait ? 10 : 54;
+
+    const availW = Math.max(80, vpW - leftPad - rightPad);
+    const availH = Math.max(80, vpH - topPad - bottomPad);
+
+    const { normX: minNormX, normY: maxNormY } = latLonToNormMercator(minLat, minLon);
+    const { normX: maxNormX, normY: minNormY } = latLonToNormMercator(maxLat, maxLon);
+
+    const spanNormX = Math.max(1e-6, Math.abs(maxNormX - minNormX));
+    const spanNormY = Math.max(1e-6, Math.abs(maxNormY - minNormY));
+
+    const zoomX = Math.log2(availW / (spanNormX * 256));
+    const zoomY = Math.log2(availH / (spanNormY * 256));
+
+    // Floor to 0.05 zoom increments so the bounding box is strictly contained with zero clipping
+    const rawZoom = Math.min(maxZoom, zoomX, zoomY);
+    const targetZoom = Math.max(minZoom, Math.floor(rawZoom * 20) / 20);
+
+    // Shift camera center so the bounding box midpoint lands at the exact center of the unobstructed safe box
+    const midNormX = (minNormX + maxNormX) / 2;
+    const midNormY = (minNormY + maxNormY) / 2;
+
+    const offsetX_px = (leftPad - rightPad) / 2;
+    const offsetY_px = (topPad - bottomPad) / 2;
+
+    const scale = 256 * Math.pow(2, targetZoom);
+    const camNormX = midNormX - offsetX_px / scale;
+    const camNormY = midNormY - offsetY_px / scale;
+
+    const { lat: centerLat, lon: centerLon } = normMercatorToLatLon(camNormX, camNormY);
+    return {
+      center: [centerLat, centerLon],
+      zoom: targetZoom,
+    };
+  };
+
   // Compute target camera center & zoom for the active scene
   const getSceneCameraTarget = (): {
     center: [number, number];
@@ -3300,18 +3412,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         typeof activeEew.lon === 'number' &&
         !Number.isNaN(activeEew.lon)
       ) {
-        // EEW camera: Center directly on epicenter with optimal zoom (7.0)
-        // so all affected areas around the epicenter are centered in the visible viewport
-        return {
-          center: [activeEew.lat, activeEew.lon],
-          zoom: 7.0,
-        };
+        return fitLatLonBoundsToSafeViewport(
+          activeEew.lat - 1.8,
+          activeEew.lat + 1.8,
+          activeEew.lon - 2.2,
+          activeEew.lon + 2.2,
+          7.0,
+          4.5
+        );
       }
 
-      // When hypocenter coordinates are known:
-      // The epicenter is the primary focal point of the earthquake report!
-      // Center camera directly on the hypocenter [lat, lon] so it is ALWAYS displayed
-      // perfectly in the center of the viewport (not pushed to the right side by far-off scale 1 points).
       if (
         typeof selectedEarthquake.lat === 'number' &&
         typeof selectedEarthquake.lon === 'number' &&
@@ -3327,9 +3437,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             !Number.isNaN(s.lon)
         );
 
-        let targetZoom = 7.0;
+        let halfSpanLat = 1.4;
+        let halfSpanLon = 1.8;
         if (validStations.length > 0) {
-          // Measure spatial spread of noticeable shaking (scale >= 3 or top shaking stations) around epicenter
           const significantStations = validStations.filter(
             (s) => (s.scaleCode ?? 0) >= 30
           );
@@ -3338,29 +3448,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
           const dLats = focusStations.map((s) => Math.abs(s.lat - selectedEarthquake.lat));
           const dLons = focusStations.map((s) => Math.abs(s.lon - selectedEarthquake.lon));
-          const maxDLat = Math.max(...dLats);
-          const maxDLon = Math.max(...dLons);
-          const spread = Math.max(maxDLat, maxDLon * 0.8);
-
-          if (spread <= 0.8) {
-            targetZoom = 7.6;
-          } else if (spread <= 1.8) {
-            targetZoom = 7.1;
-          } else if (spread <= 3.2) {
-            targetZoom = 6.6;
-          } else {
-            targetZoom = 5.8;
-          }
+          halfSpanLat = Math.max(0.9, Math.min(4.2, Math.max(...dLats) * 1.15));
+          halfSpanLon = Math.max(1.1, Math.min(5.0, Math.max(...dLons) * 1.15));
         }
 
-        return {
-          center: [selectedEarthquake.lat, selectedEarthquake.lon],
-          zoom: targetZoom,
-        };
+        return fitLatLonBoundsToSafeViewport(
+          selectedEarthquake.lat - halfSpanLat,
+          selectedEarthquake.lat + halfSpanLat,
+          selectedEarthquake.lon - halfSpanLon,
+          selectedEarthquake.lon + halfSpanLon,
+          7.6,
+          4.2
+        );
       }
 
       // Fallback when hypocenter is unknown (e.g. preliminary 震度速報):
-      // Center on the centroid of observed stations
       const validStations = selectedEarthquake.stations.filter(
         (s): s is typeof s & { lat: number; lon: number } =>
           typeof s.lat === 'number' &&
@@ -3371,32 +3473,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       if (validStations.length > 0) {
         const lats = validStations.map((s) => s.lat);
         const lons = validStations.map((s) => s.lon);
-        const minLat = Math.min(...lats);
-        const maxLat = Math.max(...lats);
-        const minLon = Math.min(...lons);
-        const maxLon = Math.max(...lons);
-        const latSpan = maxLat - minLat;
-        const lonSpan = maxLon - minLon;
-        const targetZoom =
-          latSpan <= 1.2 && lonSpan <= 1.5
-            ? 7.6
-            : latSpan <= 3.2 && lonSpan <= 4.0
-              ? 6.8
-              : 6.0;
-        return {
-          center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2],
-          zoom: targetZoom,
-        };
+        const minLat = Math.min(...lats) - 0.6;
+        const maxLat = Math.max(...lats) + 0.6;
+        const minLon = Math.min(...lons) - 0.8;
+        const maxLon = Math.max(...lons) + 0.8;
+        return fitLatLonBoundsToSafeViewport(minLat, maxLat, minLon, maxLon, 7.6, 4.2);
       }
-      return {
-        center: [36.2, 137.8],
-        zoom: 6.8,
-      };
+      return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.2, 3.2);
     }
     if (effectiveScene === 'volcano') {
       return {
         center: [activeVolcano.lat, activeVolcano.lon],
-        zoom: 9,
+        zoom: isMobilePortrait ? 8.2 : 9,
       };
     }
     if (effectiveScene === 'tsunami') {
@@ -3406,10 +3494,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           activeTsunamiForecast.areas.length > 0
       );
       if (!hasActiveTsunami) {
-        return {
-          center: [36.8, 137.5],
-          zoom: 5.2,
-        };
+        // Fit all of Japan cleanly when no tsunami is active
+        return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.2, 3.0);
       }
 
       const hypoLat =
@@ -3477,46 +3563,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       }
 
       if (allLats.length > 0 && allLons.length > 0) {
-        const minLat = Math.min(...allLats);
-        const maxLat = Math.max(...allLats);
-        const minLon = Math.min(...allLons);
-        const maxLon = Math.max(...allLons);
-
-        const latSpan = maxLat - minLat;
-        const lonSpan = maxLon - minLon;
-        const maxSpan = Math.max(latSpan, lonSpan * 0.7);
-
-        let targetZoom = 5.2;
-        if (maxSpan <= 1.2) {
-          targetZoom = 7.5;
-        } else if (maxSpan <= 2.2) {
-          targetZoom = 6.8;
-        } else if (maxSpan <= 3.8) {
-          targetZoom = 6.2;
-        } else if (maxSpan <= 6.0) {
-          targetZoom = 5.7;
-        } else if (maxSpan <= 9.0) {
-          targetZoom = 5.2;
-        } else {
-          targetZoom = 4.8;
-        }
-
-        // Slightly offset lon to the east so the feature center isn't covered by the right panel
-        const lonOffset = targetZoom >= 6.5 ? 0.35 : 0.8;
-
-        return {
-          center: [
-            (minLat + maxLat) / 2,
-            (minLon + maxLon) / 2 + lonOffset,
-          ],
-          zoom: targetZoom,
-        };
+        const minLat = Math.min(...allLats) - 0.6;
+        const maxLat = Math.max(...allLats) + 0.6;
+        const minLon = Math.min(...allLons) - 0.8;
+        const maxLon = Math.max(...allLons) + 0.8;
+        return fitLatLonBoundsToSafeViewport(minLat, maxLat, minLon, maxLon, 7.5, 3.2);
       }
 
-      return {
-        center: [36.8, 137.5],
-        zoom: 5.2,
-      };
+      return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.2, 3.0);
     }
     if (effectiveScene === 'typhoon') {
       const targetList = isSingleTyphoonMode
@@ -3540,29 +3594,17 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       }
       if (allLats.length > 0) {
         if (isSingleTyphoonMode) {
-          const minLat = Math.min(...allLats);
-          const maxLat = Math.max(...allLats);
-          const minLon = Math.min(...allLons);
-          const maxLon = Math.max(...allLons);
-          const latSpan = maxLat - minLat;
-          const lonSpan = maxLon - minLon;
-          const targetZoom = latSpan > 8 || lonSpan > 12 ? 4.8 : latSpan > 4 || lonSpan > 6 ? 5.4 : 6.0;
-          return {
-            center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2 + 1.2],
-            zoom: targetZoom,
-          };
+          const minLat = Math.min(...allLats) - 1.2;
+          const maxLat = Math.max(...allLats) + 1.2;
+          const minLon = Math.min(...allLons) - 1.5;
+          const maxLon = Math.max(...allLons) + 1.5;
+          return fitLatLonBoundsToSafeViewport(minLat, maxLat, minLon, maxLon, 6.0, 3.0);
         } else {
-          const minLat = Math.min(...allLats, 30.0);
-          const maxLat = Math.max(...allLats, 45.5);
-          const minLon = Math.min(...allLons, 132.0);
-          const maxLon = Math.max(...allLons);
-          const latSpan = maxLat - minLat;
-          const lonSpan = maxLon - minLon;
-          const targetZoom = latSpan > 11 || lonSpan > 18 ? 4 : 5;
-          return {
-            center: [(minLat + maxLat) / 2, (minLon + maxLon) / 2 + 2.0],
-            zoom: targetZoom,
-          };
+          const minLat = Math.min(...allLats, 30.0) - 0.8;
+          const maxLat = Math.max(...allLats, 45.75) + 0.8;
+          const minLon = Math.min(...allLons, 128.8) - 1.0;
+          const maxLon = Math.max(...allLons, 146.0) + 1.0;
+          return fitLatLonBoundsToSafeViewport(minLat, maxLat, minLon, maxLon, 5.2, 2.8);
         }
       }
     }
@@ -3593,51 +3635,32 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         }
       }
 
-      const vpW = viewportSizeRef.current?.width || 1280;
-      const vpH = viewportSizeRef.current?.height || 720;
-      const availW = Math.max(600, vpW - 270);
-      const availH = Math.max(450, vpH - 80);
-
       if (minX < maxX && minY < maxY) {
-        const spanNormX = maxX - minX;
-        const spanNormY = maxY - minY;
-        const { lat: centerLat, lon: centerLon } = normMercatorToLatLon(
-          (minX + maxX) / 2,
-          (minY + maxY) / 2
-        );
-
-        const zx = Math.log2((availW * 0.82) / (spanNormX * 256));
-        const zy = Math.log2((availH * 0.82) / (spanNormY * 256));
-        const targetZoom = Math.min(
+        const { lat: maxLat, lon: minLon } = normMercatorToLatLon(minX, minY);
+        const { lat: minLat, lon: maxLon } = normMercatorToLatLon(maxX, maxY);
+        const latPad = Math.max(0.25, (maxLat - minLat) * 0.14);
+        const lonPad = Math.max(0.3, (maxLon - minLon) * 0.14);
+        return fitLatLonBoundsToSafeViewport(
+          minLat - latPad,
+          maxLat + latPad,
+          minLon - lonPad,
+          maxLon + lonPad,
           8.2,
-          Math.max(6.8, Math.round(Math.min(zx, zy) * 10) / 10)
+          5.2
         );
-
-        // Shift camera east so the prefecture centers in the open viewing area (left of the 244px right panel)
-        const centerLatRad = (centerLat * Math.PI) / 180;
-        const lonOffsetDeg =
-          (130 * 360) /
-          (256 * Math.pow(2, targetZoom) * Math.cos(centerLatRad));
-
-        return {
-          center: [centerLat, centerLon + lonOffsetDeg],
-          zoom: targetZoom,
-        };
       }
 
       // Robust fallback if shapes not yet loaded
-      const fallbackZoom = 7.6;
       const fallbackLat = activeWarningDivision.lat || 37.0;
       const fallbackLon = activeWarningDivision.lon || 138.0;
-      const latRad = (fallbackLat * Math.PI) / 180;
-      const lonOffsetDeg =
-        (130 * 360) /
-        (256 * Math.pow(2, fallbackZoom) * Math.cos(latRad));
-
-      return {
-        center: [fallbackLat, fallbackLon + lonOffsetDeg],
-        zoom: fallbackZoom,
-      };
+      return fitLatLonBoundsToSafeViewport(
+        fallbackLat - 1.2,
+        fallbackLat + 1.2,
+        fallbackLon - 1.5,
+        fallbackLon + 1.5,
+        7.6,
+        5.2
+      );
     }
     if (activeRegionConfig.id === 'world') {
       return {
@@ -3646,14 +3669,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       };
     }
     if (activeRegionConfig.id === 'national') {
-      const sceneTarget = SCENE_CAMERA_TARGETS[effectiveScene];
-      if (sceneTarget) {
-        return sceneTarget;
+      if (effectiveScene === 'forecast') {
+        return fitLatLonBoundsToSafeViewport(26.2, 45.75, 127.2, 146.0, 4.9, 2.8);
       }
+      // Fit the entire main Japanese archipelago (Southern Kyushu/Yakushima 30.0°N to Northern Hokkaido/Wakkanai 45.75°N,
+      // Western Kyushu/Goto 128.8°E to Eastern Hokkaido/Nemuro 146.0°E) strictly inside the current map container
+      return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.1, 3.0);
     }
     return {
       center: activeRegionConfig.center,
-      zoom: activeRegionConfig.zoom,
+      zoom: isMobilePortrait
+        ? Math.max(3.8, activeRegionConfig.zoom - 0.5)
+        : activeRegionConfig.zoom,
     };
   };
 
@@ -3711,7 +3738,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     activeTsunamiForecast?.lon,
     activeTsunamiForecast?.areas.length,
     tsunamiGeoJsonData,
+    isMobilePortrait,
+    isRightPanelHidden,
   ]);
+
+  // Invalidate Leaflet container size when switching between desktop and mobile portrait layouts
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+    const timer = setTimeout(() => {
+      map.invalidateSize({ animate: false });
+      const { center: targetCenter, zoom: targetZoom } = getSceneCameraTargetRef.current();
+      map.setView(targetCenter, targetZoom, { animate: false });
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [isMobilePortrait]);
 
   // Update JMA High-Resolution Precipitation Nowcast (`hrpns`) + Lightning Nowcast (`thns`)
   // Rendered inside `radarPane` (z-index: 450) directly ON TOP of the Japan & World maps.
@@ -4228,102 +4269,119 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     ];
 
   return (
-    <div className="relative w-full h-full bg-[#0E1014] overflow-hidden select-none">
-      {/* Crisp 60fps High-DPI Base Map & Warning Choropleth Canvas (Never Blurs During or After Zoom) */}
-      <canvas
-        ref={baseMapCanvasRef}
-        data-testid="crisp-basemap-canvas"
-        className="absolute inset-0 w-full h-full pointer-events-none z-[5]"
-      />
+    <div className="relative w-full h-full bg-[#0E1014] overflow-hidden select-none flex flex-col">
+      {/* Map Canvas Stage (Takes 100% height above the mobile bottom control strip) */}
+      <div className="relative flex-1 min-h-0 w-full overflow-hidden">
+        {/* Crisp 60fps High-DPI Base Map & Warning Choropleth Canvas (Never Blurs During or After Zoom) */}
+        <canvas
+          ref={baseMapCanvasRef}
+          data-testid="crisp-basemap-canvas"
+          className="absolute inset-0 w-full h-full pointer-events-none z-[5]"
+        />
 
-      {/* Main Full-Screen Leaflet Map Container (Radar Tiles & Vector Overlays) */}
-      <div
-        ref={mapContainerRef}
-        data-testid="monitor-map-canvas"
-        className="w-full h-full z-[10] cursor-crosshair"
-      />
+        {/* Main Full-Screen Leaflet Map Container (Radar Tiles & Vector Overlays) */}
+        <div
+          ref={mapContainerRef}
+          data-testid="monitor-map-canvas"
+          className="w-full h-full z-[10] cursor-crosshair"
+        />
 
-      {/* Interactive 60fps High-DPI Overlay Canvas for Smooth AMeDAS & Warning Hierarchy Labels */}
-      <canvas
-        ref={interactiveCanvasRef}
-        data-testid="interactive-map-overlay-canvas"
-        className="absolute inset-0 w-full h-full pointer-events-none z-[390]"
-      />
+        {/* Interactive 60fps High-DPI Overlay Canvas for Smooth AMeDAS & Warning Hierarchy Labels */}
+        <canvas
+          ref={interactiveCanvasRef}
+          data-testid="interactive-map-overlay-canvas"
+          className="absolute inset-0 w-full h-full pointer-events-none z-[390]"
+        />
 
-      {/* Subtle Map Zoom & World/Japan View Controls (Bottom-Left of Map Canvas) */}
-      <div className="absolute bottom-3 left-3 z-[400] flex items-center gap-1 bg-[#111318]/92 border border-neutral-700/80 p-1">
-        <button
-          type="button"
-          onClick={() => {
-            const map = mapInstanceRef.current;
-            if (!map) return;
-            map.flyTo(map.getCenter(), Math.min(12, map.getZoom() + 1), {
-              animate: true,
-              duration: 0.75,
-              easeLinearity: 0.15,
-            });
-          }}
-          aria-label="地図を拡大"
-          className="px-2 py-0.5 text-[11px] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
+        {/* Subtle Map Zoom & World/Japan View Controls */}
+        <div
+          className={`absolute z-[400] flex items-center gap-1 bg-[#111318]/92 border border-neutral-700/80 p-1 ${
+            isMobilePortrait
+              ? effectiveScene === 'forecast'
+                ? 'top-1.5 right-1.5'
+                : 'top-1.5 left-1.5'
+              : 'bottom-3 left-3'
+          }`}
         >
-          +拡大
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            const map = mapInstanceRef.current;
-            if (!map) return;
-            map.flyTo(map.getCenter(), Math.max(2, map.getZoom() - 1), {
-              animate: true,
-              duration: 0.75,
-              easeLinearity: 0.15,
-            });
-          }}
-          aria-label="地図を縮小"
-          className="px-2 py-0.5 text-[11px] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
-        >
-          -縮小
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            const map = mapInstanceRef.current;
-            if (!map) return;
-            map.flyTo([36.8, 137.5], 5, {
-              animate: true,
-              duration: 1.3,
-              easeLinearity: 0.1,
-            });
-          }}
-          aria-label="日本全体を表示"
-          className="px-2 py-0.5 text-[11px] font-mono text-neutral-300 hover:bg-neutral-800 transition-colors cursor-pointer"
-        >
-          日本全体
-        </button>
-        <button
-          type="button"
-          data-testid="world-map-view-btn"
-          onClick={() => {
-            const map = mapInstanceRef.current;
-            if (!map) return;
-            map.flyTo([30.0, 140.0], 3, {
-              animate: true,
-              duration: 1.4,
-              easeLinearity: 0.1,
-            });
-          }}
-          aria-label="世界全体を表示"
-          className="px-2 py-0.5 text-[11px] font-mono text-cyan-300 hover:bg-neutral-800 transition-colors cursor-pointer"
-        >
-          世界全体
-        </button>
+          <button
+            type="button"
+            onClick={() => {
+              const map = mapInstanceRef.current;
+              if (!map) return;
+              map.flyTo(map.getCenter(), Math.min(12, map.getZoom() + 1), {
+                animate: true,
+                duration: 0.75,
+                easeLinearity: 0.15,
+              });
+            }}
+            aria-label="地図を拡大"
+            className="px-2 py-0.5 text-[11px] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
+          >
+            +拡大
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const map = mapInstanceRef.current;
+              if (!map) return;
+              map.flyTo(map.getCenter(), Math.max(2, map.getZoom() - 1), {
+                animate: true,
+                duration: 0.75,
+                easeLinearity: 0.15,
+              });
+            }}
+            aria-label="地図を縮小"
+            className="px-2 py-0.5 text-[11px] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
+          >
+            -縮小
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const map = mapInstanceRef.current;
+              if (!map) return;
+              const { center: targetCenter, zoom: targetZoom } =
+                fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.1, 3.0);
+              map.flyTo(targetCenter, targetZoom, {
+                animate: true,
+                duration: 1.15,
+                easeLinearity: 0.1,
+              });
+            }}
+            aria-label="日本全体を表示"
+            className="px-2 py-0.5 text-[11px] font-mono text-neutral-300 hover:bg-neutral-800 transition-colors cursor-pointer"
+          >
+            日本全体
+          </button>
+          <button
+            type="button"
+            data-testid="world-map-view-btn"
+            onClick={() => {
+              const map = mapInstanceRef.current;
+              if (!map) return;
+              map.flyTo([30.0, 140.0], 3, {
+                animate: true,
+                duration: 1.4,
+                easeLinearity: 0.1,
+              });
+            }}
+            aria-label="世界全体を表示"
+            className="px-2 py-0.5 text-[11px] font-mono text-cyan-300 hover:bg-neutral-800 transition-colors cursor-pointer"
+          >
+            世界全体
+          </button>
+        </div>
       </div>
 
       {/* EEW Mode Indicator / Switcher Bar & LPGM Legend (震度予測 ↔ 長周期地震動階級1〜4 定期切替) */}
       {effectiveScene === 'earthquake' && activeEew && isEewStillActive(activeEew) && (
         <div
           data-testid="eew-mode-switcher-bar"
-          className="absolute bottom-3 left-64 z-[400] bg-[#111318]/94 border border-red-500/80 px-2.5 py-1 rounded-xs flex items-center gap-2 shadow-xl"
+          className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-2 ${
+            isMobilePortrait
+              ? 'shrink-0 w-full border-t border-red-500/80 overflow-x-auto whitespace-nowrap'
+              : 'absolute bottom-3 left-64 border border-red-500/80 rounded-xs shadow-xl'
+          }`}
         >
           <span className="text-[11px] font-mono text-neutral-200 font-bold">
             緊急地震速報:
@@ -4373,13 +4431,17 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       {effectiveScene === 'radar' && (
         <div
           data-testid="radar-scrubber-bar"
-          className="absolute bottom-3 left-64 z-[400] bg-[#111318]/92 border border-neutral-700/80 px-2.5 py-1 flex items-center gap-1.5"
+          className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-1.5 ${
+            isMobilePortrait
+              ? 'shrink-0 w-full border-t border-neutral-700/80 overflow-x-auto whitespace-nowrap'
+              : 'absolute bottom-3 left-64 border border-neutral-700/80'
+          }`}
         >
           <button
             type="button"
             data-testid="radar-pass-toggle-btn"
             onClick={() => setRadarPass((p) => (p === 0 ? 1 : 0))}
-            className={`px-2 py-0.5 text-[10px] font-mono font-bold border transition-colors cursor-pointer ${
+            className={`px-2 py-0.5 text-[10px] font-mono font-bold border transition-colors cursor-pointer shrink-0 ${
               radarPass === 1
                 ? 'bg-yellow-500/25 border-yellow-400 text-yellow-200'
                 : 'bg-cyan-500/20 border-cyan-500/70 text-cyan-200'
@@ -4389,7 +4451,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           </button>
           <span
             data-testid="radar-current-frame-label"
-            className="text-[11px] font-mono text-cyan-300 font-bold mr-1"
+            className="text-[11px] font-mono text-cyan-300 font-bold mr-1 shrink-0"
           >
             {currentNowcastEntry ? currentNowcastEntry.label : '現在 (実況)'}{' '}
             ({radarFrameIndex + 1}/{data.nowcastTimes.length})
@@ -4400,7 +4462,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               type="button"
               onClick={() => setRadarFrameIndex(idx)}
               aria-label={`レーダー時刻 ${entry.label}`}
-              className={`px-1.5 py-0.5 text-[10px] font-mono transition-colors border cursor-pointer ${
+              className={`px-1.5 py-0.5 text-[10px] font-mono transition-colors border cursor-pointer shrink-0 ${
                 idx === radarFrameIndex
                   ? 'bg-cyan-500/25 border-cyan-400 text-white font-bold'
                   : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-neutral-200'
@@ -4416,9 +4478,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       {effectiveScene === 'amedas' && (
         <div
           data-testid="amedas-metric-bar"
-          className="absolute bottom-3 left-64 z-[400] bg-[#111318]/92 border border-neutral-700/80 px-2.5 py-1 flex items-center gap-1.5"
+          className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-1.5 ${
+            isMobilePortrait
+              ? 'shrink-0 w-full border-t border-neutral-700/80 overflow-x-auto whitespace-nowrap'
+              : 'absolute bottom-3 left-64 border border-neutral-700/80'
+          }`}
         >
-          <span className="text-[11px] font-mono text-neutral-300 font-bold mr-1">
+          <span className="text-[11px] font-mono text-neutral-300 font-bold mr-1 shrink-0">
             表示要素:
           </span>
           {(
@@ -4434,7 +4500,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               type="button"
               data-testid={`amedas-metric-btn-${m.id}`}
               onClick={() => onChangeAmedasMetric(m.id)}
-              className={`px-2 py-0.5 text-[11px] font-mono font-bold transition-colors border cursor-pointer ${
+              className={`px-2 py-0.5 text-[11px] font-mono font-bold transition-colors border cursor-pointer shrink-0 ${
                 amedasMetric === m.id
                   ? 'bg-amber-500/25 border-amber-400 text-white'
                   : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-neutral-200'
@@ -4443,25 +4509,35 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               {m.label}
             </button>
           ))}
-          <span className="text-[10px] font-mono text-neutral-400 ml-1">
-            (ズーム連動・重なり防止高密度表示)
-          </span>
+          {!isMobilePortrait && (
+            <span className="text-[10px] font-mono text-neutral-400 ml-1">
+              (ズーム連動・重なり防止高密度表示)
+            </span>
+          )}
         </div>
       )}
 
       {/* TV Broadcast Nationwide Weather Mode Switcher, 3h Scrubber & Legend */}
       {effectiveScene === 'forecast' && (
         <>
-          {/* Bottom-Center Mode Switcher + 3h Scrubber (aligned with Radar & AMeDAS bars, never overlaps top-left title) */}
+          {/* Mode Switcher + 3h Scrubber */}
           <div
             data-testid="forecast-broadcast-header"
-            className="absolute bottom-3 left-64 z-[400] flex flex-col gap-1"
+            className={`z-[400] flex flex-col gap-1 ${
+              isMobilePortrait
+                ? 'shrink-0 w-full bg-[#111318]/95 border-t border-neutral-700/80 px-2 py-1 overflow-x-auto'
+                : 'absolute bottom-3 left-64'
+            }`}
           >
             {/* 3-Hour Slot Scrubber when in 'today_3h' mode */}
             {forecastViewMode === 'today_3h' && sample3hSlots.length > 0 && (
               <div
                 data-testid="forecast-3h-scrubber"
-                className="flex items-center gap-1 bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit"
+                className={`flex items-center gap-1 whitespace-nowrap ${
+                  isMobilePortrait
+                    ? 'w-fit'
+                    : 'bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit'
+                }`}
               >
                 <span className="text-[11px] font-bold text-amber-300 mr-1">
                   3時間ごと ({todayDateLabel}):
@@ -4485,7 +4561,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             )}
 
             {/* Mode Switcher Pills */}
-            <div className="flex items-center gap-1.5 bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit">
+            <div
+              className={`flex items-center gap-1.5 whitespace-nowrap ${
+                isMobilePortrait
+                  ? 'w-fit'
+                  : 'bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit'
+              }`}
+            >
               <span className="text-[11px] font-mono text-neutral-300 font-bold mr-0.5">
                 予報期間:
               </span>
@@ -4516,99 +4598,103 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             </div>
           </div>
 
-          {/* Bottom-Right Forecast Legend (adjusts right offset dynamically when right panel is hidden) */}
-          <div
-            data-testid="forecast-broadcast-legend"
-            className={`absolute bottom-3 z-[400] bg-[#0F141C]/95 border border-slate-700/80 rounded-xs px-3 py-1.5 flex items-center gap-3.5 shadow-lg text-slate-200 text-xs font-bold transition-all duration-500 ease-in-out ${
-              isRightPanelHidden ? 'right-4' : 'right-[272px]'
-            }`}
-          >
-            {/* [ |> のち ] */}
-            <div className="flex items-center gap-1.5 text-slate-300">
-              <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
-                <rect
-                  x="0.75"
-                  y="0.75"
-                  width="24.5"
-                  height="16.5"
-                  rx="2"
-                  fill="none"
-                  stroke="#94A3B8"
-                  strokeWidth="1.5"
-                />
-                <polyline
-                  points="11,0.75 15.5,9 11,17.25"
-                  fill="none"
-                  stroke="#94A3B8"
-                  strokeWidth="1.5"
-                />
-              </svg>
-              <span className="text-[11px]">のち</span>
-            </div>
+          {/* Forecast Legend (Desktop only; mobile portrait displays legend in dock & avoids covering top-left zoom bar) */}
+          {!isMobilePortrait && (
+            <div
+              data-testid="forecast-broadcast-legend"
+              className={`absolute z-[400] bg-[#0F141C]/95 border border-slate-700/80 rounded-xs px-2.5 py-1 flex items-center gap-2.5 shadow-lg text-slate-200 text-xs font-bold transition-all duration-500 ease-in-out ${
+                isRightPanelHidden
+                  ? 'bottom-3 right-4'
+                  : 'bottom-3 right-[272px]'
+              }`}
+            >
+              {/* [ |> のち ] */}
+              <div className="flex items-center gap-1.5 text-slate-300">
+                <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                  <rect
+                    x="0.75"
+                    y="0.75"
+                    width="24.5"
+                    height="16.5"
+                    rx="2"
+                    fill="none"
+                    stroke="#94A3B8"
+                    strokeWidth="1.5"
+                  />
+                  <polyline
+                    points="11,0.75 15.5,9 11,17.25"
+                    fill="none"
+                    stroke="#94A3B8"
+                    strokeWidth="1.5"
+                  />
+                </svg>
+                <span className="text-[11px]">のち</span>
+              </div>
 
-            {/* [ ┏ 時々 ] */}
-            <div className="flex items-center gap-1.5 text-slate-300">
-              <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
-                <rect
-                  x="0.75"
-                  y="0.75"
-                  width="24.5"
-                  height="16.5"
-                  rx="2"
-                  fill="none"
-                  stroke="#94A3B8"
-                  strokeWidth="1.5"
-                />
-                <polyline
-                  points="12,17.25 14.5,8.5 25.25,8.5"
-                  fill="none"
-                  stroke="#94A3B8"
-                  strokeWidth="1.5"
-                />
-              </svg>
-              <span className="text-[11px]">時々</span>
-            </div>
+              {/* [ ┏ 時々 ] */}
+              <div className="flex items-center gap-1.5 text-slate-300">
+                <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                  <rect
+                    x="0.75"
+                    y="0.75"
+                    width="24.5"
+                    height="16.5"
+                    rx="2"
+                    fill="none"
+                    stroke="#94A3B8"
+                    strokeWidth="1.5"
+                  />
+                  <polyline
+                    points="12,17.25 14.5,8.5 25.25,8.5"
+                    fill="none"
+                    stroke="#94A3B8"
+                    strokeWidth="1.5"
+                  />
+                </svg>
+                <span className="text-[11px]">時々</span>
+              </div>
 
-            {/* [ 最高気温 / 最低気温 ] or [ 予想気温 / 降水確率 ] */}
-            <div className="flex items-center gap-1.5">
-              <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
-                <rect
-                  x="0.75"
-                  y="0.75"
-                  width="24.5"
-                  height="16.5"
-                  rx="2"
-                  fill="none"
-                  stroke="#94A3B8"
-                  strokeWidth="1.5"
-                />
-                <line
-                  x1="14"
-                  y1="0.75"
-                  x2="14"
-                  y2="17.25"
-                  stroke="#94A3B8"
-                  strokeWidth="1.5"
-                />
-                <line
-                  x1="14"
-                  y1="9"
-                  x2="25.25"
-                  y2="9"
-                  stroke="#94A3B8"
-                  strokeWidth="1.5"
-                />
-              </svg>
-              <div className="flex flex-col leading-none text-[10px] font-mono">
-                <span className="text-red-400 font-bold">
-                  {forecastViewMode === 'today_3h' ? '予想気温' : '最高気温'}
-                </span>
-                <span className="text-sky-400 font-bold mt-0.5">
-                  {forecastViewMode === 'today_3h' ? '降水確率' : '最低気温'}
-                </span>
+              {/* [ 最高気温 / 最低気温 ] or [ 予想気温 / 降水確率 ] */}
+              <div className="flex items-center gap-1.5">
+                <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                  <rect
+                    x="0.75"
+                    y="0.75"
+                    width="24.5"
+                    height="16.5"
+                    rx="2"
+                    fill="none"
+                    stroke="#94A3B8"
+                    strokeWidth="1.5"
+                  />
+                  <line
+                    x1="14"
+                    y1="0.75"
+                    x2="14"
+                    y2="17.25"
+                    stroke="#94A3B8"
+                    strokeWidth="1.5"
+                  />
+                  <line
+                    x1="14"
+                    y1="9"
+                    x2="25.25"
+                    y2="9"
+                    stroke="#94A3B8"
+                    strokeWidth="1.5"
+                  />
+                </svg>
+                <div className="flex flex-col leading-none text-[10px] font-mono">
+                  <span className="text-red-400 font-bold">
+                    {forecastViewMode === 'today_3h' ? '予想気温' : '最高気温'}
+                  </span>
+                  <span className="text-sky-400 font-bold mt-0.5">
+                    {forecastViewMode === 'today_3h' ? '降水確率' : '最低気温'}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </>
       )}
     </div>

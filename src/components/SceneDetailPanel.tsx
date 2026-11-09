@@ -67,6 +67,7 @@ interface SceneDetailPanelProps {
   eewDisplayMode?: EewDisplayMode;
   onChangeEewDisplayMode?: (mode: EewDisplayMode) => void;
   onSceneComplete: () => void;
+  isMobilePortrait?: boolean;
 }
 
 function renderSeverityDot(severity: WarningSeverity) {
@@ -128,6 +129,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   eewDisplayMode = 'intensity',
   onChangeEewDisplayMode,
   onSceneComplete,
+  isMobilePortrait = false,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
@@ -443,7 +445,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   return (
     <aside
       aria-label="地域別防災ステータス一覧"
-      className="w-[244px] h-full flex flex-col gap-2 pointer-events-auto select-none"
+      className={`${
+        isMobilePortrait ? 'w-full' : 'w-[244px]'
+      } h-full flex flex-col gap-1.5 md:gap-2 pointer-events-auto select-none`}
     >
       {/* Interrupt Dismiss Box when an emergency / anomaly interrupt is active */}
       {interruptKind !== 'none' && (

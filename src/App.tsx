@@ -120,8 +120,13 @@ function formatTimeHm(isoOrText: string): string {
   return '13:40';
 }
 
-const LiveClockBox = memo(function LiveClockBox() {
+const LiveClockBox = memo(function LiveClockBox({
+  compact = false,
+}: {
+  compact?: boolean;
+}) {
   const [dateHeaderText, setDateHeaderText] = useState<string>('11月5日 木曜日');
+  const [shortDateText, setShortDateText] = useState<string>('11/5(木)');
   const [timeHeaderText, setTimeHeaderText] = useState<string>('13:43:07');
 
   useEffect(() => {
@@ -130,17 +135,36 @@ const LiveClockBox = memo(function LiveClockBox() {
       const month = now.getMonth() + 1;
       const day = now.getDate();
       const weekday = WEEKDAYS_JA[now.getDay()];
+      const shortWeekday = weekday.slice(0, 1);
       const hh = String(now.getHours()).padStart(2, '0');
       const min = String(now.getMinutes()).padStart(2, '0');
       const ss = String(now.getSeconds()).padStart(2, '0');
       const nextDate = `${month}月${day}日 ${weekday}`;
+      const nextShortDate = `${month}/${day}(${shortWeekday})`;
       setDateHeaderText((prev) => (prev === nextDate ? prev : nextDate));
+      setShortDateText((prev) => (prev === nextShortDate ? prev : nextShortDate));
       setTimeHeaderText(`${hh}:${min}:${ss}`);
     };
     updateClock();
     const timer = setInterval(updateClock, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  if (compact) {
+    return (
+      <div className="flex items-baseline gap-1.5 bg-[#0B0D12] border border-[#3B4252] px-2 py-1 rounded-xs shrink-0">
+        <span className="text-[11px] font-bold text-neutral-300 tracking-tight whitespace-nowrap">
+          {shortDateText}
+        </span>
+        <span
+          data-testid="live-digital-clock"
+          className="text-[17px] font-mono font-extrabold tracking-wider text-white leading-none whitespace-nowrap"
+        >
+          {timeHeaderText}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="border-b border-[#5A606D] px-4 py-3 text-center bg-[#111318] shrink-0">
@@ -226,6 +250,42 @@ export default function App() {
   const [isRefreshingXml, setIsRefreshingXml] = useState<boolean>(false);
 
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  // Smartphone Portrait Layout detection & bottom dock controls
+  const [isMobilePortrait, setIsMobilePortrait] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      window.innerWidth < 768 ||
+      (window.innerWidth < 920 && window.innerHeight > window.innerWidth)
+    );
+  });
+  const [mobileLayoutOverride, setMobileLayoutOverride] = useState<
+    'auto' | 'mobile' | 'desktop'
+  >('auto');
+  const [mobileBottomTab, setMobileBottomTab] = useState<
+    'detail' | 'earthquake' | 'xml'
+  >('detail');
+  const [isMobileDockExpanded, setIsMobileDockExpanded] =
+    useState<boolean>(false);
+
+  useEffect(() => {
+    const checkViewport = () => {
+      const isNarrowOrPortrait =
+        window.innerWidth < 768 ||
+        (window.innerWidth < 920 && window.innerHeight > window.innerWidth);
+      setIsMobilePortrait(isNarrowOrPortrait);
+    };
+    checkViewport();
+    window.addEventListener('resize', checkViewport);
+    return () => window.removeEventListener('resize', checkViewport);
+  }, []);
+
+  const effectiveMobilePortrait =
+    mobileLayoutOverride === 'mobile'
+      ? true
+      : mobileLayoutOverride === 'desktop'
+        ? false
+        : isMobilePortrait;
 
   const fullUpdateDateText = useMemo(() => {
     const now = new Date();
@@ -1225,218 +1285,217 @@ export default function App() {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', measureCopyWidth);
     };
-  }, [sceneFeed.textKey]);
-
+  }, [sceneFeed.textKey, effectiveMobilePortrait]);
 
   return (
-    <div className="h-screen w-screen bg-[#0D0F12] text-white p-1.5 overflow-hidden select-none flex">
-      {/* Outer Broadcast Frame with NERV-inspired crisp border */}
-      <div className="flex-1 flex border border-[#5A606D] bg-[#0E1014] overflow-hidden relative">
-        {/* ==================== LEFT COLUMN (Clock + Dynamic XML Timeline OR Earthquake History + Compact Settings) ==================== */}
-          <aside
-          aria-label="時計および履歴タイムライン"
-          className="w-[264px] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden animate-startup-left z-20"
+    <div className="h-screen w-screen bg-[#0D0F12] text-white p-1 md:p-1.5 overflow-hidden select-none flex">
+      {effectiveMobilePortrait ? (
+        /* ==================== SMARTPHONE PORTRAIT LAYOUT (Top Header -> Broadcast FEED -> Map Stage -> Bottom Detail Dock) ==================== */
+        <div
+          data-testid="mobile-portrait-layout"
+          className="flex-1 flex flex-col border border-[#5A606D] bg-[#0E1014] overflow-hidden relative"
         >
-          {/* Top Clock Box (Isolated memoized component so 1s ticks never re-render the map or panels) */}
-          <LiveClockBox />
-
-          {/* Left Column Mode Header: Switches to Earthquake History ONLY when effectiveScene === 'earthquake' */}
-          <div
-            data-testid="left-panel-mode-header"
-            className={`px-3 py-1.5 border-b border-[#2B303C] text-xs font-bold flex items-center justify-between shrink-0 ${
-              effectiveScene === 'earthquake'
-                ? 'bg-red-950/80 text-red-200'
-                : 'bg-[#171A21] text-neutral-300'
-            }`}
+          {/* 1. TOP HEADER BAR (Clock, Patrol Controls, Settings & Scene Switcher) */}
+          <header
+            aria-label="モバイルヘッダーおよび設定操作バー"
+            data-testid="mobile-top-header"
+            className="bg-[#111318] border-b border-[#5A606D] shrink-0 z-30 flex flex-col"
           >
-            {effectiveScene === 'earthquake' ? (
-              <>
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="truncate">地震履歴（震源・震度一覧）</span>
-                  {pinnedEarthquakeId && isLoopPaused && (
-                    <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded shrink-0">
-                      固定表示中
-                    </span>
-                  )}
-                </div>
-                {pinnedEarthquakeId && isLoopPaused ? (
-                  <button
-                    type="button"
-                    onClick={handleResumePatrol}
-                    className="font-mono text-[10px] font-bold bg-red-800/90 hover:bg-red-700 text-white px-2 py-0.5 rounded cursor-pointer transition-colors shadow-xs shrink-0"
-                    title="自動巡回を再開して最新の地震に戻す"
-                  >
-                    巡回再開 ▶
-                  </button>
-                ) : (
-                  <span className="font-mono text-[11px] text-amber-300 shrink-0">
-                    {data.earthquakes.length}件取得
-                  </span>
-                )}
-              </>
-            ) : (
-              <>
-                <span>気象庁防災XML 受信タイムライン</span>
-                <span className="font-mono text-[11px] text-cyan-300">
-                  {data.xmlEntries.length}件
-                </span>
-              </>
-            )}
-          </div>
+            {/* Row 1A: Live Clock + Patrol Controls + Layout Switch + Settings */}
+            <div className="px-2 py-1.5 flex items-center justify-between gap-1.5 border-b border-[#252A36]">
+              <LiveClockBox compact />
 
-          {/* Middle List: Earthquake History when effectiveScene === 'earthquake', otherwise XML Feed Timeline */}
-          {effectiveScene === 'earthquake' ? (
-            <div
-              aria-label="地震履歴一覧"
-              data-testid="left-earthquake-history-list"
-              className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
-            >
-              {sortedEarthquakes.map((eq) => {
-                const isSelected = selectedEarthquake.id === eq.id;
-                const isPinned =
-                  isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
-                const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
-                return (
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  data-testid="mobile-patrol-toggle-btn"
+                  onClick={() => {
+                    if (isLoopPaused) {
+                      handleResumePatrol();
+                    } else {
+                      setIsLoopPaused(true);
+                    }
+                  }}
+                  className={`px-2 py-1 text-[11px] font-bold border transition-colors cursor-pointer whitespace-nowrap ${
+                    isLoopPaused
+                      ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                      : 'bg-[#181C24] border-neutral-700 text-neutral-200 hover:bg-neutral-800'
+                  }`}
+                >
+                  {isLoopPaused ? '▶ 再開' : '⏸ 巡回中'}
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="mobile-next-scene-btn"
+                  onClick={advanceScene}
+                  className="px-2 py-1 text-[11px] font-bold bg-[#181C24] border border-neutral-700 text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  次画面 ⏭
+                </button>
+
+                {!isMobilePortrait && (
                   <button
-                    key={eq.id}
                     type="button"
-                    onClick={() => handleSelectEarthquake(eq)}
-                    className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer block ${
-                      isSelected
-                        ? 'bg-[#251A22] border-l-2 border-red-500'
-                        : 'hover:bg-[#181B22]'
-                    }`}
+                    data-testid="switch-to-desktop-layout-btn"
+                    onClick={() => setMobileLayoutOverride('desktop')}
+                    className="px-2 py-1 text-[11px] font-bold bg-[#181C24] border border-neutral-600 text-neutral-300 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+                    title="PC横画面レイアウトへ戻す"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[11px] font-mono text-neutral-400">
-                          {eq.occurrenceTime.replace(' 頃発生', '')}
-                        </span>
-                        {isPinned && (
-                          <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded">
-                            固定中
+                    🖥 PC表示
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  data-testid="open-settings-modal-btn"
+                  onClick={() => {
+                    setModalInitialTab('settings');
+                    setIsXmlModalOpen(true);
+                  }}
+                  className="px-2.5 py-1 text-[11px] font-bold bg-[#181C24] border border-cyan-600/80 text-cyan-300 hover:bg-neutral-800 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  ⚙ 設定
+                </button>
+              </div>
+            </div>
+
+            {/* Row 1B: Active Scene Title + Horizontal Scrollable Scene Tabs */}
+            <div className="px-2.5 py-1.5 bg-[#14171F] flex flex-col gap-1.5">
+              <div className="flex items-baseline justify-between gap-2 min-w-0">
+                <h1
+                  key={effectiveSceneTitle}
+                  className="text-[17px] font-extrabold tracking-tight text-white leading-snug truncate animate-title-swap"
+                >
+                  {effectiveSceneTitle}
+                </h1>
+                <span className="text-[10px] font-mono text-neutral-300 shrink-0 whitespace-nowrap">
+                  {fullUpdateDateText}
+                </span>
+              </div>
+
+              <nav
+                aria-label="表示シーン切替"
+                className="flex items-center gap-1 overflow-x-auto no-scrollbar pb-0.5"
+              >
+                {SCENE_LIST.filter(
+                  (s) => !s.isInterruptOnly || s.id === effectiveScene
+                ).map((sc) => {
+                  const isCurrent = effectiveScene === sc.id;
+                  return (
+                    <button
+                      key={sc.id}
+                      type="button"
+                      data-testid={`scene-tab-${sc.id}`}
+                      onClick={() => handleSelectSceneManual(sc.id)}
+                      className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer shrink-0 whitespace-nowrap ${
+                        isCurrent
+                          ? 'bg-white text-black border-white shadow-xs'
+                          : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
+                      }`}
+                    >
+                      {sc.shortLabel}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+          </header>
+
+          {/* 2. UPPER BROADCAST FEED BAR (Placed directly below the Top Header as requested: "上にFEEDを表示してその上にヘッダーとして設定とかを表示する") */}
+          <section
+            aria-label="気象防災ライブフィード"
+            data-testid="mobile-top-feed-bar"
+            className="h-[58px] shrink-0 border-b-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden z-20 px-2.5 py-1"
+          >
+            <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
+              {/* Row 1: Feed Headline Bar */}
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span
+                  className="w-1.5 h-3.5 rounded-xs shrink-0"
+                  style={{ backgroundColor: sceneFeed.accentColor }}
+                />
+                <span className="text-[11px] font-black text-neutral-100 tracking-wider truncate">
+                  {sceneFeed.title}
+                </span>
+                <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[10px] text-neutral-300">
+                  <span>{sceneFeed.timeLabel}</span>
+                  <span className="px-1 py-0.2 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[10px] font-sans font-bold">
+                    気象庁発表
+                  </span>
+                </div>
+              </div>
+
+              {/* Row 2: Continuous Scrolling Ticker */}
+              <div
+                data-testid="xml-ticker-scroll-container"
+                className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
+              >
+                <div ref={tickerTrackRef} className="ticker-track">
+                  <div
+                    ref={tickerFirstCopyRef}
+                    className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
+                  >
+                    {sceneFeed.items.map((item, idx) => (
+                      <span
+                        key={`mobile-feed-copy1-${idx}`}
+                        className="inline-flex items-center gap-2 shrink-0"
+                      >
+                        {item.prefix && (
+                          <span
+                            className="font-extrabold"
+                            style={{ color: sceneFeed.accentColor }}
+                          >
+                            {item.prefix}
                           </span>
                         )}
-                      </div>
-                      <span
-                        className={`px-1.5 py-0.5 text-[11px] font-mono font-extrabold ${scaleStyle.bg} ${scaleStyle.text}`}
-                      >
-                        {eq.maxScaleCode >= 10
-                          ? `最大震度${eq.maxScaleLabel}`
-                          : '震度調査中'}
+                        <span className="text-neutral-100">{item.text}</span>
+                        <span
+                          aria-hidden="true"
+                          className="text-neutral-600 ml-2 font-normal"
+                        >
+                          ｜
+                        </span>
                       </span>
-                    </div>
-                    <div className="text-[14px] font-extrabold text-white mt-1 leading-snug flex items-center justify-between gap-1">
-                      <span>{eq.hypocenterName}</span>
-                      {eq.isConfirmed === false && (
-                        <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.5 rounded-xs shrink-0">
-                          続報待機中
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center justify-between text-xs font-mono text-neutral-300 mt-1">
-                      {eq.hypocenterUnknown ? (
-                        <span className="text-amber-300">
-                          {eq.issueTypeLabel || '震度速報'}（震源調査中）
-                        </span>
-                      ) : (
-                        <>
-                          <span>M{eq.magnitude.toFixed(1)}</span>
-                          <span>深さ約{eq.depthKm}km</span>
-                        </>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <div
-              aria-label="気象庁XML電文タイムライン"
-              data-testid="left-xml-timeline-list"
-              className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
-            >
-              {data.xmlEntries.map((entry) => {
-                const isSelected = selectedXmlEntry?.id === entry.id;
-                return (
-                  <button
-                    key={entry.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedXmlEntry(entry);
-                      setModalInitialTab('xml');
-                      setIsXmlModalOpen(true);
-                    }}
-                    className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer block ${
-                      isSelected
-                        ? 'bg-[#1D222B] border-l-2 border-amber-400'
-                        : 'hover:bg-[#181B22]'
-                    }`}
+                    ))}
+                  </div>
+                  <div
+                    aria-hidden="true"
+                    className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
                   >
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-xs font-mono text-neutral-400 shrink-0">
-                        {formatTimeHm(entry.updated)}
+                    {sceneFeed.items.map((item, idx) => (
+                      <span
+                        key={`mobile-feed-copy2-${idx}`}
+                        className="inline-flex items-center gap-2 shrink-0"
+                      >
+                        {item.prefix && (
+                          <span
+                            className="font-extrabold"
+                            style={{ color: sceneFeed.accentColor }}
+                          >
+                            {item.prefix}
+                          </span>
+                        )}
+                        <span className="text-neutral-100">{item.text}</span>
+                        <span
+                          aria-hidden="true"
+                          className="text-neutral-600 ml-2 font-normal"
+                        >
+                          ｜
+                        </span>
                       </span>
-                      <span className="text-[13px] font-bold text-white leading-snug">
-                        {entry.title}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-neutral-300 leading-relaxed mt-1 break-words">
-                      {entry.content}
-                    </div>
-                  </button>
-                );
-              })}
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
-          )}
+          </section>
 
-          {/* Compact Bottom-Left Control Bar (Pause/Resume, Next Scene, and Settings Popup Button) */}
-          <div className="border-t border-[#5A606D] bg-[#0D0F13] p-2 shrink-0 flex items-center justify-between gap-1.5 text-[11px]">
-            <button
-              type="button"
-              onClick={() => {
-                if (isLoopPaused) {
-                  handleResumePatrol();
-                } else {
-                  setIsLoopPaused(true);
-                }
-              }}
-              className={`flex-1 px-2 py-1.5 font-bold border transition-colors text-center cursor-pointer ${
-                isLoopPaused
-                  ? 'bg-amber-500/25 border-amber-400 text-amber-200'
-                  : 'bg-[#181C24] border-neutral-700 text-neutral-200 hover:bg-neutral-800'
-              }`}
-            >
-              {isLoopPaused ? '▶ 巡回再開' : '⏸ 巡回中'}
-            </button>
-
-            <button
-              type="button"
-              onClick={advanceScene}
-              className="px-2.5 py-1.5 bg-[#181C24] border border-neutral-700 text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer shrink-0"
-            >
-              次画面 ⏭
-            </button>
-
-            <button
-              type="button"
-              data-testid="open-settings-modal-btn"
-              onClick={() => {
-                setModalInitialTab('settings');
-                setIsXmlModalOpen(true);
-              }}
-              className="px-2.5 py-1.5 font-bold bg-[#181C24] border border-cyan-600/80 text-cyan-300 hover:bg-neutral-800 transition-colors cursor-pointer shrink-0"
-            >
-              ⚙ 設定
-            </button>
-          </div>
-        </aside>
-
-        {/* ==================== RIGHT MAIN AREA (Full-Screen Map + Slim Bottom XML Feed Ticker) ==================== */}
-        <div className="flex-1 flex flex-col min-w-0 min-h-0">
-          {/* Upper Map Stage */}
-          <div className="flex-1 relative min-h-0">
-            {/* Full-Bleed Map */}
+          {/* 3. INTERACTIVE CENTER MAP STAGE */}
+          <div
+            data-testid="mobile-map-stage"
+            className="flex-1 relative min-h-[200px] overflow-hidden"
+          >
             <MonitorMap
               activeScene={activeScene}
               activeRegionConfig={activeRegionConfig}
@@ -1457,169 +1516,641 @@ export default function App() {
               onViewportChange={setMapViewport}
               interruptKind={interruptKind}
               isLoopPaused={isLoopPaused}
-              isRightPanelHidden={isRightPanelHidden}
+              isRightPanelHidden={true}
+              isMobilePortrait={true}
               eewDisplayMode={eewDisplayMode}
               onChangeEewDisplayMode={setEewDisplayMode}
               onSceneComplete={advanceScene}
             />
+          </div>
 
-            {/* Floating Top-Left Scene Title Box (Matches NERV防災ライブ `全国の気象警報・注意報`) */}
-            <div className="absolute top-3 left-3 z-[400] bg-[#111318]/94 border border-[#686E7A] px-4 py-2.5 pointer-events-auto animate-startup-top">
-              <h1
-                key={effectiveSceneTitle}
-                className="text-[28px] font-extrabold tracking-tight text-white leading-none animate-title-swap"
-              >
-                {effectiveSceneTitle}
-              </h1>
-              <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-neutral-200">
-                <span className="font-mono font-semibold text-neutral-100">
-                  {fullUpdateDateText}
-                </span>
-                <span aria-hidden="true" className="text-neutral-600">
-                  |
-                </span>
-                {/* Quick Scene Switch Tabs (Includes earthquake in normal loop) */}
-                <nav
-                  aria-label="表示シーン切替"
-                  className="flex items-center gap-1"
+          {/* 4. BOTTOM TABBED DETAIL & HISTORY DOCK */}
+          <section
+            aria-label="モバイル下部詳細および履歴ドック"
+            data-testid="mobile-bottom-dock"
+            className={`shrink-0 border-t-2 border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden transition-all duration-300 z-20 ${
+              isMobileDockExpanded ? 'h-[48%]' : 'h-[31%] min-h-[175px]'
+            }`}
+          >
+            {/* Dock Tab Switcher Header */}
+            <div className="px-2 py-1 bg-[#161922] border-b border-[#2B303C] flex items-center justify-between gap-1 shrink-0">
+              <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                <button
+                  type="button"
+                  data-testid="mobile-dock-tab-detail"
+                  onClick={() => setMobileBottomTab('detail')}
+                  className={`px-2.5 py-1 text-[11px] font-bold border rounded-xs transition-colors cursor-pointer whitespace-nowrap ${
+                    mobileBottomTab === 'detail'
+                      ? 'bg-cyan-500/25 border-cyan-400 text-white'
+                      : 'bg-[#111318] border-neutral-700 text-neutral-300 hover:text-white'
+                  }`}
                 >
-                  {SCENE_LIST.filter(
-                    (s) => !s.isInterruptOnly || s.id === effectiveScene
-                  ).map((sc) => {
-                    const isCurrent = effectiveScene === sc.id;
-                    return (
-                      <button
-                        key={sc.id}
-                        type="button"
-                        onClick={() => handleSelectSceneManual(sc.id)}
-                        className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer ${
-                          isCurrent
-                            ? 'bg-white text-black border-white'
-                            : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
-                        }`}
-                      >
-                        {sc.shortLabel}
-                      </button>
-                    );
-                  })}
-                </nav>
+                  現在の詳細
+                </button>
+                <button
+                  type="button"
+                  data-testid="mobile-dock-tab-earthquake"
+                  onClick={() => setMobileBottomTab('earthquake')}
+                  className={`px-2.5 py-1 text-[11px] font-bold border rounded-xs transition-colors cursor-pointer whitespace-nowrap ${
+                    mobileBottomTab === 'earthquake'
+                      ? 'bg-red-500/25 border-red-400 text-white'
+                      : 'bg-[#111318] border-neutral-700 text-neutral-300 hover:text-white'
+                  }`}
+                >
+                  地震履歴 ({data.earthquakes.length})
+                </button>
+                <button
+                  type="button"
+                  data-testid="mobile-dock-tab-xml"
+                  onClick={() => setMobileBottomTab('xml')}
+                  className={`px-2.5 py-1 text-[11px] font-bold border rounded-xs transition-colors cursor-pointer whitespace-nowrap ${
+                    mobileBottomTab === 'xml'
+                      ? 'bg-amber-500/25 border-amber-400 text-white'
+                      : 'bg-[#111318] border-neutral-700 text-neutral-300 hover:text-white'
+                  }`}
+                >
+                  XML電文 ({data.xmlEntries.length})
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0">
+                {pinnedEarthquakeId && isLoopPaused && (
+                  <button
+                    type="button"
+                    onClick={handleResumePatrol}
+                    className="font-mono text-[10px] font-bold bg-red-800/90 hover:bg-red-700 text-white px-2 py-0.5 rounded cursor-pointer transition-colors"
+                  >
+                    固定解除 ▶
+                  </button>
+                )}
+                <button
+                  type="button"
+                  data-testid="mobile-dock-expand-btn"
+                  onClick={() => setIsMobileDockExpanded((v) => !v)}
+                  className="px-2 py-0.5 text-[10px] font-mono font-bold bg-[#1C2029] border border-neutral-700 text-neutral-300 hover:text-white rounded-xs cursor-pointer"
+                >
+                  {isMobileDockExpanded ? '▼ 標準' : '▲ 拡大'}
+                </button>
               </div>
             </div>
 
-            {/* Floating Right-Side Slim Regional Strip (Slides smoothly off-screen for 'forecast' and 'radar' scenes) */}
+            {/* Dock Content Body */}
+            <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+              {mobileBottomTab === 'detail' ? (
+                <div className="flex-1 min-h-0 p-1.5 overflow-hidden">
+                  <SceneDetailPanel
+                    activeScene={activeScene}
+                    activeRegionConfig={activeRegionConfig}
+                    activeWarningDivision={activeWarningDivision}
+                    isFinalWarningNational={isFinalWarningNational}
+                    mapViewport={mapViewport}
+                    data={data}
+                    selectedEarthquake={selectedEarthquake}
+                    selectedTyphoon={selectedTyphoon}
+                    typhoonPatrolStep={typhoonPatrolStep}
+                    activeVolcano={activeVolcano}
+                    activeEew={activeEew}
+                    activeTsunamiForecast={data.tsunamiForecast}
+                    isTsunamiDemo={isTsunamiDemo}
+                    amedasMetric={amedasMetric}
+                    onChangeAmedasMetric={setAmedasMetric}
+                    forecastViewMode={forecastViewMode}
+                    onChangeForecastViewMode={handleChangeForecastViewMode}
+                    forecast3hIndex={forecast3hIndex}
+                    onChangeForecast3hIndex={setForecast3hIndex}
+                    onSelectEarthquake={handleSelectEarthquake}
+                    onSelectTyphoon={handleSelectTyphoonFromPanel}
+                    onReturnTyphoonOverview={handleReturnTyphoonOverview}
+                    interruptKind={interruptKind}
+                    onDismissInterrupt={handleResumePatrol}
+                    isLoopPaused={isLoopPaused}
+                    loopIntervalSec={loopIntervalSec}
+                    eewDisplayMode={eewDisplayMode}
+                    onChangeEewDisplayMode={setEewDisplayMode}
+                    onSceneComplete={advanceScene}
+                    isMobilePortrait={true}
+                  />
+                </div>
+              ) : mobileBottomTab === 'earthquake' ? (
+                <div
+                  aria-label="地震履歴一覧"
+                  data-testid="left-earthquake-history-list"
+                  className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
+                >
+                  {sortedEarthquakes.map((eq) => {
+                    const isSelected = selectedEarthquake.id === eq.id;
+                    const isPinned =
+                      isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
+                    const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
+                    return (
+                      <button
+                        key={eq.id}
+                        type="button"
+                        onClick={() => handleSelectEarthquake(eq)}
+                        className={`w-full text-left px-3 py-2 transition-colors cursor-pointer block ${
+                          isSelected
+                            ? 'bg-[#251A22] border-l-2 border-red-500'
+                            : 'hover:bg-[#181B22]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[11px] font-mono text-neutral-400">
+                              {eq.occurrenceTime.replace(' 頃発生', '')}
+                            </span>
+                            {isPinned && (
+                              <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded">
+                                固定中
+                              </span>
+                            )}
+                          </div>
+                          <span
+                            className={`px-1.5 py-0.5 text-[11px] font-mono font-extrabold ${scaleStyle.bg} ${scaleStyle.text}`}
+                          >
+                            {eq.maxScaleCode >= 10
+                              ? `最大震度${eq.maxScaleLabel}`
+                              : '震度調査中'}
+                          </span>
+                        </div>
+                        <div className="text-[13px] font-extrabold text-white mt-0.5 leading-snug flex items-center justify-between gap-2">
+                          <span>{eq.hypocenterName}</span>
+                          <span className="text-[11px] font-mono font-normal text-neutral-300 shrink-0">
+                            {eq.hypocenterUnknown
+                              ? `${eq.issueTypeLabel || '震度速報'}`
+                              : `M${eq.magnitude.toFixed(1)} / 深さ約${eq.depthKm}km`}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div
+                  aria-label="気象庁XML電文タイムライン"
+                  data-testid="left-xml-timeline-list"
+                  className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
+                >
+                  {data.xmlEntries.map((entry) => {
+                    const isSelected = selectedXmlEntry?.id === entry.id;
+                    return (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedXmlEntry(entry);
+                          setModalInitialTab('xml');
+                          setIsXmlModalOpen(true);
+                        }}
+                        className={`w-full text-left px-3 py-2 transition-colors cursor-pointer block ${
+                          isSelected
+                            ? 'bg-[#1D222B] border-l-2 border-amber-400'
+                            : 'hover:bg-[#181B22]'
+                        }`}
+                      >
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-xs font-mono text-neutral-400 shrink-0">
+                            {formatTimeHm(entry.updated)}
+                          </span>
+                          <span className="text-[13px] font-bold text-white leading-snug">
+                            {entry.title}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-neutral-300 leading-relaxed mt-0.5 break-words">
+                          {entry.content}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : (
+        /* ==================== DESKTOP BROADCAST LAYOUT (16:9 Landscape) ==================== */
+        <div
+          data-testid="desktop-broadcast-layout"
+          className="flex-1 flex border border-[#5A606D] bg-[#0E1014] overflow-hidden relative"
+        >
+          {/* ==================== LEFT COLUMN (Clock + Dynamic XML Timeline OR Earthquake History + Compact Settings) ==================== */}
+          <aside
+            aria-label="時計および履歴タイムライン"
+            className="w-[264px] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden animate-startup-left z-20"
+          >
+            {/* Top Clock Box (Isolated memoized component so 1s ticks never re-render the map or panels) */}
+            <LiveClockBox />
+
+            {/* Left Column Mode Header: Switches to Earthquake History ONLY when effectiveScene === 'earthquake' */}
             <div
-              className={`absolute top-3 right-3 bottom-3 z-[400] transition-all duration-500 ease-in-out ${
-                isRightPanelHidden
-                  ? 'translate-x-[calc(100%+24px)] opacity-0 pointer-events-none'
-                  : 'translate-x-0 opacity-100 pointer-events-none'
+              data-testid="left-panel-mode-header"
+              className={`px-3 py-1.5 border-b border-[#2B303C] text-xs font-bold flex items-center justify-between shrink-0 ${
+                effectiveScene === 'earthquake'
+                  ? 'bg-red-950/80 text-red-200'
+                  : 'bg-[#171A21] text-neutral-300'
               }`}
             >
-              <SceneDetailPanel
+              {effectiveScene === 'earthquake' ? (
+                <>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="truncate">地震履歴（震源・震度一覧）</span>
+                    {pinnedEarthquakeId && isLoopPaused && (
+                      <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded shrink-0">
+                        固定表示中
+                      </span>
+                    )}
+                  </div>
+                  {pinnedEarthquakeId && isLoopPaused ? (
+                    <button
+                      type="button"
+                      onClick={handleResumePatrol}
+                      className="font-mono text-[10px] font-bold bg-red-800/90 hover:bg-red-700 text-white px-2 py-0.5 rounded cursor-pointer transition-colors shadow-xs shrink-0"
+                      title="自動巡回を再開して最新の地震に戻す"
+                    >
+                      巡回再開 ▶
+                    </button>
+                  ) : (
+                    <span className="font-mono text-[11px] text-amber-300 shrink-0">
+                      {data.earthquakes.length}件取得
+                    </span>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span>気象庁防災XML 受信タイムライン</span>
+                  <span className="font-mono text-[11px] text-cyan-300">
+                    {data.xmlEntries.length}件
+                  </span>
+                </>
+              )}
+            </div>
+
+            {/* Middle List: Earthquake History when effectiveScene === 'earthquake', otherwise XML Feed Timeline */}
+            {effectiveScene === 'earthquake' ? (
+              <div
+                aria-label="地震履歴一覧"
+                data-testid="left-earthquake-history-list"
+                className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
+              >
+                {sortedEarthquakes.map((eq) => {
+                  const isSelected = selectedEarthquake.id === eq.id;
+                  const isPinned =
+                    isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
+                  const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
+                  return (
+                    <button
+                      key={eq.id}
+                      type="button"
+                      onClick={() => handleSelectEarthquake(eq)}
+                      className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer block ${
+                        isSelected
+                          ? 'bg-[#251A22] border-l-2 border-red-500'
+                          : 'hover:bg-[#181B22]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] font-mono text-neutral-400">
+                            {eq.occurrenceTime.replace(' 頃発生', '')}
+                          </span>
+                          {isPinned && (
+                            <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded">
+                              固定中
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className={`px-1.5 py-0.5 text-[11px] font-mono font-extrabold ${scaleStyle.bg} ${scaleStyle.text}`}
+                        >
+                          {eq.maxScaleCode >= 10
+                            ? `最大震度${eq.maxScaleLabel}`
+                            : '震度調査中'}
+                        </span>
+                      </div>
+                      <div className="text-[14px] font-extrabold text-white mt-1 leading-snug flex items-center justify-between gap-1">
+                        <span>{eq.hypocenterName}</span>
+                        {eq.isConfirmed === false && (
+                          <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.5 rounded-xs shrink-0">
+                            続報待機中
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between text-xs font-mono text-neutral-300 mt-1">
+                        {eq.hypocenterUnknown ? (
+                          <span className="text-amber-300">
+                            {eq.issueTypeLabel || '震度速報'}（震源調査中）
+                          </span>
+                        ) : (
+                          <>
+                            <span>M{eq.magnitude.toFixed(1)}</span>
+                            <span>深さ約{eq.depthKm}km</span>
+                          </>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div
+                aria-label="気象庁XML電文タイムライン"
+                data-testid="left-xml-timeline-list"
+                className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
+              >
+                {data.xmlEntries.map((entry) => {
+                  const isSelected = selectedXmlEntry?.id === entry.id;
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedXmlEntry(entry);
+                        setModalInitialTab('xml');
+                        setIsXmlModalOpen(true);
+                      }}
+                      className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer block ${
+                        isSelected
+                          ? 'bg-[#1D222B] border-l-2 border-amber-400'
+                          : 'hover:bg-[#181B22]'
+                      }`}
+                    >
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-xs font-mono text-neutral-400 shrink-0">
+                          {formatTimeHm(entry.updated)}
+                        </span>
+                        <span className="text-[13px] font-bold text-white leading-snug">
+                          {entry.title}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-neutral-300 leading-relaxed mt-1 break-words">
+                        {entry.content}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Compact Bottom-Left Control Bar (Pause/Resume, Next Scene, Mobile Preview, and Settings Popup Button) */}
+            <div className="border-t border-[#5A606D] bg-[#0D0F13] px-1.5 py-1.5 shrink-0 grid grid-cols-4 gap-1 text-[11px]">
+              <button
+                type="button"
+                onClick={() => {
+                  if (isLoopPaused) {
+                    handleResumePatrol();
+                  } else {
+                    setIsLoopPaused(true);
+                  }
+                }}
+                className={`px-1 py-1.5 font-bold border transition-colors text-center cursor-pointer whitespace-nowrap ${
+                  isLoopPaused
+                    ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                    : 'bg-[#181C24] border-neutral-700 text-neutral-200 hover:bg-neutral-800'
+                }`}
+              >
+                {isLoopPaused ? '▶ 再開' : '⏸ 巡回中'}
+              </button>
+
+              <button
+                type="button"
+                onClick={advanceScene}
+                className="px-1 py-1.5 bg-[#181C24] border border-neutral-700 text-neutral-200 hover:bg-neutral-800 transition-colors text-center cursor-pointer whitespace-nowrap"
+              >
+                次画面 ⏭
+              </button>
+
+              <button
+                type="button"
+                data-testid="switch-to-mobile-layout-btn"
+                onClick={() => setMobileLayoutOverride('mobile')}
+                className="px-1 py-1.5 font-bold bg-[#181C24] border border-neutral-700 text-neutral-300 hover:bg-neutral-800 hover:text-white transition-colors text-center cursor-pointer whitespace-nowrap"
+                title="スマホ用縦画面レイアウトに切り替え"
+              >
+                📱 縦画面
+              </button>
+
+              <button
+                type="button"
+                data-testid="open-settings-modal-btn"
+                onClick={() => {
+                  setModalInitialTab('settings');
+                  setIsXmlModalOpen(true);
+                }}
+                className="px-1 py-1.5 font-bold bg-[#181C24] border border-cyan-600/80 text-cyan-300 hover:bg-neutral-800 transition-colors text-center cursor-pointer whitespace-nowrap"
+              >
+                ⚙ 設定
+              </button>
+            </div>
+          </aside>
+
+          {/* ==================== RIGHT MAIN AREA (Full-Screen Map + Slim Bottom XML Feed Ticker) ==================== */}
+          <div className="flex-1 flex flex-col min-w-0 min-h-0">
+            {/* Upper Map Stage */}
+            <div className="flex-1 relative min-h-0">
+              {/* Full-Bleed Map */}
+              <MonitorMap
                 activeScene={activeScene}
                 activeRegionConfig={activeRegionConfig}
                 activeWarningDivision={activeWarningDivision}
-                isFinalWarningNational={isFinalWarningNational}
-                mapViewport={mapViewport}
+                activeEew={activeEew}
+                activeTsunamiForecast={data.tsunamiForecast}
                 data={data}
                 selectedEarthquake={selectedEarthquake}
                 selectedTyphoon={selectedTyphoon}
                 typhoonPatrolStep={typhoonPatrolStep}
                 activeVolcano={activeVolcano}
-                activeEew={activeEew}
-                activeTsunamiForecast={data.tsunamiForecast}
-                isTsunamiDemo={isTsunamiDemo}
                 amedasMetric={amedasMetric}
                 onChangeAmedasMetric={setAmedasMetric}
                 forecastViewMode={forecastViewMode}
                 onChangeForecastViewMode={handleChangeForecastViewMode}
                 forecast3hIndex={forecast3hIndex}
                 onChangeForecast3hIndex={setForecast3hIndex}
-                onSelectEarthquake={handleSelectEarthquake}
-                onSelectTyphoon={handleSelectTyphoonFromPanel}
-                onReturnTyphoonOverview={handleReturnTyphoonOverview}
+                onViewportChange={setMapViewport}
                 interruptKind={interruptKind}
-                onDismissInterrupt={handleResumePatrol}
                 isLoopPaused={isLoopPaused}
-                loopIntervalSec={loopIntervalSec}
+                isRightPanelHidden={isRightPanelHidden}
+                isMobilePortrait={false}
                 eewDisplayMode={eewDisplayMode}
                 onChangeEewDisplayMode={setEewDisplayMode}
                 onSceneComplete={advanceScene}
               />
-            </div>
-          </div>
 
-          {/* ==================== BROADCAST FEED FOOTER (Pattern B: Scene-Aware Large Ticker) ==================== */}
-          <footer
-            aria-label="気象防災ライブフィード"
-            className="h-[84px] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
-          >
-            {/* Main Feed Box: Two-Row Layout (Title Bar + Large Bold Ticker) */}
-            <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
-              {/* Row 1: Headline Bar */}
-              <div className="flex items-center gap-2 min-w-0">
-                <span
-                  className="w-1.5 h-4 rounded-xs shrink-0"
-                  style={{ backgroundColor: sceneFeed.accentColor }}
-                />
-                <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
-                  {sceneFeed.title}
-                </span>
-                <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300">
-                  <span>{sceneFeed.timeLabel}</span>
-                  <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold">
-                    気象庁発表
+              {/* Floating Top-Left Scene Title Box (Matches NERV防災ライブ `全国の気象警報・注意報`) */}
+              <div className="absolute top-3 left-3 z-[400] bg-[#111318]/94 border border-[#686E7A] px-4 py-2.5 pointer-events-auto animate-startup-top">
+                <h1
+                  key={effectiveSceneTitle}
+                  className="text-[28px] font-extrabold tracking-tight text-white leading-none animate-title-swap"
+                >
+                  {effectiveSceneTitle}
+                </h1>
+                <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-neutral-200">
+                  <span className="font-mono font-semibold text-neutral-100">
+                    {fullUpdateDateText}
                   </span>
+                  <span aria-hidden="true" className="text-neutral-600">
+                    |
+                  </span>
+                  {/* Quick Scene Switch Tabs (Includes earthquake in normal loop) */}
+                  <nav
+                    aria-label="表示シーン切替"
+                    className="flex items-center gap-1"
+                  >
+                    {SCENE_LIST.filter(
+                      (s) => !s.isInterruptOnly || s.id === effectiveScene
+                    ).map((sc) => {
+                      const isCurrent = effectiveScene === sc.id;
+                      return (
+                        <button
+                          key={sc.id}
+                          type="button"
+                          onClick={() => handleSelectSceneManual(sc.id)}
+                          className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer ${
+                            isCurrent
+                              ? 'bg-white text-black border-white'
+                              : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
+                          }`}
+                        >
+                          {sc.shortLabel}
+                        </button>
+                      );
+                    })}
+                  </nav>
                 </div>
               </div>
 
-              {/* Row 2: Large Continuous Ticker (Even Bigger Font) */}
+              {/* Floating Right-Side Slim Regional Strip (Slides smoothly off-screen for 'forecast' and 'radar' scenes) */}
               <div
-                data-testid="xml-ticker-scroll-container"
-                className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
+                className={`absolute top-3 right-3 bottom-3 z-[400] transition-all duration-500 ease-in-out ${
+                  isRightPanelHidden
+                    ? 'translate-x-[calc(100%+24px)] opacity-0 pointer-events-none'
+                    : 'translate-x-0 opacity-100 pointer-events-none'
+                }`}
               >
-                <div ref={tickerTrackRef} className="ticker-track">
-                  <div
-                    ref={tickerFirstCopyRef}
-                    className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
-                  >
-                    {sceneFeed.items.map((item, idx) => (
-                      <span key={`feed-item-copy1-${idx}`} className="inline-flex items-center gap-2.5 shrink-0">
-                        {item.prefix && (
-                          <span className="font-extrabold" style={{ color: sceneFeed.accentColor }}>
-                            {item.prefix}
-                          </span>
-                        )}
-                        <span className="text-neutral-100">{item.text}</span>
-                        <span aria-hidden="true" className="text-neutral-600 ml-4 font-normal">
-                          ｜
-                        </span>
-                      </span>
-                    ))}
+                <SceneDetailPanel
+                  activeScene={activeScene}
+                  activeRegionConfig={activeRegionConfig}
+                  activeWarningDivision={activeWarningDivision}
+                  isFinalWarningNational={isFinalWarningNational}
+                  mapViewport={mapViewport}
+                  data={data}
+                  selectedEarthquake={selectedEarthquake}
+                  selectedTyphoon={selectedTyphoon}
+                  typhoonPatrolStep={typhoonPatrolStep}
+                  activeVolcano={activeVolcano}
+                  activeEew={activeEew}
+                  activeTsunamiForecast={data.tsunamiForecast}
+                  isTsunamiDemo={isTsunamiDemo}
+                  amedasMetric={amedasMetric}
+                  onChangeAmedasMetric={setAmedasMetric}
+                  forecastViewMode={forecastViewMode}
+                  onChangeForecastViewMode={handleChangeForecastViewMode}
+                  forecast3hIndex={forecast3hIndex}
+                  onChangeForecast3hIndex={setForecast3hIndex}
+                  onSelectEarthquake={handleSelectEarthquake}
+                  onSelectTyphoon={handleSelectTyphoonFromPanel}
+                  onReturnTyphoonOverview={handleReturnTyphoonOverview}
+                  interruptKind={interruptKind}
+                  onDismissInterrupt={handleResumePatrol}
+                  isLoopPaused={isLoopPaused}
+                  loopIntervalSec={loopIntervalSec}
+                  eewDisplayMode={eewDisplayMode}
+                  onChangeEewDisplayMode={setEewDisplayMode}
+                  onSceneComplete={advanceScene}
+                  isMobilePortrait={false}
+                />
+              </div>
+            </div>
+
+            {/* ==================== BROADCAST FEED FOOTER (Pattern B: Scene-Aware Large Ticker) ==================== */}
+            <footer
+              aria-label="気象防災ライブフィード"
+              className="h-[84px] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
+            >
+              {/* Main Feed Box: Two-Row Layout (Title Bar + Large Bold Ticker) */}
+              <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
+                {/* Row 1: Headline Bar */}
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className="w-1.5 h-4 rounded-xs shrink-0"
+                    style={{ backgroundColor: sceneFeed.accentColor }}
+                  />
+                  <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
+                    {sceneFeed.title}
+                  </span>
+                  <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300">
+                    <span>{sceneFeed.timeLabel}</span>
+                    <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold">
+                      気象庁発表
+                    </span>
                   </div>
-                  <div
-                    aria-hidden="true"
-                    className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
-                  >
-                    {sceneFeed.items.map((item, idx) => (
-                      <span key={`feed-item-copy2-${idx}`} className="inline-flex items-center gap-2.5 shrink-0">
-                        {item.prefix && (
-                          <span className="font-extrabold" style={{ color: sceneFeed.accentColor }}>
-                            {item.prefix}
+                </div>
+
+                {/* Row 2: Large Continuous Ticker (Even Bigger Font) */}
+                <div
+                  data-testid="xml-ticker-scroll-container"
+                  className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
+                >
+                  <div ref={tickerTrackRef} className="ticker-track">
+                    <div
+                      ref={tickerFirstCopyRef}
+                      className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
+                    >
+                      {sceneFeed.items.map((item, idx) => (
+                        <span
+                          key={`feed-item-copy1-${idx}`}
+                          className="inline-flex items-center gap-2.5 shrink-0"
+                        >
+                          {item.prefix && (
+                            <span
+                              className="font-extrabold"
+                              style={{ color: sceneFeed.accentColor }}
+                            >
+                              {item.prefix}
+                            </span>
+                          )}
+                          <span className="text-neutral-100">{item.text}</span>
+                          <span
+                            aria-hidden="true"
+                            className="text-neutral-600 ml-4 font-normal"
+                          >
+                            ｜
                           </span>
-                        )}
-                        <span className="text-neutral-100">{item.text}</span>
-                        <span aria-hidden="true" className="text-neutral-600 ml-4 font-normal">
-                          ｜
                         </span>
-                      </span>
-                    ))}
+                      ))}
+                    </div>
+                    <div
+                      aria-hidden="true"
+                      className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
+                    >
+                      {sceneFeed.items.map((item, idx) => (
+                        <span
+                          key={`feed-item-copy2-${idx}`}
+                          className="inline-flex items-center gap-2.5 shrink-0"
+                        >
+                          {item.prefix && (
+                            <span
+                              className="font-extrabold"
+                              style={{ color: sceneFeed.accentColor }}
+                            >
+                              {item.prefix}
+                            </span>
+                          )}
+                          <span className="text-neutral-100">{item.text}</span>
+                          <span
+                            aria-hidden="true"
+                            className="text-neutral-600 ml-4 font-normal"
+                          >
+                            ｜
+                          </span>
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          </footer>
+            </footer>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ==================== XML INSPECTOR & SETTINGS POPUP MODAL ==================== */}
       <XmlInspectorModal
