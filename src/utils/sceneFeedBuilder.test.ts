@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSceneFeed } from './sceneFeedBuilder';
+import { buildSceneFeed, buildBottomFlipFeed } from './sceneFeedBuilder';
 import {
   INITIAL_EARTHQUAKES,
   INITIAL_FORECASTS,
@@ -165,4 +165,101 @@ test('buildSceneFeed: radar scene produces meteorological commentary only', () =
   // Verify purely meteorological commentaries, no Doppler/lightning counter boilerplate
   assert.ok(!feed.items.some((i) => i.text.includes('ドップラーレーダー')));
   assert.ok(!feed.items.some((i) => i.text.includes('落雷検知実況')));
+});
+
+
+test('buildBottomFlipFeed: returns null for normal radar scene without active tsunami', () => {
+  const result = buildBottomFlipFeed({
+    effectiveScene: 'radar',
+    data: mockBundle,
+    activeEew: null,
+  });
+  assert.equal(result, null);
+});
+
+test('buildBottomFlipFeed: produces flip cards for earthquake scene (pref, hypocenter, tsunami status, stations)', () => {
+  const result = buildBottomFlipFeed({
+    effectiveScene: 'earthquake',
+    data: mockBundle,
+    activeEew: null,
+    selectedEarthquake: mockBundle.earthquakes[0],
+  });
+
+  assert.ok(result);
+  assert.equal(result.isFlipMode, true);
+  assert.ok(result.cards.length >= 3);
+  // Card 1: 茨城県で震度4を観測
+  assert.ok(result.cards[0].mainText.includes('で震度4を観測'));
+  // Card 2: 震源: 茨城県沖　最大震度4　M4.8
+  assert.ok(result.cards[1].mainText.includes('震源: 茨城県沖'));
+  assert.ok(result.cards[1].mainText.includes('最大震度4'));
+  // Card 3: 津波の心配なし
+  assert.ok(result.cards[2].mainText.includes('津波の心配なし'));
+});
+
+test('buildBottomFlipFeed: produces EEW flip cards during active EEW', () => {
+  const mockEew = {
+    id: 'eew-test-1',
+    eventId: 'ev-1',
+    serial: 4,
+    issueTime: '11:18:30',
+    originTime: '11:18:20',
+    hypocenterName: '愛知県西部',
+    lat: 35.1,
+    lon: 136.9,
+    depthKm: 10,
+    magnitude: 5.7,
+    isCancelled: false,
+    isTest: false,
+    isAssumedHypocenter: false,
+    maxScaleCode: 50,
+    maxScaleLabel: '5強',
+    areas: [{ pref: '愛知県', name: '愛知県西部', scaleFrom: 50, scaleTo: 50, kindCode: '11', arrivalTime: '11:18:40' }],
+    receivedAtMs: Date.now(),
+    isWarning: true,
+  };
+
+  const result = buildBottomFlipFeed({
+    effectiveScene: 'earthquake',
+    data: mockBundle,
+    activeEew: mockEew,
+  });
+
+  assert.ok(result);
+  assert.equal(result.isFlipMode, true);
+  assert.ok(result.cards.some((c) => c.mainText.includes('緊急地震速報(警報) 強い揺れに警戒')));
+  assert.ok(result.cards.some((c) => c.mainText.includes('予想最大震度5強 M5.7')));
+});
+
+test('buildBottomFlipFeed: tsunami warning prioritizes over radar scene', () => {
+  const tsunamiBundle = {
+    ...mockBundle,
+    tsunamiForecast: {
+      id: 'ts-test-warn',
+      issueTime: '11:20:00',
+      cancelled: false,
+      source: 'jma' as const,
+      areas: [
+        {
+          name: '愛知県外海',
+          grade: 'Warning' as const,
+          immediate: true,
+          firstHeightText: '直ちに到達',
+          maxHeightText: '3m',
+          maxHeightValue: 3,
+        },
+      ],
+    },
+  };
+
+  const result = buildBottomFlipFeed({
+    effectiveScene: 'radar',
+    data: tsunamiBundle,
+    activeEew: null,
+  });
+
+  assert.ok(result);
+  assert.equal(result.isFlipMode, true);
+  assert.ok(result.cards[0].mainText.includes('津波警報　安全な場所に避難'));
+  assert.ok(result.cards[1].mainText.includes('3mの津波を予想'));
 });

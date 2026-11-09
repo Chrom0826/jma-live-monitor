@@ -16,6 +16,8 @@ import {
 import {
   formatEewArrivalLabel,
   formatEewScaleRange,
+  getTsunamiAlertSeverity,
+  getTsunamiHighestGrade,
   isEewFinal,
   isEewStillActive,
   isEewWarning,
@@ -720,4 +722,435 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
     })),
     textKey: `default-${data.xmlEntries.length}-${data.lastXmlFetchTime}`,
   };
+}
+
+
+export interface BottomFlipCard {
+  id: string;
+  badge: string;
+  badgeBg: string;
+  mainText: string;
+  subText?: string;
+  accentColor: string;
+}
+
+export interface BottomFlipFeedResult {
+  isFlipMode: boolean;
+  cards: BottomFlipCard[];
+  headerTitle: string;
+  headerTime: string;
+  accentColor: string;
+}
+
+export interface BuildBottomFlipFeedOptions {
+  effectiveScene: SceneId;
+  data: MonitorDataBundle;
+  activeEew: EewReport | null;
+  selectedEarthquake?: EarthquakeReport | null;
+  pinnedEarthquakeId?: string | null;
+  currentTime?: string;
+}
+
+/**
+ * Builds vertical-flip broadcast telop cards for high-priority disaster updates:
+ * Priority 1: Tsunami Alert (MajorWarning, Warning, or Watch active - takes precedence over all scenes)
+ * Priority 2: EEW (緊急地震速報 警報・予報 観測中)
+ * Priority 3: Earthquake Scene (震度速報・震源・規模・津波情報が入電した実況)
+ * Priority 4: Tsunami Scene (全国の津波予報発表状況)
+ *
+ * Cards flip vertically (bottom-to-top) every ~3.5s without horizontal scrolling.
+ */
+export function buildBottomFlipFeed(
+  options: BuildBottomFlipFeedOptions
+): BottomFlipFeedResult | null {
+  const {
+    effectiveScene,
+    data,
+    activeEew,
+    selectedEarthquake,
+    pinnedEarthquakeId,
+    currentTime = '',
+  } = options;
+
+  const tsunamiSeverity = getTsunamiAlertSeverity(data.tsunamiForecast);
+  const isTsunamiAlertActive = tsunamiSeverity === 'warning_or_above';
+  const isEewActive = Boolean(activeEew && isEewStillActive(activeEew));
+
+  // Determine whether Flip Feed should be active:
+  // 1) When Tsunami Advisory or Warning is active (ALWAYS on regardless of scene!)
+  // 2) When EEW is active (in earthquake/eew or normal loop)
+  // 3) When viewing earthquake or tsunami scene
+  const shouldActivateFlip =
+    isTsunamiAlertActive ||
+    isEewActive ||
+    effectiveScene === 'earthquake' ||
+    effectiveScene === 'tsunami';
+
+  if (!shouldActivateFlip) {
+    return null;
+  }
+
+  const defaultTime =
+    data.lastXmlFetchTime || currentTime || '最新情報';
+
+  // ==================== PRIORITY 1: TSUNAMI ALERT ====================
+  // "もし津波注意報以上が発令された場合は下には常に津波についての情報を表示し、「津波警報　安全な場所に避難」や「愛知県沿岸で巨大な津波を予想」「愛知県沿岸で〇〇mを観測」などと表示して。これもスクロールしないで表示できるような長さに抑える。"
+  if (isTsunamiAlertActive && data.tsunamiForecast) {
+    const tf = data.tsunamiForecast;
+    const highestGrade = getTsunamiHighestGrade(tf);
+    const timeLabel = tf.issueTime || defaultTime;
+    const cards: BottomFlipCard[] = [];
+
+    // Card 1: Official Callout / 避難の呼びかけ (JMA / NHK standard disaster broadcast)
+    if (highestGrade === 'MajorWarning') {
+      cards.push({
+        id: 'tsunami-callout-major',
+        badge: '大津波警報',
+        badgeBg: 'bg-fuchsia-700 text-white animate-pulse',
+        mainText: '大津波警報　ただちに高台へ避難！',
+        subText: '命を守るため 今すぐ全力で逃げてください。沿岸部や川沿いから離れてください。',
+        accentColor: '#C026D3',
+      });
+    } else if (highestGrade === 'Warning') {
+      cards.push({
+        id: 'tsunami-callout-warn',
+        badge: '津波警報',
+        badgeBg: 'bg-red-600 text-white animate-pulse',
+        mainText: '津波警報　安全な場所に避難',
+        subText: '沿岸部や川沿いにいる方は 直ちに高台や避難ビルへ避難してください。',
+        accentColor: '#EF4444',
+      });
+    } else {
+      cards.push({
+        id: 'tsunami-callout-watch',
+        badge: '津波注意報',
+        badgeBg: 'bg-amber-500 text-slate-950 font-bold',
+        mainText: '津波注意報　海から上がって海岸から離れて',
+        subText: '海の中にいる人は直ちに海から上がり 海岸や河口付近から離れてください。',
+        accentColor: '#F59E0B',
+      });
+    }
+
+    // Card 2+: Expected Tsunami Heights by Area
+    const majorAreas = tf.areas.filter((a) => a.grade === 'MajorWarning');
+    const warningAreas = tf.areas.filter((a) => a.grade === 'Warning');
+    const watchAreas = tf.areas.filter((a) => a.grade === 'Watch');
+
+    if (majorAreas.length > 0) {
+      for (const a of majorAreas.slice(0, 2)) {
+        cards.push({
+          id: `tsunami-area-major-${a.name}`,
+          badge: '大津波警報',
+          badgeBg: 'bg-fuchsia-700 text-white',
+          mainText: `${a.name}沿岸で巨大な津波を予想`,
+          subText: `予想される高さ: 巨大（5m超〜10m超） 到達: ${a.firstHeightText || '直ちに到達'}`,
+          accentColor: '#C026D3',
+        });
+      }
+    }
+
+    if (warningAreas.length > 0) {
+      const names = warningAreas.slice(0, 3).map((a) => a.name).join('・');
+      const height = warningAreas[0]?.maxHeightText || '3m';
+      const arrival = warningAreas[0]?.firstHeightText || '直ちに到達';
+      cards.push({
+        id: 'tsunami-area-warn',
+        badge: '津波警報',
+        badgeBg: 'bg-red-600 text-white',
+        mainText: `${names}で${height}の津波を予想`,
+        subText: `予想される高さ: ${height} 到達予想: ${arrival}`,
+        accentColor: '#EF4444',
+      });
+    }
+
+    if (watchAreas.length > 0) {
+      const names = watchAreas.slice(0, 4).map((a) => a.name).join('・');
+      const height = watchAreas[0]?.maxHeightText || '1m';
+      cards.push({
+        id: 'tsunami-area-watch',
+        badge: '津波注意報',
+        badgeBg: 'bg-amber-500 text-slate-950 font-bold',
+        mainText: `${names}で${height}の津波を予想`,
+        subText: `予想される高さ: ${height} 海岸・川沿いから離れてください`,
+        accentColor: '#F59E0B',
+      });
+    }
+
+    // Observed Tsunami card from XML entries (if any mention "津波観測" or "mの津波を観測")
+    const obsEntry = data.xmlEntries.find(
+      (e) =>
+        e.title.includes('津波観測') ||
+        e.content.includes('津波を観測') ||
+        e.content.includes('mの津波')
+    );
+    if (obsEntry) {
+      const m = /([^\s、。]+?で[0-9.]+(?:m|ｍ)の津波を観測)/.exec(obsEntry.content);
+      const obsText = m ? m[1] : obsEntry.content.slice(0, 36);
+      cards.push({
+        id: 'tsunami-obs',
+        badge: '津波観測',
+        badgeBg: 'bg-sky-600 text-white font-bold',
+        mainText: obsText,
+        subText: '津波は繰り返し押し寄せます。警報解除まで海岸に近づかないでください。',
+        accentColor: '#0EA5E9',
+      });
+    }
+
+    return {
+      isFlipMode: true,
+      cards,
+      headerTitle:
+        highestGrade === 'MajorWarning'
+          ? '大津波警報 発表中'
+          : highestGrade === 'Warning'
+            ? '津波警報 発表中'
+            : '津波注意報 発表中',
+      headerTime: timeLabel,
+      accentColor:
+        highestGrade === 'MajorWarning'
+          ? '#C026D3'
+          : highestGrade === 'Warning'
+            ? '#EF4444'
+            : '#F59E0B',
+    };
+  }
+
+  // ==================== PRIORITY 2: ACTIVE EEW ====================
+  // "下のFeedには、「緊急地震速報(警報) 強い揺れに警戒」「予想最大震度5強 M5.7」などと観測中は表示し"
+  if (isEewActive && activeEew) {
+    const isWarn = isEewWarning(activeEew);
+    const isFin = isEewFinal(activeEew);
+    const accentColor = isWarn ? '#EF4444' : '#F59E0B';
+    const badgeLabel = isWarn ? '緊急地震速報（警報）' : '緊急地震速報（予報）';
+    const cards: BottomFlipCard[] = [];
+
+    // Card 1: 強い揺れに警戒
+    cards.push({
+      id: `eew-alert-${activeEew.serial}`,
+      badge: badgeLabel,
+      badgeBg: isWarn
+        ? 'bg-red-600 text-white animate-pulse'
+        : 'bg-amber-500 text-slate-950 font-bold',
+      mainText: `緊急地震速報(${isWarn ? '警報' : '予報'}) 強い揺れに警戒`,
+      subText: `第${activeEew.serial}報${isFin ? ' (最終報)' : ''} 倒れやすい家具から離れ 身の安全を確保`,
+      accentColor,
+    });
+
+    // Card 2: 予想最大震度 & 規模
+    const magStr =
+      activeEew.magnitude > 0 ? `M${activeEew.magnitude.toFixed(1)}` : 'M不明';
+    const depthStr =
+      activeEew.depthKm >= 0 ? `深さ約${activeEew.depthKm}km` : '深さ不明';
+    cards.push({
+      id: `eew-scale-${activeEew.serial}`,
+      badge: '予想震度・規模',
+      badgeBg: 'bg-yellow-500 text-slate-950 font-bold',
+      mainText: `予想最大震度${activeEew.maxScaleLabel || '不明'} ${magStr}`,
+      subText: `震源: ${activeEew.hypocenterName || '調査中'}　${depthStr}`,
+      accentColor: '#EAB308',
+    });
+
+    // Card 3: 強い揺れの予想地域 (if areas > 0)
+    if (activeEew.areas && activeEew.areas.length > 0) {
+      const areaNames = activeEew.areas.slice(0, 4).map((a) => `${a.pref} ${a.name}`);
+      cards.push({
+        id: `eew-areas-${activeEew.serial}`,
+        badge: '予想地域',
+        badgeBg: 'bg-neutral-800 text-neutral-200 border border-neutral-700',
+        mainText: `強い揺れの予想地域: ${areaNames.join('、')}${activeEew.areas.length > 4 ? ` ほか計${activeEew.areas.length}地域` : ''}`,
+        subText: '揺れが収まるまで安全な場所に身を潜めてください',
+        accentColor: '#EF4444',
+      });
+    }
+
+    // Card 4: 長周期地震動 (if LPGM >= 1)
+    if (activeEew.maxLpgmClass && activeEew.maxLpgmClass >= 1) {
+      cards.push({
+        id: `eew-lpgm-${activeEew.serial}`,
+        badge: '長周期地震動',
+        badgeBg: 'bg-orange-600 text-white font-bold',
+        mainText: `長周期地震動 最大予測階級${activeEew.maxLpgmLabel || activeEew.maxLpgmClass}`,
+        subText: '超高層ビル・集合住宅では大きく長い揺れに厳重に警戒してください',
+        accentColor: '#EA580C',
+      });
+    }
+
+    return {
+      isFlipMode: true,
+      cards,
+      headerTitle: `緊急地震速報（${isWarn ? '警報' : '予報'}） 第${activeEew.serial}報`,
+      headerTime: activeEew.originTime || activeEew.issueTime || defaultTime,
+      accentColor,
+    };
+  }
+
+  // ==================== PRIORITY 3: EARTHQUAKE SCENE ====================
+  // "実際に地震計等で観測したデータが入電した場合、「愛知県で震度5強を観測」「震源: 〇〇　最大震度〇〇　M〇〇」「津波の心配なし」などと表示。スクロールはしないで上のタイトルみたいにアニメーションで下から上に回転するようなイメージで。"
+  if (effectiveScene === 'earthquake') {
+    const targetQuake =
+      (pinnedEarthquakeId
+        ? data.earthquakes.find((e) => e.id === pinnedEarthquakeId)
+        : selectedEarthquake) || data.earthquakes[0];
+
+    if (!targetQuake) {
+      return null;
+    }
+
+    const cards: BottomFlipCard[] = [];
+
+    // 1. Max Intensity Prefecture(s) ("愛知県で震度5強を観測")
+    const maxStations = targetQuake.stations.filter(
+      (s) =>
+        s.scaleCode === targetQuake.maxScaleCode ||
+        (targetQuake.maxScaleLabel && s.scaleLabel === targetQuake.maxScaleLabel)
+    );
+    const distinctPrefs = Array.from(
+      new Set(maxStations.map((s) => s.prefecture).filter(Boolean))
+    );
+    let maxPrefText = '';
+    if (distinctPrefs.length === 1) {
+      maxPrefText = `${distinctPrefs[0]}で震度${targetQuake.maxScaleLabel}を観測`;
+    } else if (distinctPrefs.length === 2) {
+      maxPrefText = `${distinctPrefs[0]}、${distinctPrefs[1]}で震度${targetQuake.maxScaleLabel}を観測`;
+    } else if (distinctPrefs.length >= 3) {
+      maxPrefText = `${distinctPrefs[0]}、${distinctPrefs[1]}などで震度${targetQuake.maxScaleLabel}を観測`;
+    } else if (targetQuake.areaMaxScales && Object.keys(targetQuake.areaMaxScales).length > 0) {
+      const matchingAreas = Object.entries(targetQuake.areaMaxScales)
+        .filter(
+          ([, v]) =>
+            v.scaleCode === targetQuake.maxScaleCode ||
+            v.scaleLabel === targetQuake.maxScaleLabel
+        )
+        .map(([k, v]) => v.name || k);
+      if (matchingAreas.length > 0) {
+        maxPrefText = `${matchingAreas[0]}などで震度${targetQuake.maxScaleLabel}を観測`;
+      } else {
+        maxPrefText = `最大震度${targetQuake.maxScaleLabel}を観測`;
+      }
+    } else {
+      maxPrefText = targetQuake.hypocenterName
+        ? `${targetQuake.hypocenterName}周辺で震度${targetQuake.maxScaleLabel}を観測`
+        : `最大震度${targetQuake.maxScaleLabel}を観測`;
+    }
+
+    const maxScale = targetQuake.maxScaleCode || 0;
+    const maxScaleBadgeBg =
+      maxScale >= 50
+        ? 'bg-red-600 text-white'
+        : maxScale >= 40
+          ? 'bg-amber-500 text-slate-950 font-bold'
+          : 'bg-cyan-600 text-white font-bold';
+
+    cards.push({
+      id: `eq-card-max-${targetQuake.id}`,
+      badge: targetQuake.issueTypeLabel === '震度速報' ? '震度速報' : '最大震度',
+      badgeBg: maxScaleBadgeBg,
+      mainText: maxPrefText,
+      subText: `${targetQuake.occurrenceTime.replace(' 頃発生', '')}ころ 地震がありました`,
+      accentColor: maxScale >= 50 ? '#EF4444' : maxScale >= 40 ? '#F59E0B' : '#0EA5E9',
+    });
+
+    // 2. Hypocenter, Max Scale, Magnitude ("震源: 〇〇　最大震度〇〇　M〇〇")
+    const hypo =
+      targetQuake.hypocenterName ||
+      (targetQuake.hypocenterUnknown ? '調査中' : '震源情報');
+    const mag =
+      targetQuake.magnitude >= 0
+        ? `M${targetQuake.magnitude.toFixed(1)}`
+        : 'M不明';
+    const depth =
+      targetQuake.depthKm >= 0 ? `約${targetQuake.depthKm}km` : 'ごく浅い';
+
+    cards.push({
+      id: `eq-card-hypo-${targetQuake.id}`,
+      badge: '震源・規模',
+      badgeBg: 'bg-neutral-800 text-neutral-200 border border-neutral-700',
+      mainText: `震源: ${hypo}　最大震度${targetQuake.maxScaleLabel}　${mag}`,
+      subText: `震源の深さ: ${depth}`,
+      accentColor: '#38BDF8',
+    });
+
+    // 3. Tsunami Status ("津波の心配なし")
+    const tsunamiRaw = targetQuake.domesticTsunami || '';
+    let tsunamiMain = '津波の心配なし';
+    let tsunamiSub = 'この地震による津波の心配はありません。';
+    let tsunamiBg = 'bg-teal-700 text-white font-bold';
+
+    if (tsunamiRaw.includes('警報')) {
+      tsunamiMain = '津波警報発令中 直ちに高台へ避難！';
+      tsunamiSub = tsunamiRaw;
+      tsunamiBg = 'bg-red-600 text-white animate-pulse';
+    } else if (tsunamiRaw.includes('注意報')) {
+      tsunamiMain = '津波注意報発令中 海から離れて！';
+      tsunamiSub = tsunamiRaw;
+      tsunamiBg = 'bg-amber-500 text-slate-950 font-bold';
+    } else if (tsunamiRaw.includes('調査中') || tsunamiRaw.includes('Checking')) {
+      tsunamiMain = '津波の有無は調査中';
+      tsunamiSub = '津波の有無については気象庁で現在精査中です。';
+      tsunamiBg = 'bg-amber-600 text-white font-bold';
+    }
+
+    cards.push({
+      id: `eq-card-tsunami-${targetQuake.id}`,
+      badge: '津波情報',
+      badgeBg: tsunamiBg,
+      mainText: tsunamiMain,
+      subText: tsunamiSub,
+      accentColor: '#14B8A6',
+    });
+
+    // 4. Stations breakdown if available
+    if (targetQuake.stations && targetQuake.stations.length > 0) {
+      const topStations = targetQuake.stations
+        .filter((s) => s.scaleCode === targetQuake.maxScaleCode)
+        .slice(0, 4)
+        .map((s) => s.stationName);
+      if (topStations.length > 0) {
+        cards.push({
+          id: `eq-card-stations-${targetQuake.id}`,
+          badge: '各地の震度',
+          badgeBg: 'bg-neutral-800 text-neutral-200 border border-neutral-700',
+          mainText: `[震度${targetQuake.maxScaleLabel}] ${topStations.join('・')}${maxStations.length > 4 ? ` ほか計${maxStations.length}地点` : ''}`,
+          subText: `各地の震度 計${targetQuake.stations.length}観測点で観測`,
+          accentColor: '#94A3B8',
+        });
+      }
+    }
+
+    return {
+      isFlipMode: true,
+      cards,
+      headerTitle: `${targetQuake.issueTypeLabel || '震源・震度に関する情報'}（${targetQuake.hypocenterName} 最大震度${targetQuake.maxScaleLabel}）`,
+      headerTime:
+        targetQuake.occurrenceTime || targetQuake.issueTime || defaultTime,
+      accentColor:
+        maxScale >= 50
+          ? '#EF4444'
+          : maxScale >= 40
+            ? '#F59E0B'
+            : '#38BDF8',
+    };
+  }
+
+  // ==================== PRIORITY 4: TSUNAMI SCENE (no active alert) ====================
+  if (effectiveScene === 'tsunami') {
+    return {
+      isFlipMode: true,
+      cards: [
+        {
+          id: 'tsunami-none-card',
+          badge: '津波予報',
+          badgeBg: 'bg-teal-700 text-white font-bold',
+          mainText: '現在、大津波警報・津波警報・津波注意報は発表されていません',
+          subText: '日本沿岸で津波の心配はありません。',
+          accentColor: '#14B8A6',
+        },
+      ],
+      headerTitle: '全国の津波予報発表状況',
+      headerTime: defaultTime,
+      accentColor: '#14B8A6',
+    };
+  }
+
+  return null;
 }

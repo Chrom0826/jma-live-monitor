@@ -71,7 +71,10 @@ import {
   parseWolfxEew,
   shouldReplaceEew,
 } from './utils/eewTsunami';
-import { buildSceneFeed } from './utils/sceneFeedBuilder';
+import {
+  buildSceneFeed,
+  buildBottomFlipFeed,
+} from './utils/sceneFeedBuilder';
 
 const INITIAL_BUNDLE: MonitorDataBundle = {
   xmlEntries: [],
@@ -181,6 +184,129 @@ const LiveClockBox = memo(function LiveClockBox({
     </div>
   );
 });
+
+
+function formatTsunamiStatusBadge(domesticTsunami?: string) {
+  const text = domesticTsunami || '';
+  if (text.includes('警報')) {
+    return (
+      <span className="text-red-400 font-bold flex items-center gap-1">
+        <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
+        津波警報等 発表中
+      </span>
+    );
+  }
+  if (text.includes('注意報')) {
+    return (
+      <span className="text-amber-400 font-bold flex items-center gap-1">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+        津波注意報 発表中
+      </span>
+    );
+  }
+  if (text.includes('調査中') || text.includes('Checking')) {
+    return (
+      <span className="text-amber-300 font-bold flex items-center gap-1">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+        津波の有無は調査中
+      </span>
+    );
+  }
+  return <span className="text-neutral-400 font-normal">津波の心配なし</span>;
+}
+
+interface EarthquakeHistoryItemProps {
+  eq: EarthquakeReport;
+  isSelected: boolean;
+  isPinned: boolean;
+  isEewActive: boolean;
+  onSelect: (eq: EarthquakeReport) => void;
+}
+
+const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
+  eq,
+  isSelected,
+  isPinned,
+  isEewActive,
+  onSelect,
+}: EarthquakeHistoryItemProps) {
+    const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
+
+    return (
+      <button
+        key={eq.id}
+        type="button"
+        disabled={isEewActive}
+        onClick={() => onSelect(eq)}
+        className={`w-full text-left px-3 py-2.5 transition-colors block border-b border-[#242933] ${
+          isEewActive
+            ? 'opacity-60 cursor-not-allowed'
+            : isSelected
+              ? 'bg-[#251A22] border-l-4 border-l-red-500 shadow-inner'
+              : 'hover:bg-[#181B22] cursor-pointer'
+        }`}
+      >
+        {/* Top Row: Left has Time + Region (Hypocenter), Right has Big Max Intensity Box */}
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 text-[11px] font-mono text-neutral-400">
+              <span>{eq.occurrenceTime.replace(' 頃発生', '')}</span>
+              {isPinned && (
+                <span className="text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded-xs">
+                  固定中
+                </span>
+              )}
+              {eq.isConfirmed === false && (
+                <span className="text-[9px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.2 rounded-xs shrink-0">
+                  続報待機
+                </span>
+              )}
+            </div>
+            <div className="text-[15px] font-black text-white mt-0.5 leading-snug truncate">
+              {eq.hypocenterName ||
+                (eq.hypocenterUnknown ? '震源精査中' : '震源情報')}
+            </div>
+          </div>
+
+          {/* Big Max Intensity Box on Right */}
+          <div
+            className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
+          >
+            <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80">
+              最大震度
+            </span>
+            <span className="text-[23px] font-black leading-none mt-0.5 tracking-tight font-mono">
+              {eq.maxScaleCode >= 10 ? eq.maxScaleLabel : '-'}
+            </span>
+          </div>
+        </div>
+
+        {/* Middle Row: Magnitude and Depth */}
+        <div className="mt-1 flex items-center justify-between text-xs font-mono text-neutral-300">
+          {eq.hypocenterUnknown ? (
+            <span className="text-amber-300 text-[11px]">
+              {eq.issueTypeLabel || '震度速報'}（震源精査中）
+            </span>
+          ) : (
+            <>
+              <span className="font-bold text-white">
+                {eq.magnitude >= 0 ? `M${eq.magnitude.toFixed(1)}` : 'M不明'}
+              </span>
+              <span className="text-neutral-400">
+                {eq.depthKm >= 0 ? `深さ約${eq.depthKm}km` : '深さ不明'}
+              </span>
+            </>
+          )}
+        </div>
+
+        {/* Bottom Row: Tsunami status ("その下に津波心配なしみたいな") */}
+        <div className="mt-1 pt-1 border-t border-neutral-800/80 flex items-center justify-between text-[11px] truncate">
+          {formatTsunamiStatusBadge(eq.domesticTsunami)}
+        </div>
+      </button>
+    );
+  }
+);
 
 export default function App() {
   const [data, setData] = useState<MonitorDataBundle>(INITIAL_BUNDLE);
@@ -1013,12 +1139,16 @@ export default function App() {
   // 地震を選択したら自動巡回ループを停止し、選択された地震を固定表示する
   const handleSelectEarthquake = useCallback(
     (eq: EarthquakeReport) => {
+      // "緊急地震速報 表示中は 選択しない"
+      if (activeEew && isEewStillActive(activeEew)) {
+        return;
+      }
       setSelectedEarthquake(eq);
       setActiveScene('earthquake');
       setIsLoopPaused(true);
       updatePinnedEarthquakeId(eq.id);
     },
-    [updatePinnedEarthquakeId]
+    [activeEew, updatePinnedEarthquakeId]
   );
 
   // 巡回再開: 固定を解除して最新の地震に戻し、自動巡回を再開する
@@ -1251,6 +1381,47 @@ export default function App() {
     ]
   );
 
+
+  // High-priority bottom flip feed for Earthquake, EEW, and Tsunami alerts (Pattern B TV disaster style)
+  const flipFeed = useMemo(
+    () =>
+      buildBottomFlipFeed({
+        effectiveScene,
+        data,
+        activeEew,
+        selectedEarthquake,
+        pinnedEarthquakeId,
+      }),
+    [
+      effectiveScene,
+      data,
+      activeEew,
+      selectedEarthquake,
+      pinnedEarthquakeId,
+    ]
+  );
+
+  const isFlipFeedActive = Boolean(flipFeed && flipFeed.cards.length > 0);
+  const [bottomFlipIndex, setBottomFlipIndex] = useState<number>(0);
+
+  useEffect(() => {
+    if (!isFlipFeedActive || !flipFeed || flipFeed.cards.length <= 1) {
+      setBottomFlipIndex(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setBottomFlipIndex((prev) => (prev + 1) % flipFeed.cards.length);
+    }, 3500);
+    return () => clearInterval(timer);
+  }, [isFlipFeedActive, flipFeed?.cards.length]);
+
+  const safeFlipIndex =
+    flipFeed && flipFeed.cards.length > 0
+      ? bottomFlipIndex % flipFeed.cards.length
+      : 0;
+  const currentFlipCard = flipFeed?.cards[safeFlipIndex];
+  const isEewActive = Boolean(activeEew && isEewStillActive(activeEew));
+
   // Smooth scrollLeft-based bottom XML ticker with cached width (zero layout thrashing)
   useEffect(() => {
     const measureCopyWidth = () => {
@@ -1416,20 +1587,49 @@ export default function App() {
               <div className="flex items-center gap-1.5 min-w-0">
                 <span
                   className="w-1.5 h-3.5 rounded-xs shrink-0"
-                  style={{ backgroundColor: sceneFeed.accentColor }}
+                  style={{
+                    backgroundColor: isFlipFeedActive && flipFeed
+                      ? flipFeed.accentColor
+                      : sceneFeed.accentColor,
+                  }}
                 />
                 <span className="text-[11px] font-black text-neutral-100 tracking-wider truncate">
-                  {sceneFeed.title}
+                  {isFlipFeedActive && flipFeed ? flipFeed.headerTitle : sceneFeed.title}
                 </span>
                 <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[10px] text-neutral-300">
-                  <span>{sceneFeed.timeLabel}</span>
+                  <span>{isFlipFeedActive && flipFeed ? flipFeed.headerTime : sceneFeed.timeLabel}</span>
                   <span className="px-1 py-0.2 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[10px] font-sans font-bold">
                     気象庁発表
                   </span>
+                  {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
+                    <span className="px-1 py-0.2 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[10px] font-mono font-bold">
+                      {safeFlipIndex + 1}/{flipFeed.cards.length}
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {/* Row 2: Continuous Scrolling Ticker */}
+              {/* Row 2: Flip Card (Vertical Animation) OR Continuous Scrolling Ticker */}
+              {isFlipFeedActive && currentFlipCard ? (
+                <div
+                  key={`mobile-flip-${safeFlipIndex}-${currentFlipCard.id}`}
+                  data-testid="mobile-flip-feed-card"
+                  className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+                >
+                  <div className="flex items-center gap-2 w-full min-w-0">
+                    <span
+                      className={`px-1.5 py-0.5 text-[10px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
+                    >
+                      {currentFlipCard.badge}
+                    </span>
+                    <div className="min-w-0 flex-1 truncate">
+                      <span className="text-[14px] font-black text-white tracking-wide truncate block">
+                        {currentFlipCard.mainText}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
               <div
                 data-testid="xml-ticker-scroll-container"
                 className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
@@ -1491,8 +1691,9 @@ export default function App() {
                   </div>
                 </div>
               </div>
-            </div>
-          </section>
+            )}
+          </div>
+        </section>
 
           {/* 3. INTERACTIVE CENTER MAP STAGE */}
           <div
@@ -1640,50 +1841,28 @@ export default function App() {
                   data-testid="left-earthquake-history-list"
                   className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
                 >
+                  {isEewActive && (
+                    <div
+                      data-testid="eew-history-locked-banner"
+                      className="bg-red-950/95 border-b border-red-500/80 px-2.5 py-1.5 text-xs text-red-200 font-bold flex items-center gap-1.5 shrink-0"
+                    >
+                      <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-ping shrink-0" />
+                      <span className="truncate">緊急地震速報 発表中（手動選択無効）</span>
+                    </div>
+                  )}
                   {sortedEarthquakes.map((eq) => {
                     const isSelected = selectedEarthquake.id === eq.id;
                     const isPinned =
                       isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
-                    const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
                     return (
-                      <button
+                      <EarthquakeHistoryItem
                         key={eq.id}
-                        type="button"
-                        onClick={() => handleSelectEarthquake(eq)}
-                        className={`w-full text-left px-3 py-2 transition-colors cursor-pointer block ${
-                          isSelected
-                            ? 'bg-[#251A22] border-l-2 border-red-500'
-                            : 'hover:bg-[#181B22]'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[11px] font-mono text-neutral-400">
-                              {eq.occurrenceTime.replace(' 頃発生', '')}
-                            </span>
-                            {isPinned && (
-                              <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded">
-                                固定中
-                              </span>
-                            )}
-                          </div>
-                          <span
-                            className={`px-1.5 py-0.5 text-[11px] font-mono font-extrabold ${scaleStyle.bg} ${scaleStyle.text}`}
-                          >
-                            {eq.maxScaleCode >= 10
-                              ? `最大震度${eq.maxScaleLabel}`
-                              : '震度調査中'}
-                          </span>
-                        </div>
-                        <div className="text-[13px] font-extrabold text-white mt-0.5 leading-snug flex items-center justify-between gap-2">
-                          <span>{eq.hypocenterName}</span>
-                          <span className="text-[11px] font-mono font-normal text-neutral-300 shrink-0">
-                            {eq.hypocenterUnknown
-                              ? `${eq.issueTypeLabel || '震度速報'}`
-                              : `M${eq.magnitude.toFixed(1)} / 深さ約${eq.depthKm}km`}
-                          </span>
-                        </div>
-                      </button>
+                        eq={eq}
+                        isSelected={isSelected}
+                        isPinned={isPinned}
+                        isEewActive={isEewActive}
+                        onSelect={handleSelectEarthquake}
+                      />
                     );
                   })}
                 </div>
@@ -1794,62 +1973,28 @@ export default function App() {
                 data-testid="left-earthquake-history-list"
                 className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
               >
+                {isEewActive && (
+                  <div
+                    data-testid="eew-history-locked-banner"
+                    className="bg-red-950/95 border-b border-red-500/80 px-2.5 py-1.5 text-xs text-red-200 font-bold flex items-center gap-1.5 shrink-0"
+                  >
+                    <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-ping shrink-0" />
+                    <span className="truncate">緊急地震速報 発表中（手動選択無効）</span>
+                  </div>
+                )}
                 {sortedEarthquakes.map((eq) => {
                   const isSelected = selectedEarthquake.id === eq.id;
                   const isPinned =
                     isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
-                  const scaleStyle = getSeismicScaleStyle(eq.maxScaleCode);
                   return (
-                    <button
+                    <EarthquakeHistoryItem
                       key={eq.id}
-                      type="button"
-                      onClick={() => handleSelectEarthquake(eq)}
-                      className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer block ${
-                        isSelected
-                          ? 'bg-[#251A22] border-l-2 border-red-500'
-                          : 'hover:bg-[#181B22]'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[11px] font-mono text-neutral-400">
-                            {eq.occurrenceTime.replace(' 頃発生', '')}
-                          </span>
-                          {isPinned && (
-                            <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded">
-                              固定中
-                            </span>
-                          )}
-                        </div>
-                        <span
-                          className={`px-1.5 py-0.5 text-[11px] font-mono font-extrabold ${scaleStyle.bg} ${scaleStyle.text}`}
-                        >
-                          {eq.maxScaleCode >= 10
-                            ? `最大震度${eq.maxScaleLabel}`
-                            : '震度調査中'}
-                        </span>
-                      </div>
-                      <div className="text-[14px] font-extrabold text-white mt-1 leading-snug flex items-center justify-between gap-1">
-                        <span>{eq.hypocenterName}</span>
-                        {eq.isConfirmed === false && (
-                          <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.5 rounded-xs shrink-0">
-                            続報待機中
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center justify-between text-xs font-mono text-neutral-300 mt-1">
-                        {eq.hypocenterUnknown ? (
-                          <span className="text-amber-300">
-                            {eq.issueTypeLabel || '震度速報'}（震源調査中）
-                          </span>
-                        ) : (
-                          <>
-                            <span>M{eq.magnitude.toFixed(1)}</span>
-                            <span>深さ約{eq.depthKm}km</span>
-                          </>
-                        )}
-                      </div>
-                    </button>
+                      eq={eq}
+                      isSelected={isSelected}
+                      isPinned={isPinned}
+                      isEewActive={isEewActive}
+                      onSelect={handleSelectEarthquake}
+                    />
                   );
                 })}
               </div>
@@ -2074,20 +2219,54 @@ export default function App() {
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     className="w-1.5 h-4 rounded-xs shrink-0"
-                    style={{ backgroundColor: sceneFeed.accentColor }}
+                    style={{
+                      backgroundColor: isFlipFeedActive && flipFeed
+                        ? flipFeed.accentColor
+                        : sceneFeed.accentColor,
+                    }}
                   />
                   <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
-                    {sceneFeed.title}
+                    {isFlipFeedActive && flipFeed ? flipFeed.headerTitle : sceneFeed.title}
                   </span>
                   <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300">
-                    <span>{sceneFeed.timeLabel}</span>
+                    <span>{isFlipFeedActive && flipFeed ? flipFeed.headerTime : sceneFeed.timeLabel}</span>
                     <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold">
                       気象庁発表
                     </span>
+                    {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
+                      <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[11px] font-mono font-bold">
+                        {safeFlipIndex + 1}/{flipFeed.cards.length}
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                {/* Row 2: Large Continuous Ticker (Even Bigger Font) */}
+                {/* Row 2: Flip Card (Vertical Animation) OR Large Continuous Ticker */}
+                {isFlipFeedActive && currentFlipCard ? (
+                  <div
+                    key={`desktop-flip-${safeFlipIndex}-${currentFlipCard.id}`}
+                    data-testid="desktop-flip-feed-card"
+                    className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+                  >
+                    <div className="flex items-center gap-3 w-full min-w-0">
+                      <span
+                        className={`px-2.5 py-0.5 text-xs md:text-[13px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
+                      >
+                        {currentFlipCard.badge}
+                      </span>
+                      <div className="min-w-0 flex-1 flex items-baseline gap-3 truncate">
+                        <span className="text-[19px] md:text-[23px] font-black text-white tracking-wide truncate">
+                          {currentFlipCard.mainText}
+                        </span>
+                        {currentFlipCard.subText && (
+                          <span className="text-xs md:text-sm font-mono text-neutral-400 truncate">
+                            {currentFlipCard.subText}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
                 <div
                   data-testid="xml-ticker-scroll-container"
                   className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
@@ -2149,8 +2328,9 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-              </div>
-            </footer>
+              )}
+            </div>
+          </footer>
           </div>
         </div>
       )}
