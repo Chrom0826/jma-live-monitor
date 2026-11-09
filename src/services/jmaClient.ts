@@ -1,3 +1,4 @@
+let lastLiveXmlEntries: JmaXmlEntry[] | null = null;
 import {
   INITIAL_AMEDAS_STATIONS,
   INITIAL_EARTHQUAKES,
@@ -7,6 +8,7 @@ import {
   INITIAL_MUNICIPALITY_WARNINGS,
   INITIAL_NOWCAST_TIMES,
   INITIAL_PREF_SEVERITY_MAP,
+  CLEAN_PREF_SEVERITY_MAP,
   INITIAL_TSUNAMI_FORECAST,
   INITIAL_TSUNAMI_STATIONS,
   INITIAL_TYPHOONS,
@@ -322,10 +324,10 @@ function offlineWarningsFallback(): LiveWarningsResult {
   // Never mix demo data into a live session: once live data was received, keep showing it.
   if (lastLiveWarnings) return { ...lastLiveWarnings, live: false };
   return {
-    warnings: INITIAL_WARNINGS,
-    municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
-    muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
-    prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
+    warnings: [],
+    municipalityWarnings: [],
+    muniSeverityMap: {},
+    prefSeverityMap: CLEAN_PREF_SEVERITY_MAP,
     live: false,
   };
 }
@@ -1089,8 +1091,11 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     ...regularXml.entries,
   ].sort((a, b) => b.updated.localeCompare(a.updated));
 
+  if (liveXmlEntries.length > 0) {
+    lastLiveXmlEntries = liveXmlEntries;
+  }
   const xmlEntries =
-    liveXmlEntries.length > 0 ? liveXmlEntries : INITIAL_XML_ENTRIES;
+    liveXmlEntries.length > 0 ? liveXmlEntries : lastLiveXmlEntries || [];
 
   const forecasts = liveForecastsRes.forecasts.map((fc) => {
     if (fc.id === 'fc-130000' && tokyoOverview.overviewText) {

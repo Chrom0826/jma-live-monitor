@@ -11,6 +11,7 @@ import {
   INITIAL_MUNICIPALITY_WARNINGS,
   INITIAL_NOWCAST_TIMES,
   INITIAL_PREF_SEVERITY_MAP,
+  CLEAN_PREF_SEVERITY_MAP,
   INITIAL_TSUNAMI_FORECAST,
   INITIAL_TSUNAMI_STATIONS,
   INITIAL_TYPHOONS,
@@ -73,13 +74,13 @@ import {
 import { buildSceneFeed } from './utils/sceneFeedBuilder';
 
 const INITIAL_BUNDLE: MonitorDataBundle = {
-  xmlEntries: INITIAL_XML_ENTRIES,
+  xmlEntries: [],
   nowcastTimes: INITIAL_NOWCAST_TIMES,
-  lightningPoints: INITIAL_LIGHTNING_POINTS,
-  warnings: INITIAL_WARNINGS,
-  municipalityWarnings: INITIAL_MUNICIPALITY_WARNINGS,
-  muniSeverityMap: INITIAL_MUNI_SEVERITY_MAP,
-  prefSeverityMap: INITIAL_PREF_SEVERITY_MAP,
+  lightningPoints: [],
+  warnings: [],
+  municipalityWarnings: [],
+  muniSeverityMap: {},
+  prefSeverityMap: CLEAN_PREF_SEVERITY_MAP,
   typhoons: INITIAL_TYPHOONS,
   bulletins: INITIAL_WEATHER_BULLETINS,
   amedas: INITIAL_AMEDAS_STATIONS,
@@ -88,7 +89,7 @@ const INITIAL_BUNDLE: MonitorDataBundle = {
   tsunamiForecast: INITIAL_TSUNAMI_FORECAST,
   forecasts: INITIAL_FORECASTS,
   earthquakes: INITIAL_EARTHQUAKES,
-  lastXmlFetchTime: '13:43:07',
+  lastXmlFetchTime: '',
   dataSourceStatus: {
     jmaXmlLive: false,
     jmaBosaiLive: false,
@@ -184,7 +185,7 @@ const LiveClockBox = memo(function LiveClockBox({
 export default function App() {
   const [data, setData] = useState<MonitorDataBundle>(INITIAL_BUNDLE);
   // Start on 'warnings' so the NERV choropleth map is immediately visible, then rotate through normal loop scenes
-  const [activeScene, setActiveScene] = useState<SceneId>('warnings');
+  const [activeScene, setActiveScene] = useState<SceneId>('radar');
   // Normal loop includes radar, warnings, typhoon, amedas, forecast, earthquake
   const [enabledScenes, setEnabledScenes] = useState<SceneId[]>(
     () => DEFAULT_NORMAL_LOOP_SCENES
@@ -292,7 +293,9 @@ export default function App() {
     const yyyy = now.getFullYear();
     const month = now.getMonth() + 1;
     const day = now.getDate();
-    const hm = (data.lastXmlFetchTime || '13:43').slice(0, 5);
+    const hm = data.lastXmlFetchTime
+      ? data.lastXmlFetchTime.slice(0, 5)
+      : `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     return `${yyyy}年${month}月${day}日 ${hm} 更新`;
   }, [data.lastXmlFetchTime]);
 

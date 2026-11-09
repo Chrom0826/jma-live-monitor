@@ -126,6 +126,14 @@ export const INITIAL_LIGHTNING_POINTS: LightningPoint[] = [
   { id: 'liden-07', lat: 31.48, lon: 130.42, timeJst: '13:41', type: 4, validtime: '20261105043000' },
 ];
 
+export const CLEAN_PREF_SEVERITY_MAP: Record<number, WarningSeverity> = (() => {
+  const map: Record<number, WarningSeverity> = {};
+  for (let i = 1; i <= 47; i++) {
+    map[i] = 'normal';
+  }
+  return map;
+})();
+
 export const INITIAL_PREF_SEVERITY_MAP: Record<number, WarningSeverity> = {
   1: 'warning',   // 北海道
   2: 'warning',   // 青森県

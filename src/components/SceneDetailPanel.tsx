@@ -490,7 +490,12 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               </span>
               <span>{displayWarnings.length}区分</span>
             </div>
-            {displayWarnings.map((w) => {
+            {displayWarnings.length === 0 ? (
+              <div className="p-4 text-center text-xs text-neutral-400 font-mono">
+                現在、発表されている警報・注意報はありません
+              </div>
+            ) : (
+              displayWarnings.map((w) => {
               const divKey = w.divisionCode || w.id;
               const isFocusedDivision =
                 activeWarningDivision != null &&
@@ -543,7 +548,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   </div>
                 </div>
               );
-            })}
+            }))}
           </>
         )}
 
