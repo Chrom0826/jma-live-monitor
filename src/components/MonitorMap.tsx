@@ -3440,6 +3440,26 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             !Number.isNaN(s.lon)
         );
 
+        // Find stations that recorded the maximum seismic intensity
+        const maxStations = validStations.filter(
+          (s) =>
+            s.scaleCode === selectedEarthquake.maxScaleCode ||
+            (selectedEarthquake.maxScaleLabel &&
+              s.scaleLabel === selectedEarthquake.maxScaleLabel)
+        );
+
+        // Center between epicenter (震央) and the station(s) observing maximum intensity (最大震度を観測した地点)
+        let midTargetLat = selectedEarthquake.lat;
+        let midTargetLon = selectedEarthquake.lon;
+        if (maxStations.length > 0) {
+          const avgMaxLat =
+            maxStations.reduce((sum, s) => sum + s.lat, 0) / maxStations.length;
+          const avgMaxLon =
+            maxStations.reduce((sum, s) => sum + s.lon, 0) / maxStations.length;
+          midTargetLat = (selectedEarthquake.lat + avgMaxLat) / 2;
+          midTargetLon = (selectedEarthquake.lon + avgMaxLon) / 2;
+        }
+
         let halfSpanLat = 1.4;
         let halfSpanLon = 1.8;
         if (validStations.length > 0) {
@@ -3449,17 +3469,22 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           const focusStations =
             significantStations.length >= 3 ? significantStations : validStations;
 
-          const dLats = focusStations.map((s) => Math.abs(s.lat - selectedEarthquake.lat));
-          const dLons = focusStations.map((s) => Math.abs(s.lon - selectedEarthquake.lon));
-          halfSpanLat = Math.max(0.9, Math.min(4.2, Math.max(...dLats) * 1.15));
-          halfSpanLon = Math.max(1.1, Math.min(5.0, Math.max(...dLons) * 1.15));
+          // Points of interest: the epicenter and all focus stations
+          const points = [
+            { lat: selectedEarthquake.lat, lon: selectedEarthquake.lon },
+            ...focusStations,
+          ];
+          const dLats = points.map((p) => Math.abs(p.lat - midTargetLat));
+          const dLons = points.map((p) => Math.abs(p.lon - midTargetLon));
+          halfSpanLat = Math.max(0.9, Math.min(4.2, Math.max(...dLats) * 1.25));
+          halfSpanLon = Math.max(1.1, Math.min(5.0, Math.max(...dLons) * 1.25));
         }
 
         return fitLatLonBoundsToSafeViewport(
-          selectedEarthquake.lat - halfSpanLat,
-          selectedEarthquake.lat + halfSpanLat,
-          selectedEarthquake.lon - halfSpanLon,
-          selectedEarthquake.lon + halfSpanLon,
+          midTargetLat - halfSpanLat,
+          midTargetLat + halfSpanLat,
+          midTargetLon - halfSpanLon,
+          midTargetLon + halfSpanLon,
           7.6,
           4.2
         );

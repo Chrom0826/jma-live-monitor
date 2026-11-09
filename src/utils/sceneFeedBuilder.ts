@@ -1076,11 +1076,12 @@ export function buildBottomFlipFeed(
     );
 
     // "下の情報は巡回で、過去の情報を表示するときは「岩手県・茨城県で震度3を観測」ではなく、「2026 11/9 16:30ごろ岩手県・茨城県で最大地震3の地震がありました」をメインに表示する。"
-    const pastHeadline = `${timePrefix}ごろ${prefOnlyText}で最大震度${targetQuake.maxScaleLabel}の地震がありました`;
+    // Half-width space before ごろ and no subText in Card 1 as requested:
+    const pastHeadline = `${timePrefix} ごろ${prefOnlyText}で最大震度${targetQuake.maxScaleLabel}の地震がありました`;
     const card1Main = isLiveInterrupt ? maxPrefText : pastHeadline;
     const card1Sub = isLiveInterrupt
       ? `${targetQuake.occurrenceTime.replace(' 頃発生', '')}ころ 地震がありました`
-      : `震源: ${targetQuake.hypocenterName}　規模: M${targetQuake.magnitude >= 0 ? targetQuake.magnitude.toFixed(1) : '不明'}　深さ: ${targetQuake.depthKm >= 0 ? `約${targetQuake.depthKm}km` : 'ごく浅い'}`;
+      : '';
 
     const maxScale = targetQuake.maxScaleCode || 0;
     const maxScaleBadgeBg =
@@ -1114,8 +1115,8 @@ export function buildBottomFlipFeed(
       id: `eq-card-hypo-${targetQuake.id}`,
       badge: '震源・規模',
       badgeBg: 'bg-neutral-800 text-neutral-200 border border-neutral-700',
-      mainText: `震源: ${hypo}　最大震度${targetQuake.maxScaleLabel}　${mag}`,
-      subText: `震源の深さ: ${depth}`,
+      mainText: `震源: ${hypo}　最大震度${targetQuake.maxScaleLabel}　${mag}　深さ: ${depth}`,
+      subText: '',
       accentColor: '#38BDF8',
     });
 

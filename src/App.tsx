@@ -1406,12 +1406,22 @@ export default function App() {
   const isFlipFeedActive = Boolean(flipFeed && flipFeed.cards.length > 0);
   const [bottomFlipIndex, setBottomFlipIndex] = useState<number>(0);
   const [flipCompletedRounds, setFlipCompletedRounds] = useState<number>(0);
+  const [isEarthquakeScrollDone, setIsEarthquakeScrollDone] = useState<boolean>(false);
 
-  // Reset flip index and rounds counter whenever scene or target quake changes
+  // Reset flip index, rounds counter, and right-panel scroll state whenever scene or target quake changes
   useEffect(() => {
     setBottomFlipIndex(0);
     setFlipCompletedRounds(0);
+    setIsEarthquakeScrollDone(false);
   }, [effectiveScene, selectedEarthquake?.id]);
+
+  const handleSceneComplete = useCallback(() => {
+    if (effectiveScene === 'earthquake') {
+      setIsEarthquakeScrollDone(true);
+      return;
+    }
+    advanceScene();
+  }, [effectiveScene, advanceScene]);
 
   useEffect(() => {
     if (!isFlipFeedActive || !flipFeed || flipFeed.cards.length === 0) {
@@ -1434,7 +1444,9 @@ export default function App() {
     return () => clearInterval(timer);
   }, [isFlipFeedActive, flipFeed?.cards.length]);
 
-  // When in 'earthquake' scene during normal patrol loop, advance after completing 2 full cycles/rounds
+  // When in 'earthquake' scene during normal patrol loop, advance after BOTH:
+  // 1. Bottom flip cards have completed at least 2 full rounds (flipCompletedRounds >= 2)
+  // 2. AND right panel stations scroll has finished (isEarthquakeScrollDone === true)
   useEffect(() => {
     if (
       effectiveScene === 'earthquake' &&
@@ -1442,7 +1454,8 @@ export default function App() {
       interruptKind === 'none' &&
       !pinnedEarthquakeId &&
       !(activeEew && isEewStillActive(activeEew)) &&
-      flipCompletedRounds >= 2
+      flipCompletedRounds >= 2 &&
+      (isEarthquakeScrollDone || (isMobilePortrait && mobileBottomTab !== 'detail'))
     ) {
       advanceScene();
     }
@@ -1453,6 +1466,9 @@ export default function App() {
     pinnedEarthquakeId,
     activeEew,
     flipCompletedRounds,
+    isEarthquakeScrollDone,
+    isMobilePortrait,
+    mobileBottomTab,
     advanceScene,
   ]);
 
@@ -1872,7 +1888,7 @@ export default function App() {
                     loopIntervalSec={loopIntervalSec}
                     eewDisplayMode={eewDisplayMode}
                     onChangeEewDisplayMode={setEewDisplayMode}
-                    onSceneComplete={advanceScene}
+                    onSceneComplete={handleSceneComplete}
                     isMobilePortrait={true}
                   />
                 </div>
@@ -2246,7 +2262,7 @@ export default function App() {
                   loopIntervalSec={loopIntervalSec}
                   eewDisplayMode={eewDisplayMode}
                   onChangeEewDisplayMode={setEewDisplayMode}
-                  onSceneComplete={advanceScene}
+                  onSceneComplete={handleSceneComplete}
                   isMobilePortrait={false}
                 />
               </div>

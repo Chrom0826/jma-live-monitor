@@ -344,7 +344,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
     // When in 'forecast', scene progression is managed by App.tsx's dedicated timer
     // (stepping 03時..24時 -> tomorrow -> day_after -> next scene)
-    if (effectiveScene === 'forecast' || effectiveScene === 'earthquake') {
+    if (effectiveScene === 'forecast') {
       return;
     }
 
@@ -409,12 +409,13 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
       }, 1500);
     } else {
       // Non-overflowing right panel (e.g., Typhoon / Forecast / Earthquake with short list):
-      // Hold for at least minSceneDurationMs before advancing to next scene
+      // Hold for at least minSceneDurationMs (or 1s for short earthquake list) before signaling completion
+      const holdMs = effectiveScene === 'earthquake' ? 1000 : minSceneDurationMs;
       fallbackTimer = setTimeout(() => {
         if (!cancelled) {
           onSceneCompleteRef.current();
         }
-      }, minSceneDurationMs);
+      }, holdMs);
     }
 
     return () => {
@@ -475,9 +476,13 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
       {/* Main Slim Vertical Regional Strip (Matches NERV防災ライブ right column) */}
       <div
-        ref={scrollContainerRef}
+        ref={effectiveScene === 'earthquake' ? null : scrollContainerRef}
         data-testid="scene-detail-scroll-container"
-        className="flex-1 bg-[#111318]/92 border border-[#686E7A] overflow-y-auto divide-y divide-[#2B303A]"
+        className={`flex-1 bg-[#111318]/92 border border-[#686E7A] ${
+          effectiveScene === 'earthquake'
+            ? 'overflow-hidden flex flex-col'
+            : 'overflow-y-auto divide-y divide-[#2B303A]'
+        }`}
       >
         {/* ==================== WARNINGS (NERV Style 57-Division Regional Strip) ==================== */}
         {effectiveScene === 'warnings' && (
@@ -1711,185 +1716,181 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
         {/* ==================== EARTHQUAKE ==================== */}
         {effectiveScene === 'earthquake' && (
-          <>
-            {/* EEW (緊急地震速報 警報・予報) Live Banner (NERV / Broadcast Style) */}
-            {activeEew && isEewStillActive(activeEew) && (() => {
-              const isWarn = activeEew.isWarning !== false;
-              const isFinalReport = Boolean(activeEew.isFinal) || activeEew.serial >= 5;
-              return (
-                <div
-                  data-testid="eew-live-banner"
-                  className={`pb-2 mb-2 rounded-xs shadow-lg animate-pulse-slow border-2 ${
-                    isWarn
-                      ? 'bg-[#1A0B0E] border-red-500 shadow-red-950/60'
-                      : 'bg-[#1C1408] border-amber-500 shadow-amber-950/60'
-                  }`}
-                >
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            {/* Fixed Header: Red bar + status + hypocenter info + Big Max Scale Badge */}
+            <div className="shrink-0 bg-[#111318] border-b border-[#2B303C] z-10">
+              {/* EEW (緊急地震速報 警報・予報) Live Banner (NERV / Broadcast Style) */}
+              {activeEew && isEewStillActive(activeEew) && (() => {
+                const isWarn = activeEew.isWarning !== false;
+                const isFinalReport = Boolean(activeEew.isFinal) || activeEew.serial >= 5;
+                return (
                   <div
-                    className={`px-2.5 py-1 text-[13px] font-black text-white flex items-center justify-between tracking-wide ${
-                      isWarn ? 'bg-red-600' : 'bg-amber-600'
+                    data-testid="eew-live-banner"
+                    className={`pb-2 mb-2 rounded-xs shadow-lg animate-pulse-slow border-2 ${
+                      isWarn
+                        ? 'bg-[#1A0B0E] border-red-500 shadow-red-950/60'
+                        : 'bg-[#1C1408] border-amber-500 shadow-amber-950/60'
                     }`}
                   >
-                    <span className="flex items-center gap-1.5">
-                      <span className="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-                      {isWarn ? '緊急地震速報 (警報)' : '緊急地震速報 (予報)'}
-                    </span>
-                    <span className="font-mono text-xs bg-black/40 px-1.5 py-0.2 rounded-xs">
-                      第{activeEew.serial}報
-                      {isFinalReport ? ' (最終報)' : ''}
-                    </span>
-                  </div>
-
-                  <div className="px-2.5 pt-2 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="text-lg font-black text-white tracking-wide">
-                          {activeEew.hypocenterName || '震源調査中'}
-                        </div>
-                        <div className="text-xs font-mono text-neutral-300">
-                          {activeEew.magnitude > 0
-                            ? `M${activeEew.magnitude.toFixed(1)}`
-                            : 'M不明'}{' '}
-                          /{' '}
-                          {activeEew.depthKm >= 0
-                            ? `深さ約${activeEew.depthKm}km`
-                            : '深さ不明'}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[10px] text-neutral-400 font-mono">
-                          {eewDisplayMode === 'lpgm' ? '最大予想階級' : '最大予測震度'}
-                        </div>
-                        <div
-                          className={`text-2xl font-black font-mono tracking-wider ${
-                            eewDisplayMode === 'lpgm' ? 'text-orange-400' : 'text-yellow-300'
-                          }`}
-                        >
-                          {eewDisplayMode === 'lpgm'
-                            ? activeEew.maxLpgmLabel || '階級1以上'
-                            : activeEew.maxScaleLabel === '不明' || activeEew.maxScaleLabel === '解析中'
-                              ? activeEew.maxScaleLabel
-                              : `震度${activeEew.maxScaleLabel}`}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Mode Switcher Pills: 予測震度 ↔ 長周期地震動（階級1〜4） */}
-                    <div className="grid grid-cols-2 gap-1 p-0.5 bg-black/50 border border-neutral-700/80 rounded-xs">
-                      <button
-                        type="button"
-                        onClick={() => onChangeEewDisplayMode?.('intensity')}
-                        className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
-                          eewDisplayMode === 'intensity'
-                            ? 'bg-red-600 text-white font-black shadow-xs'
-                            : 'text-neutral-400 hover:text-white'
-                        }`}
-                      >
-                        震度予測 (1〜7)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onChangeEewDisplayMode?.('lpgm')}
-                        className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
-                          eewDisplayMode === 'lpgm'
-                            ? 'bg-amber-600 text-white font-black shadow-xs'
-                            : 'text-neutral-400 hover:text-white'
-                        }`}
-                      >
-                        長周期地震動 (階級1〜4)
-                      </button>
-                    </div>
-
                     <div
-                      className={`text-[11px] font-mono text-neutral-400 flex items-center justify-between border-t pt-1 ${
-                        isWarn ? 'border-red-900/50' : 'border-amber-900/50'
+                      className={`px-2.5 py-1 text-[13px] font-black text-white flex items-center justify-between tracking-wide ${
+                        isWarn ? 'bg-red-600' : 'bg-amber-600'
                       }`}
                     >
-                      <span>発生: {activeEew.originTime || '直近'}</span>
-                      <span className="flex items-center gap-1 text-[10px] text-amber-300">
-                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
-                        自動切替中
+                      <span className="flex items-center gap-1.5">
+                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping" />
+                        {isWarn ? '緊急地震速報 (警報)' : '緊急地震速報 (予報)'}
+                      </span>
+                      <span className="font-mono text-xs text-neutral-200">
+                        {isFinalReport ? '最終報' : `第${activeEew.serial}報`}
                       </span>
                     </div>
 
-                    {/* Warning / Affected Areas (No "未到達と予測" - displays clean predicted intensity or LPGM class) */}
-                    {activeEew.areas.length > 0 && (
-                      <div className="space-y-1 pt-1">
-                        <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
-                          <span>
-                            {eewDisplayMode === 'lpgm'
-                              ? '長周期地震動 予想地域（階級1〜4）'
-                              : '強い揺れの予想地域'}
-                          </span>
-                          <span className="font-mono text-[10px] text-neutral-400">
-                            {activeEew.areas.length}地域
-                          </span>
+                    <div className="px-2.5 pt-2 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-lg font-black text-white tracking-wide">
+                            {activeEew.hypocenterName || '震源調査中'}
+                          </div>
+                          <div className="text-xs font-mono text-neutral-300">
+                            {activeEew.magnitude > 0
+                              ? `M${activeEew.magnitude.toFixed(1)}`
+                              : 'M不明'}{' '}
+                            /{' '}
+                            {activeEew.depthKm >= 0
+                              ? `深さ約${activeEew.depthKm}km`
+                              : '深さ不明'}
+                          </div>
                         </div>
-                        <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
-                          {activeEew.areas.map((area) => {
-                            const scaleRange = formatEewScaleRange(
-                              area.scaleFrom,
-                              area.scaleTo
-                            );
-                            const lpgmStyle = getLpgmClassStyle(area.lpgmClass);
-
-                            return (
-                              <div
-                                key={`${area.pref}-${area.name}`}
-                                className="bg-[#121620] border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between text-xs"
-                              >
-                                <div className="font-bold text-white min-w-0 pr-1 truncate">
-                                  <span className="text-[10px] text-neutral-400 mr-1.5 font-normal">
-                                    {area.pref}
-                                  </span>
-                                  <span>{area.name}</span>
-                                </div>
-                                <div className="flex items-center gap-1.5 font-mono shrink-0">
-                                  {eewDisplayMode === 'lpgm' ? (
-                                    <span
-                                      className="px-1.5 py-0.2 font-black rounded-xs text-[11px]"
-                                      style={{
-                                        backgroundColor: lpgmStyle.bg,
-                                        color: lpgmStyle.text,
-                                      }}
-                                    >
-                                      {lpgmStyle.label}
-                                    </span>
-                                  ) : (
-                                    <span
-                                      className={`px-1.5 py-0.2 font-black rounded-xs text-[11px] ${
-                                        area.scaleTo >= 50 || area.scaleFrom >= 50
-                                          ? 'bg-red-600 text-white'
-                                          : 'bg-yellow-400 text-slate-950'
-                                      }`}
-                                    >
-                                      震度{scaleRange}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
+                        <div className="text-right">
+                          <div className="text-[10px] text-neutral-400 font-mono">
+                            {eewDisplayMode === 'lpgm' ? '最大予想階級' : '最大予測震度'}
+                          </div>
+                          <div
+                            className={`text-2xl font-black font-mono tracking-wider ${
+                              eewDisplayMode === 'lpgm' ? 'text-orange-400' : 'text-yellow-300'
+                            }`}
+                          >
+                            {eewDisplayMode === 'lpgm'
+                              ? activeEew.maxLpgmLabel || '階級1以上'
+                              : activeEew.maxScaleLabel === '不明' || activeEew.maxScaleLabel === '解析中'
+                                ? activeEew.maxScaleLabel
+                                : `震度${activeEew.maxScaleLabel}`}
+                          </div>
                         </div>
                       </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
 
-            {/* Regular Earthquake Detailed Report */}
-            <div className="pb-2">
+                      {/* Mode Switcher Pills: 予測震度 ↔ 長周期地震動（階級1〜4） */}
+                      <div className="grid grid-cols-2 gap-1 p-0.5 bg-black/50 border border-neutral-700/80 rounded-xs">
+                        <button
+                          type="button"
+                          onClick={() => onChangeEewDisplayMode?.('intensity')}
+                          className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
+                            eewDisplayMode === 'intensity'
+                              ? 'bg-red-600 text-white font-black shadow-xs'
+                              : 'text-neutral-400 hover:text-white'
+                          }`}
+                        >
+                          震度予測 (1〜7)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onChangeEewDisplayMode?.('lpgm')}
+                          className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
+                            eewDisplayMode === 'lpgm'
+                              ? 'bg-amber-600 text-white font-black shadow-xs'
+                              : 'text-neutral-400 hover:text-white'
+                          }`}
+                        >
+                          長周期地震動 (階級1〜4)
+                        </button>
+                      </div>
+
+                      <div
+                        className={`text-[11px] font-mono text-neutral-400 flex items-center justify-between border-t pt-1 ${
+                          isWarn ? 'border-red-900/50' : 'border-amber-900/50'
+                        }`}
+                      >
+                        <span>発生: {activeEew.originTime || '直近'}</span>
+                        <span className="flex items-center gap-1 text-[10px] text-amber-300">
+                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+                          自動切替中
+                        </span>
+                      </div>
+
+                      {/* Warning / Affected Areas */}
+                      {activeEew.areas.length > 0 && (
+                        <div className="space-y-1 pt-1">
+                          <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
+                            <span>
+                              {eewDisplayMode === 'lpgm'
+                                ? '長周期地震動 予想地域（階級1〜4）'
+                                : '強い揺れの予想地域'}
+                            </span>
+                            <span className="font-mono text-[10px] text-neutral-400">
+                              {activeEew.areas.length}地域
+                            </span>
+                          </div>
+                          <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
+                            {activeEew.areas.map((area) => {
+                              const scaleRange = formatEewScaleRange(
+                                area.scaleFrom,
+                                area.scaleTo
+                              );
+                              const lpgmStyle = getLpgmClassStyle(area.lpgmClass);
+
+                              return (
+                                <div
+                                  key={`${area.pref}-${area.name}`}
+                                  className="bg-[#121620] border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between text-xs"
+                                >
+                                  <div className="font-bold text-white min-w-0 pr-1 truncate">
+                                    <span className="text-[10px] text-neutral-400 mr-1.5 font-normal">
+                                      {area.pref}
+                                    </span>
+                                    <span>{area.name}</span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 font-mono shrink-0">
+                                    {eewDisplayMode === 'lpgm' ? (
+                                      <span
+                                        className="px-1.5 py-0.2 font-black rounded-xs text-[11px]"
+                                        style={{
+                                          backgroundColor: lpgmStyle.bg,
+                                          color: lpgmStyle.text,
+                                        }}
+                                      >
+                                        {lpgmStyle.label}
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className={`px-1.5 py-0.2 font-black rounded-xs text-[11px] ${
+                                          area.scaleTo >= 50 || area.scaleFrom >= 50
+                                            ? 'bg-red-600 text-white'
+                                            : 'bg-yellow-400 text-slate-950'
+                                        }`}
+                                      >
+                                        震度{scaleRange}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Red Header Bar */}
               <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
                 <span>
-                  {selectedEarthquake.issueTypeLabel || '震源・震度詳細'}
-                </span>
-                <span className="font-mono text-xs">
-                  {selectedEarthquake.maxScaleCode >= 10
-                    ? `最大震度 ${selectedEarthquake.maxScaleLabel}`
-                    : '最大震度 調査中'}
+                  {selectedEarthquake.issueTypeLabel || '各地の震度に関する情報'}
                 </span>
               </div>
+
               {/* Confirmation / Lock Status Bar */}
               {selectedEarthquake.isConfirmed === false ||
               (activeEew && isEewStillActive(activeEew)) ? (
@@ -1938,31 +1939,64 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   </button>
                 </div>
               ) : null}
-              <div className="px-2.5 pt-2 space-y-1">
-                <div className="text-base font-extrabold text-white">
-                  {selectedEarthquake.hypocenterName}
-                </div>
-                <div className="text-xs font-mono text-neutral-200 flex items-center justify-between">
-                  <span>
-                    {selectedEarthquake.hypocenterUnknown
-                      ? '震源・規模 調査中'
-                      : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
-                  </span>
-                  <span className="text-amber-300 font-bold">
-                    {selectedEarthquake.issueTypeLabel === '震度速報'
-                      ? `観測地域 ${selectedEarthquake.stations.length}地域`
-                      : `観測点 ${selectedEarthquake.stations.length}箇所`}
-                  </span>
-                </div>
-                <div className="text-[11px] font-mono text-neutral-400">
-                  {selectedEarthquake.occurrenceTime}
-                </div>
-                <div className="text-xs text-cyan-300 font-bold pt-1">
-                  {selectedEarthquake.domesticTsunami}
-                </div>
-              </div>
+
+              {/* Hypocenter Info + Big Max Scale Badge on Right (identical to left sidebar style) */}
+              {(() => {
+                const scaleStyle = getSeismicScaleStyle(selectedEarthquake.maxScaleCode);
+                return (
+                  <div className="px-2.5 py-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="text-base font-extrabold text-white leading-tight">
+                          {selectedEarthquake.hypocenterName ||
+                            (selectedEarthquake.hypocenterUnknown ? '震源精査中' : '震源情報')}
+                        </div>
+                        <div className="text-xs font-mono text-neutral-200 flex items-center justify-between">
+                          <span>
+                            {selectedEarthquake.hypocenterUnknown
+                              ? '震源・規模 調査中'
+                              : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
+                          </span>
+                          <span className="text-amber-300 font-bold">
+                            {selectedEarthquake.issueTypeLabel === '震度速報'
+                              ? `観測地域 ${selectedEarthquake.stations.length}地域`
+                              : `観測点 ${selectedEarthquake.stations.length}箇所`}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-neutral-400">
+                          {selectedEarthquake.occurrenceTime}
+                        </div>
+                        <div className="text-xs text-cyan-300 font-bold pt-0.5">
+                          {selectedEarthquake.domesticTsunami}
+                        </div>
+                      </div>
+
+                      {/* Big Max Intensity Box on Right (identical to left sidebar) */}
+                      {selectedEarthquake.maxScaleCode >= 10 && (
+                        <div
+                          className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
+                        >
+                          <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80">
+                            最大震度
+                          </span>
+                          <span className="text-[23px] font-black leading-none mt-0.5">
+                            {selectedEarthquake.maxScaleLabel}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
-            {groupedEarthquakeStations.map((grp, idx) => {
+
+            {/* Scrollable stations container: auto-scrolls down while header stays fixed above */}
+            <div
+              ref={scrollContainerRef}
+              data-testid="earthquake-stations-scroll-container"
+              className="flex-1 overflow-y-auto min-h-0 divide-y divide-[#2B303A]"
+            >
+              {groupedEarthquakeStations.map((grp, idx) => {
                 const style = getSeismicScaleStyle(grp.scaleCode);
                 const extraCount = grp.totalCount - grp.names.length;
                 return (
@@ -1989,7 +2023,8 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   </div>
                 );
               })}
-          </>
+            </div>
+          </div>
         )}
       </div>
 
