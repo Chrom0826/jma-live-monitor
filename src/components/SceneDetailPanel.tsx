@@ -35,6 +35,16 @@ import {
   isEewStillActive,
 } from '../utils/eewTsunami';
 
+function formatCompactDateTime(raw: string | null | undefined): string {
+  if (!raw) return '直近';
+  const s = raw.trim();
+  const m = /^\d{4}[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}:\d{2}(?::\d{2})?)/.exec(s);
+  if (m) {
+    return `${m[1].padStart(2, '0')}/${m[2].padStart(2, '0')} ${m[3]}`;
+  }
+  return s;
+}
+
 const broadcastWeatherSvgCache = new Map<string, string>();
 function getCachedBroadcastWeatherSvg(
   weatherCode: string | undefined,
@@ -78,7 +88,7 @@ const WarningDivisionRow: React.FC<{
       }`}
     >
       <div
-        className={`px-2.5 py-0.5 text-[13px] font-bold tracking-wide flex items-center justify-between ${
+        className={`px-2.5 py-0.5 text-[13px] font-bold tracking-wide flex items-center justify-between gap-1.5 ${
           isFocusedDivision
             ? 'bg-sky-600 text-white font-extrabold'
             : w.severity === 'special'
@@ -88,9 +98,9 @@ const WarningDivisionRow: React.FC<{
                 : 'bg-[#3E434F] text-white'
         }`}
       >
-        <span>{w.prefecture}</span>
+        <span className="min-w-0 truncate">{w.prefecture}</span>
         {(w.severity === 'warning' || w.severity === 'special') && (
-          <span className="text-[10px] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs">
+          <span className="text-[10px] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs whitespace-nowrap shrink-0">
             {w.severity === 'special' ? '特別警報' : '警報'}
           </span>
         )}
@@ -575,28 +585,79 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
       } h-full flex flex-col gap-1.5 md:gap-2 pointer-events-auto select-none`}
     >
       {/* Interrupt Dismiss Box when an emergency / anomaly interrupt is active */}
-      {interruptKind !== 'none' && (
-        <div className="bg-red-950/95 border border-red-500 px-2.5 py-1.5 shrink-0">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-mono font-bold text-red-200 whitespace-nowrap">
-              {interruptKind === 'earthquake'
-                ? '● 地震情報 割込中'
-                : interruptKind === 'volcano'
-                  ? '● 火山Lv変化 割込中'
-                  : interruptKind === 'tsunami'
-                    ? '● 潮位変化 割込中'
-                    : '● 台風進路 割込中'}
-            </span>
-            <button
-              type="button"
-              onClick={onDismissInterrupt}
-              className="px-2 py-0.5 text-[11px] font-bold bg-red-600 hover:bg-red-500 text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              巡回へ戻る
-            </button>
+      {interruptKind !== 'none' && (() => {
+        const isEewSpecial =
+          interruptKind === 'eew' &&
+          Boolean(
+            activeEew &&
+              activeEew.isWarning !== false &&
+              (activeEew.maxScaleCode >= 55 || (activeEew.maxLpgmClass ?? 0) >= 4)
+          );
+        const isEewForecastOnly =
+          interruptKind === 'eew' && Boolean(activeEew && activeEew.isWarning === false);
+        const hasActiveTsunamiWarn =
+          interruptKind === 'tsunami' &&
+          Boolean(
+            activeTsunamiForecast &&
+              !activeTsunamiForecast.cancelled &&
+              activeTsunamiForecast.areas.length > 0
+          );
+        const isMajorTsunamiInterrupt =
+          hasActiveTsunamiWarn &&
+          Boolean(activeTsunamiForecast?.areas.some((a) => a.grade === 'MajorWarning'));
+
+        const isPurple = isEewSpecial || isMajorTsunamiInterrupt;
+        const isAmber = isEewForecastOnly;
+
+        return (
+          <div
+            className={`px-2.5 py-1.5 shrink-0 border ${
+              isPurple
+                ? 'bg-purple-950/95 border-purple-500'
+                : isAmber
+                  ? 'bg-amber-950/95 border-amber-500'
+                  : 'bg-red-950/95 border-red-500'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className={`text-[11px] font-mono font-bold whitespace-nowrap min-w-0 truncate ${
+                  isPurple
+                    ? 'text-purple-200'
+                    : isAmber
+                      ? 'text-amber-200'
+                      : 'text-red-200'
+                }`}
+              >
+                {interruptKind === 'eew'
+                  ? '● 緊急地震速報 割込中'
+                  : interruptKind === 'earthquake'
+                    ? '● 地震情報 割込中'
+                    : interruptKind === 'volcano'
+                      ? '● 火山Lv変化 割込中'
+                      : interruptKind === 'tsunami'
+                        ? hasActiveTsunamiWarn
+                          ? '● 津波情報 割込中'
+                          : '● 潮位変化 割込中'
+                        : '● 台風進路 割込中'}
+              </span>
+              <button
+                type="button"
+                onClick={onDismissInterrupt}
+                className={`px-2 py-0.5 text-[11px] font-bold text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  isPurple
+                    ? 'bg-purple-600 hover:bg-purple-500'
+                    : isAmber
+                      ? 'bg-amber-600 hover:bg-amber-500'
+                      : 'bg-red-600 hover:bg-red-500'
+                }`}
+              >
+                巡回へ戻る
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Main Slim Vertical Regional Strip (Matches NERV防災ライブ right column) */}
       <div
@@ -611,13 +672,13 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {/* ==================== WARNINGS (NERV Style 57-Division Regional Strip) ==================== */}
         {effectiveScene === 'warnings' && (
           <>
-            <div className="bg-[#1A1E26] px-2.5 py-1 text-[11px] font-mono text-amber-300 font-bold flex items-center justify-between">
-              <span>
+            <div className="bg-[#1A1E26] px-2.5 py-1 text-[11px] font-mono text-amber-300 font-bold flex items-center justify-between gap-1.5">
+              <span className="min-w-0 truncate">
                 {activeWarningDivision
                   ? `警報発表地域 (${activeWarningDivision.prefecture})`
                   : '全国 地域別警報・注意報'}
               </span>
-              <span>{displayWarnings.length}区分</span>
+              <span className="whitespace-nowrap shrink-0">{displayWarnings.length}区分</span>
             </div>
             {displayWarnings.length === 0 ? (
               <div className="p-4 text-center text-xs text-neutral-400 font-mono">
@@ -649,10 +710,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               /* ==================== 1. OVERVIEW MODE (All Cyclones in Blocks, Current Specs Only) ==================== */
               <div className="space-y-2.5 pb-2">
                 {/* Header banner */}
-                <div className="bg-red-700 px-3 py-1.5 text-xs font-bold text-white flex items-center justify-between shadow-md">
-                  <div className="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
-                    <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
-                    <span>発表中の低気圧一覧（全 {data.typhoons.length} 件）</span>
+                <div className="bg-red-700 px-2.5 py-1.5 text-xs font-bold text-white flex items-center justify-between gap-1.5 shadow-md">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="w-2 h-2 rounded-full bg-white animate-pulse shrink-0" />
+                    <span className="truncate">低気圧一覧（全 {data.typhoons.length} 件）</span>
                   </div>
                   <span className="text-[10px] font-mono text-red-200 shrink-0 whitespace-nowrap">
                     気象庁実況
@@ -775,7 +836,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
                         {/* Gale / Storm Radius if present */}
                         {(p0?.stormRadiusKm > 0 || p0?.galeRadiusKm > 0) && (
-                          <div className="flex items-center gap-3 text-xs pt-1 border-t border-neutral-800/80 font-mono">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs pt-1 border-t border-neutral-800/80 font-mono">
                             {p0.stormRadiusKm > 0 && (
                               <span className="inline-flex items-center gap-1 text-red-400 whitespace-nowrap">
                                 <span className="w-2 h-2 rounded-full bg-red-500 inline-block shrink-0" />
@@ -936,7 +997,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         </div>
 
                         {(p0?.stormRadiusKm > 0 || p0?.galeRadiusKm > 0) && (
-                          <div className="flex items-center gap-3 text-xs pt-1 border-t border-neutral-700/60 font-mono">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs pt-1 border-t border-neutral-700/60 font-mono">
                             {p0.stormRadiusKm > 0 && (
                               <span className="inline-flex items-center gap-1 text-red-400 whitespace-nowrap">
                                 <span className="w-2 h-2 rounded-full bg-red-500 inline-block shrink-0" />
@@ -1125,17 +1186,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             </div>
             {radarRainStations.map((st) => (
                 <div key={st.id} className="pb-1.5">
-                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                    <span>{st.stationName}</span>
-                    <span className="text-[11px] font-mono text-neutral-200">
+                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                    <span className="min-w-0 truncate">{st.stationName}</span>
+                    <span className="text-[11px] font-mono text-neutral-200 whitespace-nowrap shrink-0">
                       {st.prefecture}
                     </span>
                   </div>
-                  <div className="px-2.5 pt-1 flex items-center justify-between text-xs font-mono">
-                    <span className="text-cyan-300 font-bold">
+                  <div className="px-2.5 pt-1 flex items-center justify-between gap-2 text-xs font-mono">
+                    <span className="text-cyan-300 font-bold whitespace-nowrap">
                       降水 {st.precip1h.toFixed(1)} mm/h
                     </span>
-                    <span className="text-neutral-300">
+                    <span className="text-neutral-300 whitespace-nowrap shrink-0">
                       風速 {st.windSpeed.toFixed(1)} m/s
                     </span>
                   </div>
@@ -1161,40 +1222,40 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   data-testid={`amedas-rank-item-${sectionKey}`}
                   className="pb-1.5"
                 >
-                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="text-[11px] font-mono font-extrabold text-amber-300">
+                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      <span className="text-[11px] font-mono font-extrabold text-amber-300 shrink-0">
                         {rankIdx + 1}.
                       </span>
                       <span
                         className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
                         style={{ backgroundColor: dotHex }}
                       />
-                      <span>{st.stationName}</span>
+                      <span className="truncate">{st.stationName}</span>
                     </span>
-                    <span className="text-[11px] text-neutral-200">
+                    <span className="text-[11px] text-neutral-200 whitespace-nowrap shrink-0">
                       {st.prefecture}
                     </span>
                   </div>
-                  <div className="px-2.5 pt-1 flex items-center justify-between text-xs font-mono">
+                  <div className="px-2.5 pt-1 flex items-center justify-between gap-2 text-xs font-mono">
                     {amedasMetric === 'temp' ? (
                       <>
                         <span
-                          className="font-extrabold text-sm"
+                          className="font-extrabold text-sm whitespace-nowrap"
                           style={{ color: dotHex }}
                         >
                           {st.temp.toFixed(1)} ℃
                         </span>
-                        <span className="text-neutral-300">
+                        <span className="text-neutral-300 whitespace-nowrap shrink-0">
                           {st.windDirection} {st.windSpeed.toFixed(1)}m/s
                         </span>
                       </>
                     ) : amedasMetric === 'precip' ? (
                       <>
-                        <span className="text-cyan-300 font-extrabold text-sm">
+                        <span className="text-cyan-300 font-extrabold text-sm whitespace-nowrap">
                           {st.precip1h.toFixed(1)} mm/h
                         </span>
-                        <span className="text-neutral-300">
+                        <span className="text-neutral-300 whitespace-nowrap shrink-0">
                           {st.hasTemp !== false
                             ? `${st.temp.toFixed(1)}℃`
                             : `${st.windSpeed.toFixed(1)}m/s`}
@@ -1203,12 +1264,12 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     ) : amedasMetric === 'wind' ? (
                       <>
                         <span
-                          className="font-extrabold text-sm"
+                          className="font-extrabold text-sm whitespace-nowrap"
                           style={{ color: dotHex }}
                         >
                           {st.windDirection} {st.windSpeed.toFixed(1)} m/s
                         </span>
-                        <span className="text-neutral-300">
+                        <span className="text-neutral-300 whitespace-nowrap shrink-0">
                           {st.hasTemp !== false
                             ? `${st.temp.toFixed(1)}℃`
                             : `${st.precip1h.toFixed(1)}mm/h`}
@@ -1216,10 +1277,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       </>
                     ) : (
                       <>
-                        <span className="text-sky-200 font-extrabold text-sm">
+                        <span className="text-sky-200 font-extrabold text-sm whitespace-nowrap">
                           積雪 {st.snowCm ?? 0} cm
                         </span>
-                        <span className="text-neutral-300">
+                        <span className="text-neutral-300 whitespace-nowrap shrink-0">
                           {st.hasTemp !== false ? `${st.temp.toFixed(1)}℃` : ''}
                         </span>
                       </>
@@ -1365,15 +1426,15 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               <div className="space-y-2 pb-2">
                 {/* Sticky Broadcast Mode Switcher Header */}
                 <div className="bg-[#181D29] border border-neutral-700 rounded-xs overflow-hidden">
-                  <div className="bg-sky-700 px-2.5 py-1 text-xs font-black text-white flex items-center justify-between">
-                    <span>
+                  <div className="bg-sky-700 px-2.5 py-1 text-xs font-black text-white flex items-center justify-between gap-1.5">
+                    <span className="min-w-0 truncate">
                       {forecastViewMode === 'today_3h'
                         ? `今日の3時間ごとの天気 (${todayDateLabel})`
                         : forecastViewMode === 'tomorrow'
                           ? `明日の全国の天気 (${tomorrowDateLabel})`
                           : `明後日の全国の天気 (${dayAfterDateLabel})`}
                     </span>
-                    <span className="font-mono text-[10px] bg-sky-950/80 px-1.5 py-0.5 rounded text-sky-200">
+                    <span className="font-mono text-[10px] bg-sky-950/80 px-1.5 py-0.5 rounded text-sky-200 whitespace-nowrap shrink-0">
                       全{scopedForecasts.length}地域
                     </span>
                   </div>
@@ -1521,9 +1582,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             </div>
             {data.volcanoes.map((v) => (
               <div key={v.id} className="pb-1.5">
-                <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                  <span>{v.name.split(' ')[0]}</span>
-                  <span className="text-xs font-mono text-yellow-300 font-bold">
+                <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                  <span className="min-w-0 truncate">{v.name.split(' ')[0]}</span>
+                  <span className="text-xs font-mono text-yellow-300 font-bold whitespace-nowrap shrink-0">
                     Lv.{v.alertLevel}
                   </span>
                 </div>
@@ -1587,150 +1648,212 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
           const scaleBadgeStyle = getSeismicScaleBadgeStyle(maxScaleLabel);
 
+          const highestGrade =
+            hasActiveTsunami && activeTsunamiForecast
+              ? activeTsunamiForecast.areas.reduce<
+                  'MajorWarning' | 'Warning' | 'Watch' | 'Forecast' | 'Unknown'
+                >((best, a) => {
+                  const rank = {
+                    MajorWarning: 4,
+                    Warning: 3,
+                    Watch: 2,
+                    Forecast: 1,
+                    Unknown: 0,
+                  };
+                  return rank[a.grade] > rank[best] ? a.grade : best;
+                }, 'Unknown')
+              : 'Unknown';
+
+          const isMajorTsunami = highestGrade === 'MajorWarning';
+          const isWarningTsunami = highestGrade === 'Warning';
+          const tsunamiStripeClass = isMajorTsunami
+            ? 'hazard-stripe-tsunami-major'
+            : isWarningTsunami
+              ? 'hazard-stripe-tsunami-warning'
+              : '';
+
           return (
-            <div className="pb-2">
-              <div className="bg-amber-600 px-2.5 py-1 text-[13px] font-bold text-slate-950 flex items-center justify-between">
-                <span>津波警報・注意報・予報</span>
-                {hasActiveTsunami && activeTsunamiForecast && (
-                  <span className="font-mono text-xs bg-slate-950/60 text-white px-1.5 py-0.2 rounded-xs">
-                    {activeTsunamiForecast.areas.length}沿岸発表中
-                  </span>
+            <div
+              data-testid="tsunami-panel-root"
+              className={
+                tsunamiStripeClass
+                  ? `p-[3px] ${tsunamiStripeClass} ${
+                      isMajorTsunami
+                        ? 'shadow-[0_0_20px_rgba(168,85,247,0.5)]'
+                        : 'shadow-[0_0_18px_rgba(250,204,21,0.38)]'
+                    }`
+                  : 'pb-2'
+              }
+            >
+              <div className={tsunamiStripeClass ? 'bg-[#111318] pb-2' : ''}>
+                {tsunamiStripeClass && (
+                  <div className={`h-2.5 w-full ${tsunamiStripeClass}`} />
                 )}
-              </div>
+                <div
+                  className={`px-2.5 py-1 text-[13px] font-black flex items-center justify-between gap-1.5 ${
+                    isMajorTsunami
+                      ? 'bg-purple-700 text-white border-y border-yellow-400/80'
+                      : isWarningTsunami
+                        ? 'bg-red-600 text-white border-y border-yellow-400/80'
+                        : 'bg-amber-600 text-slate-950 font-bold'
+                  }`}
+                >
+                  <span className="min-w-0 truncate">
+                    {isMajorTsunami
+                      ? '大津波警報 発表中'
+                      : isWarningTsunami
+                        ? '津波警報 発表中'
+                        : '津波警報・注意報・予報'}
+                  </span>
+                  {hasActiveTsunami && activeTsunamiForecast && (
+                    <span
+                      className={`font-mono text-[11px] px-1.5 py-0.2 rounded-xs whitespace-nowrap shrink-0 ${
+                        isMajorTsunami || isWarningTsunami
+                          ? 'bg-yellow-400 text-slate-950 font-black'
+                          : 'bg-slate-950/60 text-white'
+                      }`}
+                    >
+                      {activeTsunamiForecast.areas.length}沿岸発表中
+                    </span>
+                  )}
+                </div>
 
-              {hasActiveTsunami && activeTsunamiForecast ? (
-                <>
-                  {/* JMA Official Style Earthquake Card (only displayed when a tsunami forecast is actively issued) */}
-                  <div className="mx-2.5 mt-2 bg-neutral-900 border border-neutral-700/80 rounded-xs overflow-hidden shadow-md">
-                    <div className="bg-neutral-800/95 px-2.5 py-1 flex items-center justify-between border-b border-neutral-700/60">
-                      <span className="text-[11px] font-mono font-bold text-neutral-300">
-                        震源・地震情報
-                      </span>
-                      {activeTsunamiForecast.source === 'demo' && (
-                        <span className="bg-purple-600 text-white px-1.5 py-0.2 rounded-xs font-bold text-[10px]">
-                          デモデータ
+                {hasActiveTsunami && activeTsunamiForecast ? (
+                  <>
+                    {/* JMA Official Style Earthquake Card (only displayed when a tsunami forecast is actively issued) */}
+                    <div className="mx-2.5 mt-2 bg-neutral-900 border border-neutral-700/80 rounded-xs overflow-hidden shadow-md">
+                      <div className="bg-neutral-800/95 px-2.5 py-1 flex items-center justify-between gap-1.5 border-b border-neutral-700/60">
+                        <span className="text-[11px] font-mono font-bold text-neutral-300 whitespace-nowrap">
+                          震源・地震情報
                         </span>
-                      )}
-                    </div>
-                    <div className="p-2 space-y-2">
-                      <div>
-                        <div className="text-[10px] text-neutral-400 font-mono">地震の発生日時</div>
-                        <div className="text-sm font-bold text-white tracking-wide">
-                          {formatOccurrenceTimeJa(occurrenceTimeStr)}
-                        </div>
+                        {activeTsunamiForecast.source === 'demo' && (
+                          <span className="bg-purple-600 text-white px-1.5 py-0.2 rounded-xs font-bold text-[10px] whitespace-nowrap shrink-0">
+                            デモデータ
+                          </span>
+                        )}
                       </div>
-
-                      <div className="grid grid-cols-2 gap-1.5 text-xs">
-                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                          <div className="text-[10px] text-neutral-400 font-mono">震央地名</div>
-                          <div className="font-bold text-neutral-100 truncate text-[12px]" title={hypocenterName}>
-                            {hypocenterName}
+                      <div className="p-2 space-y-2">
+                        <div>
+                          <div className="text-[10px] text-neutral-400 font-mono">地震の発生日時</div>
+                          <div className="text-[13px] font-bold text-white tracking-wide whitespace-nowrap">
+                            {formatOccurrenceTimeJa(occurrenceTimeStr)}
                           </div>
                         </div>
-                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                          <div className="text-[10px] text-neutral-400 font-mono">最大震度</div>
-                          <div className="flex items-center gap-1 mt-0.5">
-                            <span
-                              className="px-1.5 py-0.2 rounded-xs font-bold text-xs"
-                              style={{
-                                backgroundColor: scaleBadgeStyle.bg,
-                                color: scaleBadgeStyle.text,
-                              }}
-                            >
-                              {maxScaleLabel !== '-' ? `震度 ${maxScaleLabel}` : '不明'}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                          <div className="text-[10px] text-neutral-400 font-mono">深さ</div>
-                          <div className="font-bold font-mono text-neutral-100 text-[12px]">
-                            {depthText}
-                          </div>
-                        </div>
-                        <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800">
-                          <div className="text-[10px] text-neutral-400 font-mono">規模</div>
-                          <div className="font-bold font-mono text-amber-400 text-[12px]">
-                            {magText}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
 
-                  <div className="px-2.5 pt-2 space-y-2">
-                    <div className="flex items-center justify-between text-xs font-mono text-neutral-300">
-                      <span>
-                        発表: {activeTsunamiForecast.issueTime || '随時'}
-                      </span>
-                    </div>
-
-                    {activeTsunamiForecast.headline && (
-                      <p className="text-xs text-yellow-200 leading-snug bg-yellow-950/40 border-l-2 border-yellow-400 px-2 py-1">
-                        {activeTsunamiForecast.headline}
-                      </p>
-                    )}
-
-                    {/* Group areas by grade: MajorWarning -> Warning -> Watch -> Forecast */}
-                    {(['MajorWarning', 'Warning', 'Watch', 'Forecast'] as const).map(
-                      (targetGrade) => {
-                        const matchedAreas = activeTsunamiForecast.areas.filter(
-                          (a) => a.grade === targetGrade
-                        );
-                        if (matchedAreas.length === 0) return null;
-                        const style = getTsunamiGradeStyle(targetGrade);
-                        return (
-                          <div
-                            key={targetGrade}
-                            className="border border-neutral-700 bg-neutral-900/60 rounded-xs overflow-hidden"
-                          >
-                            <div
-                              className="px-2 py-0.5 text-xs font-bold flex items-center justify-between"
-                              style={{
-                                backgroundColor: style.hex,
-                                color: style.textHex,
-                              }}
-                            >
-                              <span>{style.label}</span>
-                              <span className="font-mono text-[11px]">
-                                {matchedAreas.length}沿岸
+                        <div className="grid grid-cols-2 gap-1.5 text-xs">
+                          <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
+                            <div className="text-[10px] text-neutral-400 font-mono">震央地名</div>
+                            <div className="font-bold text-neutral-100 truncate text-[12px]" title={hypocenterName}>
+                              {hypocenterName}
+                            </div>
+                          </div>
+                          <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
+                            <div className="text-[10px] text-neutral-400 font-mono">最大震度</div>
+                            <div className="flex items-center gap-1 mt-0.5">
+                              <span
+                                className="px-1.5 py-0.2 rounded-xs font-black text-xs whitespace-nowrap"
+                                style={{
+                                  backgroundColor: scaleBadgeStyle.bg,
+                                  color: scaleBadgeStyle.text,
+                                }}
+                              >
+                                {maxScaleLabel !== '-' ? maxScaleLabel : '不明'}
                               </span>
                             </div>
-                            <div className="p-1.5 space-y-1">
-                              {matchedAreas.map((area) => (
-                                <div
-                                  key={area.code || area.name}
-                                  className="flex items-center justify-between text-xs px-1 py-0.5 border-b border-neutral-800/80 last:border-none"
-                                >
-                                  <span className="font-bold text-white">
-                                    {area.name}
-                                  </span>
-                                  <div className="text-right font-mono text-[11px] space-x-2">
-                                    <span className="text-amber-300 font-bold">
-                                      {area.maxHeightText}
-                                    </span>
-                                    <span className="text-neutral-400">
-                                      {area.firstHeightText}
-                                    </span>
-                                  </div>
-                                </div>
-                              ))}
+                          </div>
+                          <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
+                            <div className="text-[10px] text-neutral-400 font-mono">深さ</div>
+                            <div className="font-bold font-mono text-neutral-100 text-[12px] whitespace-nowrap">
+                              {depthText}
                             </div>
                           </div>
-                        );
-                      }
-                    )}
+                          <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
+                            <div className="text-[10px] text-neutral-400 font-mono">規模</div>
+                            <div className="font-bold font-mono text-amber-400 text-[12px] whitespace-nowrap">
+                              {magText}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="px-2.5 pt-2 space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-neutral-300">
+                        <span className="whitespace-nowrap">
+                          発表: {formatCompactDateTime(activeTsunamiForecast.issueTime) || '随時'}
+                        </span>
+                      </div>
+
+                      {activeTsunamiForecast.headline && (
+                        <p className="text-xs text-yellow-200 leading-snug bg-yellow-950/40 border-l-2 border-yellow-400 px-2 py-1">
+                          {activeTsunamiForecast.headline}
+                        </p>
+                      )}
+
+                      {/* Group areas by grade: MajorWarning -> Warning -> Watch -> Forecast */}
+                      {(['MajorWarning', 'Warning', 'Watch', 'Forecast'] as const).map(
+                        (targetGrade) => {
+                          const matchedAreas = activeTsunamiForecast.areas.filter(
+                            (a) => a.grade === targetGrade
+                          );
+                          if (matchedAreas.length === 0) return null;
+                          const style = getTsunamiGradeStyle(targetGrade);
+                          return (
+                            <div
+                              key={targetGrade}
+                              className="border border-neutral-700 bg-neutral-900/60 rounded-xs overflow-hidden"
+                            >
+                              <div
+                                className="px-2 py-0.5 text-xs font-bold flex items-center justify-between gap-1.5"
+                                style={{
+                                  backgroundColor: style.hex,
+                                  color: style.textHex,
+                                }}
+                              >
+                                <span className="truncate">{style.label}</span>
+                                <span className="font-mono text-[11px] whitespace-nowrap shrink-0">
+                                  {matchedAreas.length}沿岸
+                                </span>
+                              </div>
+                              <div className="p-1.5 space-y-1">
+                                {matchedAreas.map((area) => (
+                                  <div
+                                    key={area.code || area.name}
+                                    className="px-1 py-0.5 border-b border-neutral-800/80 last:border-none"
+                                  >
+                                    <div className="flex items-baseline justify-between gap-1.5 text-xs">
+                                      <span className="font-bold text-white min-w-0 truncate">
+                                        {area.name}
+                                      </span>
+                                      <span className="text-amber-300 font-mono font-bold text-[11px] whitespace-nowrap shrink-0">
+                                        {area.maxHeightText}
+                                      </span>
+                                    </div>
+                                    {area.firstHeightText && (
+                                      <div className="text-[10px] font-mono text-neutral-400 text-right whitespace-nowrap">
+                                        {area.firstHeightText}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        }
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="px-2.5 py-3 text-xs text-neutral-300 space-y-2">
+                    <div
+                      data-testid="tsunami-none-message"
+                      className="p-2.5 bg-neutral-900/80 border border-neutral-700 text-neutral-200 font-medium"
+                    >
+                      現在、津波警報・注意報・予報は発表されていません。
+                    </div>
                   </div>
-                </>
-              ) : (
-                <div className="px-2.5 py-3 text-xs text-neutral-300 space-y-2">
-                  <div
-                    data-testid="tsunami-none-message"
-                    className="p-2.5 bg-neutral-900/80 border border-neutral-700 text-neutral-200 font-medium"
-                  >
-                    現在、津波警報・注意報・予報は発表されていません。
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           );
         })()}
@@ -1740,174 +1863,259 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {/* Fixed Header: Red bar + status + hypocenter info + Big Max Scale Badge */}
             <div className="shrink-0 bg-[#111318] border-b border-[#2B303C] z-10">
-              {/* EEW (緊急地震速報 警報・予報) Live Banner (NERV / Broadcast Style) */}
+              {/* EEW (緊急地震速報 警報・特別警報・予報) Live Banner (NERV / Broadcast Style) */}
               {activeEew && isEewStillActive(activeEew) && (() => {
                 const isWarn = activeEew.isWarning !== false;
+                const isSpecialWarn =
+                  isWarn &&
+                  (activeEew.maxScaleCode >= 55 || (activeEew.maxLpgmClass ?? 0) >= 4);
                 const isFinalReport = Boolean(activeEew.isFinal) || activeEew.serial >= 5;
                 const eewHasLpgm = hasActualEewLpgm(activeEew);
                 const showEewLpgm = eewHasLpgm && eewDisplayMode === 'lpgm';
                 const displayAreas = showEewLpgm
                   ? activeEew.areas.filter((a) => (a.lpgmClass ?? 0) >= 1)
                   : activeEew.areas;
+
+                const rawScaleLabel = (activeEew.maxScaleLabel || '').trim();
+                const isUnknownScale =
+                  !rawScaleLabel || rawScaleLabel === '不明' || rawScaleLabel === '解析中';
+                const hasOrMore = !isUnknownScale && rawScaleLabel.endsWith('以上');
+                const baseScaleLabel = hasOrMore
+                  ? rawScaleLabel.slice(0, -2)
+                  : rawScaleLabel;
+                const eewScaleStyle = getSeismicScaleStyle(activeEew.maxScaleCode);
+                const maxLpgmStyle = getLpgmClassStyle(activeEew.maxLpgmClass);
+
+                const stripeClass = isSpecialWarn
+                  ? 'hazard-stripe-eew-special'
+                  : isWarn
+                    ? 'hazard-stripe-eew-warning'
+                    : '';
+
                 return (
                   <div
                     data-testid="eew-live-banner"
-                    className={`pb-2 mb-2 rounded-xs shadow-lg animate-pulse-slow border-2 ${
-                      isWarn
-                        ? 'bg-[#1A0B0E] border-red-500 shadow-red-950/60'
-                        : 'bg-[#1C1408] border-amber-500 shadow-amber-950/60'
+                    className={`mb-2 rounded-xs shadow-lg ${
+                      isSpecialWarn
+                        ? `p-[2px] ${stripeClass} shadow-[0_0_16px_rgba(147,51,234,0.45)]`
+                        : isWarn
+                          ? `p-[2px] ${stripeClass} shadow-[0_0_14px_rgba(220,38,38,0.4)]`
+                          : 'border-2 border-amber-500 bg-[#1C1408] shadow-amber-950/60 pb-2'
                     }`}
                   >
                     <div
-                      className={`px-2.5 py-1 text-[13px] font-black text-white flex items-center justify-between tracking-wide ${
-                        isWarn ? 'bg-red-600' : 'bg-amber-600'
-                      }`}
+                      className={
+                        stripeClass
+                          ? `pb-2 ${isSpecialWarn ? 'bg-[#150A21]' : 'bg-[#1A0B0E]'}`
+                          : ''
+                      }
                     >
-                      <span className="flex items-center gap-1.5">
-                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-                        {isWarn ? '緊急地震速報 (警報)' : '緊急地震速報 (予報)'}
-                      </span>
-                      <span className="font-mono text-xs text-neutral-200">
-                        {isFinalReport ? '最終報' : `第${activeEew.serial}報`}
-                      </span>
-                    </div>
-
-                    <div className="px-2.5 pt-2 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-lg font-black text-white tracking-wide">
-                            {activeEew.hypocenterName || '震源調査中'}
-                          </div>
-                          <div className="text-xs font-mono text-neutral-300">
-                            {activeEew.magnitude > 0
-                              ? `M${activeEew.magnitude.toFixed(1)}`
-                              : 'M不明'}{' '}
-                            /{' '}
-                            {activeEew.depthKm >= 0
-                              ? `深さ約${activeEew.depthKm}km`
-                              : '深さ不明'}
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-[10px] text-neutral-400 font-mono">
-                            {showEewLpgm ? '最大予想階級' : '最大予測震度'}
-                          </div>
-                          <div
-                            className={`text-2xl font-black font-mono tracking-wider ${
-                              showEewLpgm ? 'text-orange-400' : 'text-yellow-300'
-                            }`}
-                          >
-                            {showEewLpgm
-                              ? activeEew.maxLpgmLabel ||
-                                (activeEew.maxLpgmClass ? `階級${activeEew.maxLpgmClass}` : '')
-                              : activeEew.maxScaleLabel === '不明' || activeEew.maxScaleLabel === '解析中'
-                                ? activeEew.maxScaleLabel
-                                : `震度${activeEew.maxScaleLabel}`}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Mode Switcher Pills: 長周期地震動が実際に予測されているときのみ表示 */}
-                      {eewHasLpgm && (
-                        <div className="grid grid-cols-2 gap-1 p-0.5 bg-black/50 border border-neutral-700/80 rounded-xs">
-                          <button
-                            type="button"
-                            onClick={() => onChangeEewDisplayMode?.('intensity')}
-                            className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
-                              !showEewLpgm
-                                ? 'bg-red-600 text-white font-black shadow-xs'
-                                : 'text-neutral-400 hover:text-white'
-                            }`}
-                          >
-                            震度予測 (1〜7)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onChangeEewDisplayMode?.('lpgm')}
-                            className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
-                              showEewLpgm
-                                ? 'bg-amber-600 text-white font-black shadow-xs'
-                                : 'text-neutral-400 hover:text-white'
-                            }`}
-                          >
-                            長周期地震動 (階級1〜4)
-                          </button>
-                        </div>
-                      )}
-
+                      {stripeClass && <div className={`h-2 w-full ${stripeClass}`} />}
                       <div
-                        className={`text-[11px] font-mono text-neutral-400 flex items-center justify-between border-t pt-1 ${
-                          isWarn ? 'border-red-900/50' : 'border-amber-900/50'
+                        className={`px-2.5 py-1 text-[12.5px] font-black text-white flex items-center justify-between gap-1.5 tracking-wide ${
+                          isSpecialWarn
+                            ? 'bg-purple-700'
+                            : isWarn
+                              ? 'bg-red-600'
+                              : 'bg-amber-600'
                         }`}
                       >
-                        <span>発生: {activeEew.originTime || '直近'}</span>
-                        <span className="flex items-center gap-1 text-[10px] text-amber-300">
-                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
-                          自動切替中
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <span className="inline-block w-2 h-2 rounded-full bg-white animate-ping shrink-0" />
+                          <span className="truncate">
+                            {isSpecialWarn
+                              ? '緊急地震速報 (特別警報)'
+                              : isWarn
+                                ? '緊急地震速報 (警報)'
+                                : '緊急地震速報 (予報)'}
+                          </span>
+                        </span>
+                        <span className="font-mono text-[11px] text-neutral-100 whitespace-nowrap shrink-0">
+                          {isFinalReport ? '最終報' : `第${activeEew.serial}報`}
                         </span>
                       </div>
 
-                      {/* Warning / Affected Areas */}
-                      {displayAreas.length > 0 && (
-                        <div className="space-y-1 pt-1">
-                          <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
-                            <span>
-                              {showEewLpgm
-                                ? '長周期地震動 予想地域（階級1〜4）'
-                                : '強い揺れの予想地域'}
-                            </span>
-                            <span className="font-mono text-[10px] text-neutral-400">
-                              {displayAreas.length}地域
-                            </span>
+                      <div className="px-2.5 pt-2 space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[15px] font-black text-white leading-snug tracking-tight break-words">
+                              {activeEew.hypocenterName || '震源調査中'}
+                            </div>
+                            <div className="text-[11px] font-mono text-neutral-300 flex flex-wrap items-baseline gap-x-1 mt-0.5">
+                              <span className="whitespace-nowrap">
+                                {activeEew.magnitude > 0
+                                  ? `M${activeEew.magnitude.toFixed(1)}`
+                                  : 'M不明'}
+                              </span>
+                              <span className="text-neutral-500">/</span>
+                              <span className="whitespace-nowrap">
+                                {activeEew.depthKm >= 0
+                                  ? `深さ約${activeEew.depthKm}km`
+                                  : '深さ不明'}
+                              </span>
+                            </div>
                           </div>
-                          <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
-                            {displayAreas.map((area) => {
-                              const scaleRange = formatEewScaleRange(
-                                area.scaleFrom,
-                                area.scaleTo
-                              );
-                              const lpgmStyle = getLpgmClassStyle(area.lpgmClass);
 
-                              return (
-                                <div
-                                  key={`${area.pref}-${area.name}`}
-                                  className="bg-[#121620] border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between text-xs"
-                                >
-                                  <div className="font-bold text-white min-w-0 pr-1 truncate">
-                                    <span className="text-[10px] text-neutral-400 mr-1.5 font-normal">
-                                      {area.pref}
+                          {showEewLpgm ? (
+                            <div
+                              className="shrink-0 flex flex-col items-center justify-center min-w-[60px] h-[52px] px-1.5 rounded-xs shadow-md border"
+                              style={{
+                                backgroundColor: maxLpgmStyle.bg,
+                                color: maxLpgmStyle.text,
+                                borderColor: maxLpgmStyle.border,
+                              }}
+                            >
+                              <span className="text-[9px] font-bold leading-none tracking-tighter opacity-90 whitespace-nowrap">
+                                最大予想階級
+                              </span>
+                              <div className="flex items-baseline justify-center gap-0.5 leading-none mt-1 whitespace-nowrap">
+                                <span className="text-[10px] font-bold leading-none">階級</span>
+                                <span className="text-[22px] font-black leading-none font-mono">
+                                  {activeEew.maxLpgmClass || '-'}
+                                </span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              className={`shrink-0 flex flex-col items-center justify-center min-w-[60px] h-[52px] px-1.5 rounded-xs shadow-md border ${eewScaleStyle.border} ${eewScaleStyle.bg} ${eewScaleStyle.text}`}
+                            >
+                              <span className="text-[9px] font-bold leading-none tracking-tighter opacity-85 whitespace-nowrap">
+                                最大予測震度
+                              </span>
+                              {isUnknownScale ? (
+                                <span className="text-xs font-black leading-none mt-1 whitespace-nowrap">
+                                  {rawScaleLabel || '不明'}
+                                </span>
+                              ) : (
+                                <div className="flex items-baseline justify-center gap-0.5 leading-none mt-1 whitespace-nowrap">
+                                  <span className="text-[22px] font-black leading-none tracking-tight">
+                                    {baseScaleLabel}
+                                  </span>
+                                  {hasOrMore && (
+                                    <span className="text-[9px] font-extrabold leading-none opacity-95">
+                                      以上
                                     </span>
-                                    <span>{area.name}</span>
-                                  </div>
-                                  <div className="flex items-center gap-1.5 font-mono shrink-0">
-                                    {showEewLpgm ? (
-                                      <span
-                                        className="px-1.5 py-0.2 font-black rounded-xs text-[11px]"
-                                        style={{
-                                          backgroundColor: lpgmStyle.bg,
-                                          color: lpgmStyle.text,
-                                        }}
-                                      >
-                                        {lpgmStyle.label}
-                                      </span>
-                                    ) : (
-                                      <span
-                                        className={`px-1.5 py-0.2 font-black rounded-xs text-[11px] ${
-                                          area.scaleTo >= 50 || area.scaleFrom >= 50
-                                            ? 'bg-red-600 text-white'
-                                            : 'bg-yellow-400 text-slate-950'
-                                        }`}
-                                      >
-                                        震度{scaleRange}
-                                      </span>
-                                    )}
-                                  </div>
+                                  )}
                                 </div>
-                              );
-                            })}
-                          </div>
+                              )}
+                            </div>
+                          )}
                         </div>
-                      )}
+
+                        {/* Mode Switcher Pills: 長周期地震動が実際に予測されているときのみ表示 */}
+                        {eewHasLpgm && (
+                          <div className="grid grid-cols-2 gap-1 p-0.5 bg-black/50 border border-neutral-700/80 rounded-xs">
+                            <button
+                              type="button"
+                              onClick={() => onChangeEewDisplayMode?.('intensity')}
+                              className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center whitespace-nowrap ${
+                                !showEewLpgm
+                                  ? isSpecialWarn
+                                    ? 'bg-purple-600 text-white font-black shadow-xs'
+                                    : 'bg-red-600 text-white font-black shadow-xs'
+                                  : 'text-neutral-400 hover:text-white'
+                              }`}
+                            >
+                              震度予測 (1〜7)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onChangeEewDisplayMode?.('lpgm')}
+                              className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center whitespace-nowrap ${
+                                showEewLpgm
+                                  ? 'bg-amber-600 text-white font-black shadow-xs'
+                                  : 'text-neutral-400 hover:text-white'
+                              }`}
+                            >
+                              長周期地震動 (階級1〜4)
+                            </button>
+                          </div>
+                        )}
+
+                        <div
+                          className={`text-[10.5px] font-mono text-neutral-400 flex items-center justify-between gap-1.5 border-t pt-1 ${
+                            isSpecialWarn
+                              ? 'border-purple-900/60'
+                              : isWarn
+                                ? 'border-red-900/50'
+                                : 'border-amber-900/50'
+                          }`}
+                        >
+                          <span className="whitespace-nowrap">
+                            発生: {formatCompactDateTime(activeEew.originTime)}
+                          </span>
+                          <span className="flex items-center gap-1 text-[10px] text-amber-300 whitespace-nowrap shrink-0">
+                            <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0" />
+                            自動切替中
+                          </span>
+                        </div>
+
+                        {/* Warning / Affected Areas */}
+                        {displayAreas.length > 0 && (
+                          <div className="space-y-1 pt-1">
+                            <div
+                              className={`text-[11px] font-bold flex items-center justify-between gap-1.5 ${
+                                isSpecialWarn ? 'text-purple-300' : 'text-red-300'
+                              }`}
+                            >
+                              <span className="truncate">
+                                {showEewLpgm
+                                  ? '長周期地震動 予想地域（階級1〜4）'
+                                  : '強い揺れの予想地域'}
+                              </span>
+                              <span className="font-mono text-[10px] text-neutral-400 whitespace-nowrap shrink-0">
+                                {displayAreas.length}地域
+                              </span>
+                            </div>
+                            <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
+                              {displayAreas.map((area) => {
+                                const scaleRange = formatEewScaleRange(
+                                  area.scaleFrom,
+                                  area.scaleTo
+                                );
+                                const lpgmStyle = getLpgmClassStyle(area.lpgmClass);
+
+                                return (
+                                  <div
+                                    key={`${area.pref}-${area.name}`}
+                                    className="bg-[#121620] border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between gap-1.5 text-xs"
+                                  >
+                                    <div className="font-bold text-white min-w-0 flex-1 truncate">
+                                      <span className="text-[10px] text-neutral-400 mr-1 font-normal">
+                                        {area.pref}
+                                      </span>
+                                      <span>{area.name}</span>
+                                    </div>
+                                    <div className="flex items-center gap-1 font-mono shrink-0">
+                                      {showEewLpgm ? (
+                                        <span
+                                          className="px-1.5 py-0.2 font-black rounded-xs text-[11px] whitespace-nowrap shrink-0"
+                                          style={{
+                                            backgroundColor: lpgmStyle.bg,
+                                            color: lpgmStyle.text,
+                                          }}
+                                        >
+                                          {lpgmStyle.label}
+                                        </span>
+                                      ) : (
+                                        <span
+                                          className={`px-1.5 py-0.2 font-black rounded-xs text-[11px] whitespace-nowrap shrink-0 ${
+                                            area.scaleTo >= 50 || area.scaleFrom >= 50
+                                              ? 'bg-red-600 text-white'
+                                              : 'bg-yellow-400 text-slate-950'
+                                          }`}
+                                        >
+                                          {scaleRange}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -1922,17 +2130,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   return (
                     <>
                       <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
-                        <span>地震情報（観測データ待機中）</span>
+                        <span className="truncate">地震情報（観測データ待機中）</span>
                       </div>
                       <div
                         data-testid="earthquake-awaiting-confirm-badge"
-                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[10.5px] font-bold text-amber-200 flex items-center justify-between gap-1.5"
                       >
-                        <span className="flex items-center gap-1.5">
-                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                          最終震度・震源の確定まで地震タブ固定中
+                        <span className="flex items-center gap-1.5 min-w-0 truncate">
+                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
+                          <span className="truncate">震源・震度確定まで固定中</span>
                         </span>
-                        <span className="font-mono text-[10px] text-amber-300">
+                        <span className="font-mono text-[10px] text-amber-300 whitespace-nowrap shrink-0">
                           自動取得中
                         </span>
                       </div>
@@ -1945,7 +2153,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 return (
                   <>
                     <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
-                      <span>
+                      <span className="truncate">
                         {selectedEarthquake.issueTypeLabel || '各地の震度に関する情報'}
                       </span>
                     </div>
@@ -1954,26 +2162,26 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     {selectedEarthquake.isConfirmed === false || eewActive ? (
                       <div
                         data-testid="earthquake-awaiting-confirm-badge"
-                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[10.5px] font-bold text-amber-200 flex items-center justify-between gap-1.5"
                       >
-                        <span className="flex items-center gap-1.5">
-                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                          最終震度・震源の確定まで地震タブ固定中
+                        <span className="flex items-center gap-1.5 min-w-0 truncate">
+                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
+                          <span className="truncate">震源・震度確定まで固定中</span>
                         </span>
-                        <span className="font-mono text-[10px] text-amber-300">
+                        <span className="font-mono text-[10px] text-amber-300 whitespace-nowrap shrink-0">
                           自動取得中
                         </span>
                       </div>
                     ) : interruptKind === 'earthquake' ? (
                       <div
                         data-testid="earthquake-confirmed-badge"
-                        className="bg-emerald-950/70 border-b border-emerald-500/60 px-2.5 py-1 text-[11px] font-bold text-emerald-200 flex items-center justify-between"
+                        className="bg-emerald-950/70 border-b border-emerald-500/60 px-2.5 py-1 text-[11px] font-bold text-emerald-200 flex items-center justify-between gap-1.5"
                       >
-                        <span>✓ 震源・各地の震度 確定</span>
+                        <span className="min-w-0 truncate">✓ 震源・各地の震度 確定</span>
                         <button
                           type="button"
                           onClick={onDismissInterrupt}
-                          className="font-mono text-[10px] bg-emerald-800/80 hover:bg-emerald-700 text-white px-1.5 py-0.5 rounded-xs cursor-pointer"
+                          className="font-mono text-[10px] bg-emerald-800/80 hover:bg-emerald-700 text-white px-1.5 py-0.5 rounded-xs cursor-pointer whitespace-nowrap shrink-0"
                         >
                           巡回再開
                         </button>
@@ -1981,16 +2189,16 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     ) : isLoopPaused ? (
                       <div
                         data-testid="earthquake-manual-pinned-badge"
-                        className="bg-neutral-800/90 border-b border-amber-500/50 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                        className="bg-neutral-800/90 border-b border-amber-500/50 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between gap-1.5"
                       >
-                        <span className="flex items-center gap-1.5">
-                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
-                          手動選択中（巡回停止）
+                        <span className="flex items-center gap-1.5 min-w-0 truncate">
+                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                          <span className="truncate">手動選択中（巡回停止）</span>
                         </span>
                         <button
                           type="button"
                           onClick={onDismissInterrupt}
-                          className="font-mono text-[10px] bg-amber-700/90 hover:bg-amber-600 text-white px-2 py-0.5 rounded-xs cursor-pointer transition-colors shadow-xs"
+                          className="font-mono text-[10px] bg-amber-700/90 hover:bg-amber-600 text-white px-2 py-0.5 rounded-xs cursor-pointer transition-colors shadow-xs whitespace-nowrap shrink-0"
                           title="自動巡回を再開して最新の地震に戻す"
                         >
                           巡回再開 ▶
@@ -2005,16 +2213,26 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         <div className="px-2.5 py-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex-1 space-y-1">
-                              <div className="text-base font-extrabold text-white leading-tight">
+                              <div className="text-[15px] font-extrabold text-white leading-snug break-words">
                                 {selectedEarthquake.hypocenterName ||
                                   (selectedEarthquake.hypocenterUnknown ? '震源精査中' : '震源情報')}
                               </div>
-                              <div className="text-xs font-mono text-neutral-200">
-                                {selectedEarthquake.hypocenterUnknown
-                                  ? '震源・規模 調査中'
-                                  : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
+                              <div className="text-xs font-mono text-neutral-200 flex flex-wrap items-baseline gap-x-1">
+                                {selectedEarthquake.hypocenterUnknown ? (
+                                  <span className="whitespace-nowrap">震源・規模 調査中</span>
+                                ) : (
+                                  <>
+                                    <span className="whitespace-nowrap">
+                                      M{selectedEarthquake.magnitude.toFixed(1)}
+                                    </span>
+                                    <span className="text-neutral-500">/</span>
+                                    <span className="whitespace-nowrap">
+                                      深さ約{selectedEarthquake.depthKm}km
+                                    </span>
+                                  </>
+                                )}
                               </div>
-                              <div className="text-[11px] font-mono text-neutral-400">
+                              <div className="text-[11px] font-mono text-neutral-400 whitespace-nowrap">
                                 {selectedEarthquake.occurrenceTime}
                               </div>
                               <div className="text-xs text-cyan-300 font-bold pt-0.5">
@@ -2027,10 +2245,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               <div
                                 className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
                               >
-                                <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80">
+                                <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80 whitespace-nowrap">
                                   最大震度
                                 </span>
-                                <span className="text-[23px] font-black leading-none mt-0.5">
+                                <span className="text-[23px] font-black leading-none mt-0.5 whitespace-nowrap">
                                   {selectedEarthquake.maxScaleLabel}
                                 </span>
                               </div>
@@ -2061,10 +2279,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     key={`${grp.prefecture}-${grp.scaleCode}-${idx}`}
                     className="pb-1.5"
                   >
-                    <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between">
-                      <span>{grp.prefecture}</span>
+                    <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                      <span className="min-w-0 truncate">{grp.prefecture}</span>
                       <span
-                        className="px-1.5 text-xs font-mono font-extrabold rounded-sm"
+                        className="px-1.5 text-xs font-mono font-extrabold rounded-sm whitespace-nowrap shrink-0"
                         style={{
                           backgroundColor: style.hex,
                           color: style.badgeText,
@@ -2269,9 +2487,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             </span>
           </div>
         ) : (
-          <div className="flex items-center justify-between text-[11px] font-mono text-neutral-300">
+          <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-neutral-300 whitespace-nowrap">
             <span>気象庁防災情報XML</span>
-            <span>更新 {data.lastXmlFetchTime}</span>
+            <span className="shrink-0">更新 {data.lastXmlFetchTime}</span>
           </div>
         )}
       </div>

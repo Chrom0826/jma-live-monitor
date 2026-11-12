@@ -185,3 +185,56 @@
 .animate-title-swap {
   animation: titleSwapIn 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+
+/* ==================== HAZARD DIAGONAL STRIPES (EEW / TSUNAMI) ==================== */
+/* EEW Warning (緊急地震速報・警報): Crisp Red + Dark diagonal stripes */
+.hazard-stripe-eew-warning {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #dc2626 0px,
+    #dc2626 7px,
+    #0b0d12 7px,
+    #0b0d12 14px
+  );
+}
+
+/* EEW Special Warning (緊急地震速報・特別警報): Crisp Purple + Dark diagonal stripes */
+.hazard-stripe-eew-special {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #9333ea 0px,
+    #9333ea 7px,
+    #0b0d12 7px,
+    #0b0d12 14px
+  );
+}
+
+/* Tsunami Warning (津波警報): Bold Red + High-visibility Yellow + Dark accent stripes */
+.hazard-stripe-tsunami-warning {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #dc2626 0px,
+    #dc2626 9px,
+    #0b0d12 9px,
+    #0b0d12 11px,
+    #facc15 11px,
+    #facc15 20px,
+    #0b0d12 20px,
+    #0b0d12 22px
+  );
+}
+
+/* Tsunami Major Warning (大津波警報): Bold Purple + High-visibility Yellow + Dark accent stripes */
+.hazard-stripe-tsunami-major {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #9333ea 0px,
+    #9333ea 9px,
+    #0b0d12 9px,
+    #0b0d12 11px,
+    #facc15 11px,
+    #facc15 20px,
+    #0b0d12 20px,
+    #0b0d12 22px
+  );
+}
