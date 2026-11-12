@@ -7,6 +7,7 @@ import {
 } from '../types/jma';
 import { formatSeismicScale, parseJmaIsoCoordinate } from './jmaParser';
 import { JMA_SUBDIVISION_AREAS } from '../data/jmaSubdivisions';
+import { solveJma2001EpicentralRadiiKm } from './jma2001TravelTime';
 
 /**
  * P2P地震情報 API v2 で利用する情報コード
@@ -557,7 +558,8 @@ export function formatEewArrivalLabel(
 
 /**
  * Computes horizontal radii (km) of P-wave and S-wave fronts on the surface since `originTime`.
- * Uses simple homogeneous velocities (P: 6.0 km/s, S: 3.5 km/s) and hypocentral depth.
+ * Uses the official JMA2001 travel-time table (気象庁 JMA2001 走時表) with 2D bilinear
+ * interpolation and monotonic piecewise linear inversion.
  */
 export function computeEewWaveRadiiKm(
   originTime: string,
@@ -565,16 +567,16 @@ export function computeEewWaveRadiiKm(
   nowMs: number = Date.now()
 ): { pKm: number; sKm: number; elapsedSec: number } {
   const t0 = parseJstDateTimeMs(originTime);
-  if (Number.isNaN(t0)) return { pKm: 0, sKm: 0, elapsedSec: 0 };
+  if (Number.isNaN(t0) || !Number.isFinite(nowMs)) {
+    return { pKm: 0, sKm: 0, elapsedSec: 0 };
+  }
   const elapsedSec = Math.max(0, (nowMs - t0) / 1000);
-  const depth = Math.max(0, depthKm);
-  const horizontal = (dist: number) =>
-    dist > depth ? Math.sqrt(dist * dist - depth * depth) : 0;
-  return {
-    pKm: horizontal(6.0 * elapsedSec),
-    sKm: horizontal(3.5 * elapsedSec),
-    elapsedSec,
-  };
+  if (elapsedSec <= 0) {
+    return { pKm: 0, sKm: 0, elapsedSec: 0 };
+  }
+  const depth = Number.isFinite(depthKm) ? Math.max(0, depthKm) : 0;
+  const { pKm, sKm } = solveJma2001EpicentralRadiiKm(depth, elapsedSec);
+  return { pKm, sKm, elapsedSec };
 }
 
 /** EEW display remains active for this long after the last received serial. */

@@ -776,25 +776,25 @@ test('P2PQuake EEW (code 556) & Tsunami (code 552) parsing, wave radii propagati
   const diffEventEew = { ...eewReport, eventId: '20261106200000', serial: 1 };
   assert.equal(shouldReplaceEew(eewReport, diffEventEew), true); // new event always replaces
 
-  // 4. Wave propagation radii calculation (P-wave: 6.0km/s, S-wave: 3.5km/s)
-  // At 10s after origin: P-dist = 60km (hypo depth 50km -> horizontal radius = sqrt(60^2 - 50^2) = sqrt(1100) ≈ 33.16km)
-  // S-dist = 35km (< depth 50km -> horizontal surface radius = 0km)
+  // 4. Wave propagation radii calculation using official JMA2001 travel-time table (depth 50km)
+  // At 10s after origin: P-wave at 50km depth reaches 42km in 9.828s and 44km in 10.019s -> ~43.80km
+  // S-wave vertical travel time at 50km depth is 13.035s (> 10s) -> horizontal surface radius = 0km
   const radii10s = computeEewWaveRadiiKm(
     '2026/11/06 19:56:00',
     50,
     new Date('2026-11-06T19:56:10+09:00').getTime()
   );
-  assert.ok(radii10s.pKm > 30 && radii10s.pKm < 35);
+  assert.ok(radii10s.pKm > 43 && radii10s.pKm < 44);
   assert.equal(radii10s.sKm, 0);
 
-  // At 20s after origin: P-dist = 120km, S-dist = 70km (horizontal = sqrt(70^2 - 50^2) = sqrt(2400) ≈ 48.98km)
+  // At 20s after origin: P-wave > 125km, S-wave between 55km (19.223s) and 60km (20.174s) -> ~59.09km
   const radii20s = computeEewWaveRadiiKm(
     '2026/11/06 19:56:00',
     50,
     new Date('2026-11-06T19:56:20+09:00').getTime()
   );
-  assert.ok(radii20s.pKm > 100);
-  assert.ok(radii20s.sKm > 45 && radii20s.sKm < 52);
+  assert.ok(radii20s.pKm > 125 && radii20s.pKm < 130);
+  assert.ok(radii20s.sKm > 58.5 && radii20s.sKm < 59.5);
 
   // 5. P2PQuake Tsunami (code 552) parse test
   const sampleTsunamiPayload = {
