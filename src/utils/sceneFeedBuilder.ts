@@ -19,6 +19,7 @@ import {
   getTsunamiAlertSeverity,
   getTsunamiHighestGrade,
   isEewFinal,
+  isEewSpecialWarning,
   isEewStillActive,
   isEewWarning,
   isTsunamiForecastActive,
@@ -79,14 +80,16 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
 
   // ==================== 1. EARTHQUAKE SCENE ====================
   if (effectiveScene === 'earthquake') {
-    // 1a. Active EEW (緊急地震速報 警報・予報)
+    // 1a. Active EEW (緊急地震速報 特別警報・警報・予報)
     if (activeEew && isEewStillActive(activeEew)) {
+      const isSpecial = isEewSpecialWarning(activeEew);
       const isWarn = isEewWarning(activeEew);
       const isFin = isEewFinal(activeEew);
-      const accentColor = isWarn ? '#EF4444' : '#F59E0B';
-      const badgeLabel = isWarn ? '緊急地震速報（警報）' : '緊急地震速報（予報）';
+      const accentColor = isSpecial ? '#9333EA' : isWarn ? '#EF4444' : '#F59E0B';
+      const kindLabel = isSpecial ? '特別警報' : isWarn ? '警報' : '予報';
+      const badgeLabel = `緊急地震速報（${kindLabel}）`;
       const badgeSub = `第${activeEew.serial}報${isFin ? '・最終報' : ''}`;
-      const title = `緊急地震速報（${isWarn ? '警報' : '予報'}） 第${activeEew.serial}報 - ${activeEew.hypocenterName || '震源調査中'}`;
+      const title = `緊急地震速報（${kindLabel}） 第${activeEew.serial}報 - ${activeEew.hypocenterName || '震源調査中'}`;
       const timeLabel = activeEew.originTime || activeEew.issueTime || defaultTimeLabel;
 
       const items: SceneFeedItem[] = [];
@@ -946,22 +949,26 @@ export function buildBottomFlipFeed(
   }
 
   // ==================== PRIORITY 2: ACTIVE EEW ====================
-  // "下のFeedには、「緊急地震速報(警報) 強い揺れに警戒」「予想最大震度5強 M5.7」などと観測中は表示し"
+  // "下のFeedには、「緊急地震速報(警報/特別警報) 強い揺れに警戒」「予想最大震度5強 M5.7」などと観測中は表示し"
   if (isEewActive && activeEew) {
+    const isSpecial = isEewSpecialWarning(activeEew);
     const isWarn = isEewWarning(activeEew);
     const isFin = isEewFinal(activeEew);
-    const accentColor = isWarn ? '#EF4444' : '#F59E0B';
-    const badgeLabel = isWarn ? '緊急地震速報（警報）' : '緊急地震速報（予報）';
+    const accentColor = isSpecial ? '#9333EA' : isWarn ? '#EF4444' : '#F59E0B';
+    const kindLabel = isSpecial ? '特別警報' : isWarn ? '警報' : '予報';
+    const badgeLabel = `緊急地震速報（${kindLabel}）`;
     const cards: BottomFlipCard[] = [];
 
     // Card 1: 強い揺れに警戒
     cards.push({
       id: `eew-alert-${activeEew.serial}`,
       badge: badgeLabel,
-      badgeBg: isWarn
-        ? 'bg-red-600 text-white animate-pulse'
-        : 'bg-amber-500 text-slate-950 font-bold',
-      mainText: `緊急地震速報(${isWarn ? '警報' : '予報'}) 強い揺れに警戒`,
+      badgeBg: isSpecial
+        ? 'bg-purple-600 text-white animate-pulse'
+        : isWarn
+          ? 'bg-red-600 text-white animate-pulse'
+          : 'bg-amber-500 text-slate-950 font-bold',
+      mainText: `緊急地震速報(${kindLabel}) 強い揺れに警戒`,
       subText: `第${activeEew.serial}報${isFin ? ' (最終報)' : ''} 倒れやすい家具から離れ 身の安全を確保`,
       accentColor,
     });
@@ -989,7 +996,7 @@ export function buildBottomFlipFeed(
         badgeBg: 'bg-neutral-800 text-neutral-200 border border-neutral-700',
         mainText: `強い揺れの予想地域: ${areaNames.join('、')}${activeEew.areas.length > 4 ? ` ほか計${activeEew.areas.length}地域` : ''}`,
         subText: '揺れが収まるまで安全な場所に身を潜めてください',
-        accentColor: '#EF4444',
+        accentColor: isSpecial ? '#9333EA' : '#EF4444',
       });
     }
 
@@ -1008,7 +1015,7 @@ export function buildBottomFlipFeed(
     return {
       isFlipMode: true,
       cards,
-      headerTitle: `緊急地震速報（${isWarn ? '警報' : '予報'}） 第${activeEew.serial}報`,
+      headerTitle: `緊急地震速報（${kindLabel}） 第${activeEew.serial}報`,
       headerTime: activeEew.originTime || activeEew.issueTime || defaultTime,
       accentColor,
     };

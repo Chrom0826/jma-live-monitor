@@ -893,7 +893,7 @@ export default function App() {
         ? false
         : isMobilePortrait;
 
-  const fullUpdateDateText = useMemo(() => {
+  const { fullUpdateDateText, compactUpdateDateText } = useMemo(() => {
     const now = new Date();
     const yyyy = now.getFullYear();
     const month = now.getMonth() + 1;
@@ -901,7 +901,10 @@ export default function App() {
     const hm = data.lastXmlFetchTime
       ? data.lastXmlFetchTime.slice(0, 5)
       : `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    return `${yyyy}年${month}月${day}日 ${hm} 更新`;
+    return {
+      fullUpdateDateText: `${yyyy}年${month}月${day}日 ${hm} 更新`,
+      compactUpdateDateText: `${month}/${day} ${hm}更新`,
+    };
   }, [data.lastXmlFetchTime]);
 
   const eqTrackerRef = useRef<EarthquakeTrackerState>(
@@ -2526,11 +2529,11 @@ export default function App() {
                 />
               )}
               <div className="px-2.5 py-1.5 flex flex-col gap-1.5">
-                <div className="flex items-center justify-between gap-2 min-w-0">
+                <div className="flex items-center justify-between gap-1.5 min-w-0">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <h1
                       key={effectiveSceneTitle}
-                      className={`text-[17px] font-extrabold tracking-tight leading-snug truncate animate-title-swap ${headerHazard.titleClass}`}
+                      className={`text-[15px] font-extrabold tracking-tight leading-snug truncate animate-title-swap ${headerHazard.titleClass}`}
                     >
                       {effectiveSceneTitle}
                     </h1>
@@ -2543,7 +2546,7 @@ export default function App() {
                     )}
                   </div>
                   <span className="text-[10px] font-mono text-neutral-300 shrink-0 whitespace-nowrap">
-                    {fullUpdateDateText}
+                    {compactUpdateDateText}
                   </span>
                 </div>
 
