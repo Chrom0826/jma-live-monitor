@@ -1,0 +1,384 @@
+import {
+  EarthquakeReport,
+  InterruptKind,
+  SceneId,
+} from '../types/jma';
+import {
+  decideIncomingEarthquake,
+  earthquakeEventTimeMs,
+} from './jmaParser';
+
+export const DEFAULT_QUAKE_FRESH_WINDOW_MS = 60 * 60 * 1000;
+export const DEFAULT_STARTUP_UNCONFIRMED_WINDOW_MS = 15 * 60 * 1000;
+
+export interface EarthquakeTrackerState {
+  hasInitializedLive: boolean;
+  latestKnown: EarthquakeReport | null;
+}
+
+export function createInitialEarthquakeTrackerState(): EarthquakeTrackerState {
+  return {
+    hasInitializedLive: false,
+    latestKnown: null,
+  };
+}
+
+/**
+ * True when an earthquake report is still preliminary/unconfirmed
+ * (e.g. 震度速報 / 震源に関する情報) and the monitor should stay locked
+ * on the earthquake scene until the final confirmed intensity report arrives.
+ */
+export function isEarthquakeAwaitingDetail(
+  eq:
+    | Pick<
+        EarthquakeReport,
+        'isTest' | 'isConfirmed' | 'issueTypeLabel' | 'hypocenterUnknown'
+      >
+    | null
+    | undefined
+): boolean {
+  if (!eq) return false;
+  if (eq.isTest) return false;
+  if (eq.isConfirmed === true) return false;
+  if (eq.isConfirmed === false) return true;
+  return (
+    eq.hypocenterUnknown === true ||
+    eq.issueTypeLabel === '震度速報' ||
+    eq.issueTypeLabel === '震源に関する情報' ||
+    eq.issueTypeLabel === '震度速報・震源情報（各地の震度集計中）'
+  );
+}
+
+/**
+ * True when a follow-up report for the same earthquake represents a meaningful
+ * progression (e.g. preliminary -> confirmed, hypocenter resolved, max scale increased,
+ * or additional stations while still awaiting confirmation).
+ */
+export function hasEarthquakeReportUpgraded(
+  prev: EarthquakeReport,
+  next: EarthquakeReport
+): boolean {
+  const prevAwaiting = isEarthquakeAwaitingDetail(prev);
+  const nextAwaiting = isEarthquakeAwaitingDetail(next);
+  if (prevAwaiting && !nextAwaiting) return true;
+  if (prev.hypocenterUnknown && !next.hypocenterUnknown) return true;
+  if (next.maxScaleCode > prev.maxScaleCode) return true;
+  if (nextAwaiting && next.stations.length > prev.stations.length) return true;
+  if (nextAwaiting && next.issueTypeLabel !== prev.issueTypeLabel) return true;
+  return false;
+}
+
+export interface EvaluateEarthquakeUpdateOptions {
+  mergedList: EarthquakeReport[];
+  tracker: EarthquakeTrackerState;
+  nowMs: number;
+  isLive: boolean;
+  isRealtimePush?: boolean;
+  isTsunamiWarningActive?: boolean;
+  currentInterruptKind: InterruptKind;
+  freshWindowMs?: number;
+  startupUnconfirmedWindowMs?: number;
+}
+
+export type EarthquakeUpdateAction =
+  | { type: 'noop'; nextTracker: EarthquakeTrackerState }
+  | {
+      type: 'silent_sync';
+      nextTracker: EarthquakeTrackerState;
+      selectedEarthquake: EarthquakeReport;
+    }
+  | {
+      type: 'interrupt_unconfirmed';
+      nextTracker: EarthquakeTrackerState;
+      selectedEarthquake: EarthquakeReport;
+      resetFlipLoop: boolean;
+    }
+  | {
+      type: 'interrupt_confirmed';
+      nextTracker: EarthquakeTrackerState;
+      selectedEarthquake: EarthquakeReport;
+      resetFlipLoop: boolean;
+    };
+
+/**
+ * Evaluates a merged earthquake list (newest first) against the current tracker state
+ * and decides whether to stay idle, silently sync, lock on an unconfirmed quake,
+ * or trigger/confirm a non-EEW earthquake interrupt.
+ */
+export function evaluateIncomingEarthquakeUpdate(
+  options: EvaluateEarthquakeUpdateOptions
+): EarthquakeUpdateAction {
+  const {
+    mergedList,
+    tracker,
+    nowMs,
+    isLive,
+    isRealtimePush = false,
+    isTsunamiWarningActive = false,
+    currentInterruptKind,
+    freshWindowMs = DEFAULT_QUAKE_FRESH_WINDOW_MS,
+    startupUnconfirmedWindowMs = DEFAULT_STARTUP_UNCONFIRMED_WINDOW_MS,
+  } = options;
+
+  if (!mergedList || mergedList.length === 0) {
+    return { type: 'noop', nextTracker: tracker };
+  }
+
+  const newest = mergedList[0];
+
+  // Offline / fallback data must never establish the live baseline or trigger interrupts.
+  if (!isLive) {
+    if (!tracker.hasInitializedLive && !tracker.latestKnown) {
+      return {
+        type: 'silent_sync',
+        nextTracker: tracker,
+        selectedEarthquake: newest,
+      };
+    }
+    return { type: 'noop', nextTracker: tracker };
+  }
+
+  // First live snapshot: establish baseline without false-positive interrupts on historical quakes,
+  // unless it's a real-time WebSocket push or an actively unfolding recent unconfirmed quake.
+  if (!tracker.hasInitializedLive) {
+    const nextTracker: EarthquakeTrackerState = {
+      hasInitializedLive: true,
+      latestKnown: newest,
+    };
+
+    if (isRealtimePush) {
+      const decision = decideIncomingEarthquake(newest, null, nowMs, freshWindowMs);
+      if (decision === 'interrupt' && !isTsunamiWarningActive) {
+        return isEarthquakeAwaitingDetail(newest)
+          ? {
+              type: 'interrupt_unconfirmed',
+              nextTracker,
+              selectedEarthquake: newest,
+              resetFlipLoop: true,
+            }
+          : {
+              type: 'interrupt_confirmed',
+              nextTracker,
+              selectedEarthquake: newest,
+              resetFlipLoop: true,
+            };
+      }
+      return {
+        type: 'silent_sync',
+        nextTracker,
+        selectedEarthquake: newest,
+      };
+    }
+
+    const eqTimeMs = earthquakeEventTimeMs(newest);
+    const isRecentUnconfirmed =
+      isEarthquakeAwaitingDetail(newest) &&
+      eqTimeMs > 0 &&
+      nowMs - eqTimeMs <= startupUnconfirmedWindowMs;
+
+    if (isRecentUnconfirmed && !isTsunamiWarningActive) {
+      return {
+        type: 'interrupt_unconfirmed',
+        nextTracker,
+        selectedEarthquake: newest,
+        resetFlipLoop: true,
+      };
+    }
+
+    return {
+      type: 'silent_sync',
+      nextTracker,
+      selectedEarthquake: newest,
+    };
+  }
+
+  const decision = decideIncomingEarthquake(
+    newest,
+    tracker.latestKnown,
+    nowMs,
+    freshWindowMs
+  );
+
+  if (decision === 'interrupt') {
+    const nextTracker: EarthquakeTrackerState = {
+      hasInitializedLive: true,
+      latestKnown: newest,
+    };
+
+    if (isTsunamiWarningActive) {
+      return {
+        type: 'silent_sync',
+        nextTracker,
+        selectedEarthquake: newest,
+      };
+    }
+
+    return isEarthquakeAwaitingDetail(newest)
+      ? {
+          type: 'interrupt_unconfirmed',
+          nextTracker,
+          selectedEarthquake: newest,
+          resetFlipLoop: true,
+        }
+      : {
+          type: 'interrupt_confirmed',
+          nextTracker,
+          selectedEarthquake: newest,
+          resetFlipLoop: true,
+        };
+  }
+
+  if (decision === 'update') {
+    const prevKnown = tracker.latestKnown;
+    const nextTracker: EarthquakeTrackerState = {
+      hasInitializedLive: true,
+      latestKnown: newest,
+    };
+
+    if (prevKnown && hasEarthquakeReportUpgraded(prevKnown, newest)) {
+      if (isTsunamiWarningActive) {
+        return {
+          type: 'silent_sync',
+          nextTracker,
+          selectedEarthquake: newest,
+        };
+      }
+
+      if (isEarthquakeAwaitingDetail(newest)) {
+        const alreadyInterruptingEq =
+          currentInterruptKind === 'earthquake' ||
+          currentInterruptKind === 'eew';
+        return {
+          type: 'interrupt_unconfirmed',
+          nextTracker,
+          selectedEarthquake: newest,
+          resetFlipLoop: !alreadyInterruptingEq,
+        };
+      }
+
+      return {
+        type: 'interrupt_confirmed',
+        nextTracker,
+        selectedEarthquake: newest,
+        resetFlipLoop: true,
+      };
+    }
+
+    return {
+      type: 'silent_sync',
+      nextTracker,
+      selectedEarthquake: newest,
+    };
+  }
+
+  return { type: 'noop', nextTracker: tracker };
+}
+
+/**
+ * Computes the active card index and completed full rounds from a monotonic flip tick count.
+ */
+export function computeFlipCycleState(
+  tickCount: number,
+  cardCount: number
+): {
+  cardIndex: number;
+  completedRounds: number;
+} {
+  if (cardCount <= 0) {
+    return { cardIndex: 0, completedRounds: 0 };
+  }
+  const safeTick = Math.max(0, Math.floor(tickCount));
+  return {
+    cardIndex: safeTick % cardCount,
+    completedRounds: Math.floor(safeTick / cardCount),
+  };
+}
+
+export interface EvaluateEarthquakeLoopParams {
+  effectiveScene: SceneId;
+  interruptKind: InterruptKind;
+  isLoopPaused: boolean;
+  pinnedEarthquakeId: string | null;
+  isEewActive: boolean;
+  eqLockUntilConfirmed: boolean;
+  selectedEarthquake: EarthquakeReport | null | undefined;
+  flipCompletedRounds: number;
+  isEarthquakeScrollDone: boolean;
+  isMobileDetachedFromDetailTab: boolean;
+}
+
+export type EarthquakeLoopOutcome =
+  | 'stay'
+  | 'return_from_interrupt'
+  | 'advance_normal_patrol';
+
+/**
+ * Decides whether the earthquake scene should stay, exit a non-EEW interrupt
+ * after 2 completed loops of the bottom flip feed, or advance in normal patrol.
+ */
+export function evaluateEarthquakeLoopCompletion(
+  params: EvaluateEarthquakeLoopParams
+): EarthquakeLoopOutcome {
+  if (params.effectiveScene !== 'earthquake') return 'stay';
+  if (params.isLoopPaused || params.pinnedEarthquakeId) return 'stay';
+  if (params.isEewActive) return 'stay';
+  if (params.flipCompletedRounds < 2) return 'stay';
+
+  if (params.interruptKind === 'earthquake') {
+    if (
+      params.eqLockUntilConfirmed ||
+      isEarthquakeAwaitingDetail(params.selectedEarthquake)
+    ) {
+      return 'stay';
+    }
+    return 'return_from_interrupt';
+  }
+
+  if (params.interruptKind === 'none') {
+    if (params.isEarthquakeScrollDone || params.isMobileDetachedFromDetailTab) {
+      return 'advance_normal_patrol';
+    }
+  }
+
+  return 'stay';
+}
+
+export function shouldBlockNormalPatrolAdvance(params: {
+  tsunamiSeverity: 'none' | 'forecast' | 'warning_or_above';
+  eqLockUntilConfirmed: boolean;
+  interruptKind: InterruptKind;
+  isEewActive: boolean;
+}): boolean {
+  if (params.tsunamiSeverity === 'warning_or_above') return true;
+  if (params.eqLockUntilConfirmed) return true;
+  if (params.interruptKind === 'eew' || params.interruptKind === 'earthquake') {
+    return true;
+  }
+  if (params.isEewActive) return true;
+  return false;
+}
+
+/**
+ * Shallow equivalence check for earthquake lists to prevent idle poll re-renders in App.
+ */
+export function areEarthquakeListsEquivalent(
+  a: EarthquakeReport[],
+  b: EarthquakeReport[]
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.reportKey !== y.reportKey ||
+      x.maxScaleCode !== y.maxScaleCode ||
+      x.isConfirmed !== y.isConfirmed ||
+      x.stations.length !== y.stations.length
+    ) {
+      return false;
+    }
+  }
+  return true;
+}

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import {
   AmedasMetric,
   AmedasStationData,
@@ -12,7 +12,6 @@ import {
   RegionConfig,
   RegionalWarningItem,
   SceneId,
-  TsunamiForecastArea,
   TsunamiForecastReport,
   TsunamiStationItem,
   TyphoonReport,
@@ -26,7 +25,6 @@ import {
   renderBroadcastWeatherSvg,
 } from '../utils/jmaParser';
 import {
-  formatEewArrivalLabel,
   formatEewScaleRange,
   formatOccurrenceTimeJa,
   getLpgmClassStyle,
@@ -34,6 +32,159 @@ import {
   getTsunamiGradeStyle,
   isEewStillActive,
 } from '../utils/eewTsunami';
+
+const broadcastWeatherSvgCache = new Map<string, string>();
+function getCachedBroadcastWeatherSvg(
+  weatherCode: string | undefined,
+  weatherText: string | undefined,
+  width: number,
+  height: number
+): string {
+  const key = `${weatherCode || ''}|${weatherText || ''}|${width}x${height}`;
+  let svg = broadcastWeatherSvgCache.get(key);
+  if (svg === undefined) {
+    svg = renderBroadcastWeatherSvg(weatherCode, weatherText, width, height);
+    if (broadcastWeatherSvgCache.size >= 256) {
+      const firstKey = broadcastWeatherSvgCache.keys().next().value;
+      if (firstKey !== undefined) broadcastWeatherSvgCache.delete(firstKey);
+    }
+    broadcastWeatherSvgCache.set(key, svg);
+  }
+  return svg;
+}
+
+const EMPTY_AMEDAS_RANKINGS = {
+  tempHigh5: [] as AmedasStationData[],
+  tempLow5: [] as AmedasStationData[],
+  precipTop5: [] as AmedasStationData[],
+  windTop5: [] as AmedasStationData[],
+  snowTop5: [] as AmedasStationData[],
+};
+
+const WarningDivisionRow: React.FC<{
+  w: RegionalWarningItem;
+  isFocusedDivision: boolean;
+}> = React.memo(({ w, isFocusedDivision }) => {
+  const divKey = w.divisionCode || w.id;
+  return (
+    <div
+      data-division-code={divKey}
+      className={`pb-1.5 transition-colors ${
+        isFocusedDivision
+          ? 'bg-sky-950/60 ring-2 ring-inset ring-sky-400 border-l-4 border-sky-400'
+          : ''
+      }`}
+    >
+      <div
+        className={`px-2.5 py-0.5 text-[13px] font-bold tracking-wide flex items-center justify-between ${
+          isFocusedDivision
+            ? 'bg-sky-600 text-white font-extrabold'
+            : w.severity === 'special'
+              ? 'bg-purple-900 text-white'
+              : w.severity === 'warning'
+                ? 'bg-red-900/90 text-white'
+                : 'bg-[#3E434F] text-white'
+        }`}
+      >
+        <span>{w.prefecture}</span>
+        {(w.severity === 'warning' || w.severity === 'special') && (
+          <span className="text-[10px] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs">
+            {w.severity === 'special' ? '特別警報' : '警報'}
+          </span>
+        )}
+      </div>
+      <div className="px-2.5 pt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+        {w.badgeItems && w.badgeItems.length > 0 ? (
+          w.badgeItems.map((badge) => (
+            <span
+              key={`${w.id}-${badge.code}`}
+              className="inline-flex items-center gap-1 text-[13px] font-bold text-white whitespace-nowrap"
+            >
+              {renderSeverityDot(badge.severity)}
+              <span>{badge.name}</span>
+            </span>
+          ))
+        ) : (
+          <span className="text-xs text-neutral-300">
+            {w.activeWarnings.join('・')}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+});
+
+const ForecastCity3hCard: React.FC<{
+  fc: MonitorDataBundle['forecasts'][number];
+  forecast3hIndex: number;
+  onChangeForecast3hIndex?: (idx: number) => void;
+}> = React.memo(({ fc, forecast3hIndex, onChangeForecast3hIndex }) => {
+  const slots = fc.hourly3h || [];
+  return (
+    <div className="border border-[#262E3D] bg-[#11151F] rounded-xs overflow-hidden">
+      <div className="bg-[#1A2230] px-2 py-0.5 flex items-center justify-between text-xs border-b border-[#262E3D]">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="font-black text-white whitespace-nowrap">
+            {fc.cityName}
+          </span>
+          <span className="text-[11px] text-sky-200 font-bold truncate">
+            {fc.todayWeather}
+          </span>
+        </div>
+        <span className="font-mono text-[11px] shrink-0">
+          <span className="text-red-400 font-bold">
+            {fc.todayTempMax ?? fc.tempMax}℃
+          </span>
+          <span className="text-neutral-500">/</span>
+          <span className="text-sky-400 font-bold">
+            {fc.todayTempMin ?? fc.tempMin}℃
+          </span>
+        </span>
+      </div>
+
+      {/* 8-slot 3-hourly progression strip (03時..24時) */}
+      <div className="grid grid-cols-8 divide-x divide-neutral-800 bg-[#0D1017]">
+        {slots.map((slot, sIdx) => {
+          const isCurrent = sIdx === forecast3hIndex;
+          return (
+            <button
+              key={slot.timeLabel}
+              type="button"
+              onClick={() => onChangeForecast3hIndex?.(sIdx)}
+              className={`py-1 px-0.5 flex flex-col items-center justify-between transition-colors cursor-pointer ${
+                isCurrent
+                  ? 'bg-sky-900/50 ring-1 ring-inset ring-amber-400'
+                  : 'hover:bg-neutral-800/60'
+              }`}
+            >
+              <span
+                className={`text-[9px] font-mono leading-none ${
+                  isCurrent ? 'text-amber-300 font-black' : 'text-neutral-400'
+                }`}
+              >
+                {slot.hour}時
+              </span>
+              <div
+                className="my-0.5"
+                dangerouslySetInnerHTML={{
+                  __html: getCachedBroadcastWeatherSvg(
+                    slot.weatherCode,
+                    slot.weatherText,
+                    24,
+                    17
+                  ),
+                }}
+              />
+              <span className="text-[10px] font-mono font-bold text-white leading-none">
+                {slot.temp}°
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
 
 interface SceneDetailPanelProps {
   activeScene: SceneId;
@@ -133,22 +284,38 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
-  const [eewAnimNow, setEewAnimNow] = useState<number>(Date.now());
+
+  const effectiveScene: SceneId =
+    interruptKind === 'earthquake' || interruptKind === 'eew'
+      ? 'earthquake'
+      : interruptKind === 'volcano'
+        ? 'volcano'
+        : interruptKind === 'tsunami'
+          ? 'tsunami'
+          : interruptKind === 'typhoon'
+            ? 'typhoon'
+            : activeScene;
 
   const amedasRankings = useMemo(
-    () => computeAmedasTop5Rankings(data.amedas),
-    [data.amedas]
+    () =>
+      effectiveScene === 'amedas'
+        ? computeAmedasTop5Rankings(data.amedas)
+        : EMPTY_AMEDAS_RANKINGS,
+    [effectiveScene, data.amedas]
   );
 
   const radarRainStations = useMemo(
     () =>
-      data.amedas
-        .filter((a) => a.precip1h > 0 || a.windSpeed >= 12)
-        .slice(0, 18),
-    [data.amedas]
+      effectiveScene === 'radar'
+        ? data.amedas
+            .filter((a) => a.precip1h > 0 || a.windSpeed >= 12)
+            .slice(0, 18)
+        : [],
+    [effectiveScene, data.amedas]
   );
 
   const groupedEarthquakeStations = useMemo(() => {
+    if (effectiveScene !== 'earthquake') return [];
     const grouped = new Map<
       string,
       {
@@ -181,55 +348,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     return Array.from(grouped.values()).sort(
       (a, b) => b.scaleCode - a.scaleCode || b.totalCount - a.totalCount
     );
-  }, [selectedEarthquake]);
+  }, [effectiveScene, selectedEarthquake]);
 
   useEffect(() => {
     onSceneCompleteRef.current = onSceneComplete;
   }, [onSceneComplete]);
-
-  // Keep EEW arrival countdown timer active every second
-  useEffect(() => {
-    if (!activeEew || !isEewStillActive(activeEew)) return;
-    const timer = setInterval(() => {
-      setEewAnimNow(Date.now());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [activeEew]);
-
-  const effectiveScene: SceneId =
-    interruptKind === 'earthquake' || interruptKind === 'eew'
-      ? 'earthquake'
-      : interruptKind === 'volcano'
-        ? 'volcano'
-        : interruptKind === 'tsunami'
-          ? 'tsunami'
-          : interruptKind === 'typhoon'
-            ? 'typhoon'
-            : activeScene;
-
-  // Determine whether the map is zoomed into a specific region (either via regional patrol/selection or manual map zoom >= 6)
-  const isZoomedIn =
-    (activeRegionConfig.id !== 'national' &&
-      activeRegionConfig.id !== 'world') ||
-    (mapViewport ? mapViewport.zoom >= 6 : false);
-
-  const syncedRegionId =
-    activeRegionConfig.id !== 'national' && activeRegionConfig.id !== 'world'
-      ? activeRegionConfig.id
-      : mapViewport && mapViewport.zoom >= 6
-        ? mapViewport.inferredRegionId
-        : 'national';
-
-  const isPointInViewport = (lat: number, lon: number): boolean => {
-    if (!mapViewport || mapViewport.zoom < 6) return true;
-    const b = mapViewport.bounds;
-    return (
-      lat >= b.south - 0.6 &&
-      lat <= b.north + 0.6 &&
-      lon >= b.west - 0.6 &&
-      lon <= b.east + 0.6
-    );
-  };
 
   // Right panel always groups warnings by the 57 JMA divisions:
   // 「宗谷」「網走・北見・紋別」「上川・留萌」「石狩・空知・後志」「釧路・根室」「胆振・日高」「渡島・檜山」
@@ -272,7 +395,6 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     const el = scrollContainerRef.current;
     if (!el) return;
 
-    let scrollIntervalId: ReturnType<typeof setInterval> | null = null;
     let scrollRaf = 0;
     let startDelayTimer: ReturnType<typeof setTimeout> | null = null;
     let endHoldTimer: ReturnType<typeof setTimeout> | null = null;
@@ -423,7 +545,6 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     return () => {
       cancelled = true;
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
-      if (scrollIntervalId) clearInterval(scrollIntervalId);
       if (startDelayTimer) clearTimeout(startDelayTimer);
       if (endHoldTimer) clearTimeout(endHoldTimer);
       if (fallbackTimer) clearTimeout(fallbackTimer);
@@ -441,8 +562,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     isLoopPaused,
     interruptKind,
     loopIntervalSec,
-    displayWarnings.length,
-    data.amedas.length,
+    effectiveScene === 'warnings' ? displayWarnings.length : 0,
   ]);
 
   return (
@@ -503,59 +623,20 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               </div>
             ) : (
               displayWarnings.map((w) => {
-              const divKey = w.divisionCode || w.id;
-              const isFocusedDivision =
-                activeWarningDivision != null &&
-                (activeWarningDivision.divisionCode ||
-                  activeWarningDivision.id) === divKey;
-              return (
-                <div
-                  key={w.id}
-                  data-division-code={divKey}
-                  className={`pb-1.5 transition-colors ${
-                    isFocusedDivision
-                      ? 'bg-sky-950/60 ring-2 ring-inset ring-sky-400 border-l-4 border-sky-400'
-                      : ''
-                  }`}
-                >
-                  <div
-                    className={`px-2.5 py-0.5 text-[13px] font-bold tracking-wide flex items-center justify-between ${
-                      isFocusedDivision
-                        ? 'bg-sky-600 text-white font-extrabold'
-                        : w.severity === 'special'
-                          ? 'bg-purple-900 text-white'
-                          : w.severity === 'warning'
-                            ? 'bg-red-900/90 text-white'
-                            : 'bg-[#3E434F] text-white'
-                    }`}
-                  >
-                    <span>{w.prefecture}</span>
-                    {(w.severity === 'warning' || w.severity === 'special') && (
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs">
-                        {w.severity === 'special' ? '特別警報' : '警報'}
-                      </span>
-                    )}
-                  </div>
-                  <div className="px-2.5 pt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                    {w.badgeItems && w.badgeItems.length > 0 ? (
-                      w.badgeItems.map((badge) => (
-                        <span
-                          key={`${w.id}-${badge.code}`}
-                          className="inline-flex items-center gap-1 text-[13px] font-bold text-white whitespace-nowrap"
-                        >
-                          {renderSeverityDot(badge.severity)}
-                          <span>{badge.name}</span>
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-xs text-neutral-300">
-                        {w.activeWarnings.join('・')}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            }))}
+                const divKey = w.divisionCode || w.id;
+                const isFocusedDivision =
+                  activeWarningDivision != null &&
+                  (activeWarningDivision.divisionCode ||
+                    activeWarningDivision.id) === divKey;
+                return (
+                  <WarningDivisionRow
+                    key={w.id}
+                    w={w}
+                    isFocusedDivision={isFocusedDivision}
+                  />
+                );
+              })
+            )}
           </>
         )}
 
@@ -1333,78 +1414,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       </div>
                     )}
 
-                    {scopedForecasts.map((fc) => {
-                      const slots = fc.hourly3h || [];
-                      return (
-                        <div
-                          key={fc.id}
-                          className="border border-[#262E3D] bg-[#11151F] rounded-xs overflow-hidden"
-                        >
-                          <div className="bg-[#1A2230] px-2 py-0.5 flex items-center justify-between text-xs border-b border-[#262E3D]">
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="font-black text-white whitespace-nowrap">
-                                {fc.cityName}
-                              </span>
-                              <span className="text-[11px] text-sky-200 font-bold truncate">
-                                {fc.todayWeather}
-                              </span>
-                            </div>
-                            <span className="font-mono text-[11px] shrink-0">
-                              <span className="text-red-400 font-bold">
-                                {fc.todayTempMax ?? fc.tempMax}℃
-                              </span>
-                              <span className="text-neutral-500">/</span>
-                              <span className="text-sky-400 font-bold">
-                                {fc.todayTempMin ?? fc.tempMin}℃
-                              </span>
-                            </span>
-                          </div>
-
-                          {/* 8-slot 3-hourly progression strip (03時..24時) */}
-                          <div className="grid grid-cols-8 divide-x divide-neutral-800 bg-[#0D1017]">
-                            {slots.map((slot, sIdx) => {
-                              const isCurrent = sIdx === forecast3hIndex;
-                              return (
-                                <button
-                                  key={slot.timeLabel}
-                                  type="button"
-                                  onClick={() => onChangeForecast3hIndex?.(sIdx)}
-                                  className={`py-1 px-0.5 flex flex-col items-center justify-between transition-colors cursor-pointer ${
-                                    isCurrent
-                                      ? 'bg-sky-900/50 ring-1 ring-inset ring-amber-400'
-                                      : 'hover:bg-neutral-800/60'
-                                  }`}
-                                >
-                                  <span
-                                    className={`text-[9px] font-mono leading-none ${
-                                      isCurrent
-                                        ? 'text-amber-300 font-black'
-                                        : 'text-neutral-400'
-                                    }`}
-                                  >
-                                    {slot.hour}時
-                                  </span>
-                                  <div
-                                    className="my-0.5"
-                                    dangerouslySetInnerHTML={{
-                                      __html: renderBroadcastWeatherSvg(
-                                        slot.weatherCode,
-                                        slot.weatherText,
-                                        24,
-                                        17
-                                      ),
-                                    }}
-                                  />
-                                  <span className="text-[10px] font-mono font-bold text-white leading-none">
-                                    {slot.temp}°
-                                  </span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
+                    {scopedForecasts.map((fc) => (
+                      <ForecastCity3hCard
+                        key={fc.id}
+                        fc={fc}
+                        forecast3hIndex={forecast3hIndex}
+                        onChangeForecast3hIndex={onChangeForecast3hIndex}
+                      />
+                    ))}
                   </div>
                 ) : (
                   /* ==================== 2. TOMORROW / DAY-AFTER-TOMORROW FORECAST CARDS ==================== */
@@ -1446,7 +1463,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               <div
                                 className="border border-[#262E3D] rounded-xs overflow-hidden shrink-0 bg-[#0B0F17]"
                                 dangerouslySetInnerHTML={{
-                                  __html: renderBroadcastWeatherSvg(
+                                  __html: getCachedBroadcastWeatherSvg(
                                     wCode,
                                     wText,
                                     46,

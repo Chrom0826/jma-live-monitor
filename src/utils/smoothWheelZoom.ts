@@ -60,6 +60,13 @@ export function attachSmoothWheelZoom(
   // Geographic point that must stay under the cursor, and the cursor offset from the container center.
   let anchor: L.LatLng | null = null;
   let anchorOffset = L.point(0, 0);
+  let cachedRect: DOMRect | null = null;
+  let cachedSize: L.Point | null = null;
+
+  const invalidateGeometry = () => {
+    cachedRect = null;
+    cachedSize = null;
+  };
 
   const centerFor = (zoom: number): L.LatLng => {
     if (!anchor) return map.getCenter();
@@ -71,6 +78,7 @@ export function attachSmoothWheelZoom(
     raf = 0;
     if (!active) return;
     active = false;
+    invalidateGeometry();
     const z = targetZoom;
     m._move(centerFor(z), z);
     m._moveEnd(true);
@@ -100,10 +108,6 @@ export function attachSmoothWheelZoom(
     // Clamp a single event so a free-spinning wheel can't jump several levels at once.
     dz = Math.max(-1, Math.min(1, dz));
 
-    const rect = container.getBoundingClientRect();
-    const cursor = L.point(e.clientX - rect.left, e.clientY - rect.top);
-    const size = map.getSize();
-
     if (!active) {
       // Take over from any running flyTo / pan / Leaflet zoom animation.
       if (m._animatingZoom) return; // let a native (e.g. double-click) zoom animation finish first
@@ -112,10 +116,15 @@ export function attachSmoothWheelZoom(
       targetZoom = curZoom;
       active = true;
       lastT = 0;
+      cachedRect = container.getBoundingClientRect();
+      cachedSize = map.getSize();
       selfStarting = true;
       m._moveStart(true, false);
       selfStarting = false;
     }
+    const rect = cachedRect ?? (cachedRect = container.getBoundingClientRect());
+    const size = cachedSize ?? (cachedSize = map.getSize());
+    const cursor = L.point(e.clientX - rect.left, e.clientY - rect.top);
     targetZoom = m._limitZoom(targetZoom + dz);
     // Re-anchor at the current cursor position (geographic point under the cursor at the CURRENT zoom).
     anchorOffset = cursor.subtract(size.divideBy(2));
@@ -132,16 +141,20 @@ export function attachSmoothWheelZoom(
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     active = false;
+    invalidateGeometry();
   };
 
   container.addEventListener('wheel', onWheel, { passive: false });
   map.on('movestart', onForeignMoveStart);
+  map.on('resize', invalidateGeometry);
 
   return () => {
     container.removeEventListener('wheel', onWheel);
     map.off('movestart', onForeignMoveStart);
+    map.off('resize', invalidateGeometry);
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
     active = false;
+    invalidateGeometry();
   };
 }
