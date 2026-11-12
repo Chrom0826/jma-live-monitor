@@ -21,6 +21,7 @@ interface XmlInspectorModalProps {
   onToggleFullscreen: () => void;
   onTriggerTestEarthquake: () => void;
   onTriggerTestEew?: () => void;
+  onTriggerTestEewForecast?: () => void;
   onTriggerTestVolcano: () => void;
   onTriggerTestTsunami?: () => void;
   onToggleTsunamiDemo?: () => void;
@@ -47,6 +48,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
   onToggleFullscreen,
   onTriggerTestEarthquake,
   onTriggerTestEew,
+  onTriggerTestEewForecast,
   onTriggerTestVolcano,
   onTriggerTestTsunami,
   onToggleTsunamiDemo,
@@ -251,7 +253,19 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                       }}
                       className="px-3 py-2.5 text-xs font-black bg-rose-950/90 hover:bg-rose-900 border-2 border-red-500 text-white transition-colors text-center cursor-pointer shadow-md shadow-red-950"
                     >
-                      🚨 EEWデモ発火 (第1報→第3報→最終報)
+                      🚨 EEW警報デモ (第1報:長周期なし→第3報・最終報:階級あり)
+                    </button>
+                  )}
+                  {onTriggerTestEewForecast && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onTriggerTestEewForecast();
+                        onClose();
+                      }}
+                      className="px-3 py-2.5 text-xs font-bold bg-amber-950/90 hover:bg-amber-900 border-2 border-amber-500 text-amber-100 transition-colors text-center cursor-pointer"
+                    >
+                      ⚠️ EEW予報デモ (P/S波・長周期なし)
                     </button>
                   )}
                   {onToggleTsunamiDemo && (

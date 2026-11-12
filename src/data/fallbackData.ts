@@ -2986,8 +2986,8 @@ export const TEST_EEW_REPORTS: EewReport[] = [
     isAssumedHypocenter: false,
     maxScaleCode: 50,
     maxScaleLabel: '5強以上',
-    maxLpgmClass: 2,
-    maxLpgmLabel: '階級2',
+    maxLpgmClass: 0,
+    maxLpgmLabel: undefined,
     areas: [
       {
         pref: '石川県',
@@ -2996,7 +2996,7 @@ export const TEST_EEW_REPORTS: EewReport[] = [
         scaleTo: 99,
         kindCode: '10',
         arrivalTime: '2026/11/06 20:00:18',
-        lpgmClass: 2,
+        lpgmClass: 0,
       },
       {
         pref: '石川県',
@@ -3005,7 +3005,7 @@ export const TEST_EEW_REPORTS: EewReport[] = [
         scaleTo: 45,
         kindCode: '10',
         arrivalTime: '2026/11/06 20:00:25',
-        lpgmClass: 1,
+        lpgmClass: 0,
       },
       {
         pref: '富山県',
@@ -3014,7 +3014,7 @@ export const TEST_EEW_REPORTS: EewReport[] = [
         scaleTo: 45,
         kindCode: '10',
         arrivalTime: '2026/11/06 20:00:24',
-        lpgmClass: 1,
+        lpgmClass: 0,
       },
     ],
     receivedAtMs: Date.now(),
@@ -3197,6 +3197,36 @@ export const TEST_EEW_REPORTS: EewReport[] = [
     isDemo: true,
   },
 ];
+
+/**
+ * 緊急地震速報（予報）デモ（長周期地震動なし・警報対象地域なし・深さ50km）
+ * 「1つ前の震度が地図に出ないこと」「長周期地震動が勝手に1以上表示されないこと」「JMA2001 P/S波円」の確認用
+ */
+export const TEST_EEW_FORECAST_REPORT: EewReport = {
+  id: 'demo-eew-forecast-shizuoka-1',
+  eventId: 'demo-forecast-shizuoka',
+  serial: 2,
+  issueTime: '2026/11/12 15:00:10',
+  originTime: '2026/11/12 15:00:00',
+  hypocenterName: '静岡県西部',
+  lat: 34.8,
+  lon: 137.8,
+  depthKm: 50,
+  magnitude: 5.1,
+  isCancelled: false,
+  isTest: false,
+  isWarning: false,
+  isFinal: false,
+  isAssumedHypocenter: false,
+  maxScaleCode: 40,
+  maxScaleLabel: '4',
+  maxLpgmClass: 0,
+  maxLpgmLabel: undefined,
+  areas: [],
+  receivedAtMs: Date.now(),
+  isDemo: true,
+  source: 'wolfx',
+};
 
 /**
  * 津波警報・注意報のデモデータ

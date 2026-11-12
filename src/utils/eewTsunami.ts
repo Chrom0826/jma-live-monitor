@@ -1,4 +1,5 @@
 import {
+  EarthquakeReport,
   EewForecastArea,
   EewReport,
   TsunamiForecastArea,
@@ -160,11 +161,9 @@ export function parseP2PEew(
     .map((a: any) => {
       const scaleFrom = Math.trunc(Number(a?.scaleFrom ?? -1));
       const scaleTo = Math.trunc(Number(a?.scaleTo ?? -1));
-      const rawLpgm = Number(a?.lpgmClass ?? a?.lpgm ?? -1);
-      const lpgmClass =
-        rawLpgm >= 1 && rawLpgm <= 4
-          ? (rawLpgm as 1 | 2 | 3 | 4)
-          : estimateLpgmClassFromScale(scaleFrom, scaleTo, rawMag);
+      const lpgmClass = parseLpgmClassValue(
+        a?.lpgmClass ?? a?.Lpgm ?? a?.lpgm ?? a?.LgInt ?? a?.lgInt ?? a?.LgIntensity ?? a?.lgIntensity
+      );
       return {
         pref: String(a?.pref || ''),
         name: String(a?.name || ''),
@@ -190,11 +189,15 @@ export function parseP2PEew(
     (a) => a.scaleTo === 99 && getEewAreaRepresentativeScale(a) === maxScaleCode
   );
 
-  const maxLpgmClass = areas.reduce<0 | 1 | 2 | 3 | 4>(
+  const topLpgmClass = parseLpgmClassValue(
+    eq?.maxLgInt ?? item?.maxLgInt ?? issue?.maxLgInt ?? item?.maxLpgmClass ?? item?.MaxLgIntensity
+  );
+  const areaMaxLpgmClass = areas.reduce<0 | 1 | 2 | 3 | 4>(
     (max, a) => (typeof a.lpgmClass === 'number' && a.lpgmClass > max ? a.lpgmClass : max),
     0
   );
-  const maxLpgmLabel = maxLpgmClass > 0 ? `階級${maxLpgmClass}` : undefined;
+  const maxLpgmClass = (Math.max(topLpgmClass, areaMaxLpgmClass) as 0 | 1 | 2 | 3 | 4);
+  const maxLpgmLabel = maxLpgmClass >= 1 ? `階級${maxLpgmClass}` : undefined;
 
   return {
     id: String(item.id || `${eventId}-${serial}`),
@@ -380,11 +383,9 @@ export function parseWolfxEew(
       const c2 = s2.scaleCode;
       const scaleFrom = c2 === 99 ? c1 : c2 > 0 ? Math.min(c1, c2) : c1;
       const scaleTo = c2 === 99 ? 99 : c2 > 0 ? Math.max(c1, c2) : c1;
-      const rawLpgm = Number(a?.lpgmClass ?? a?.Lpgm ?? -1);
-      const lpgmClass =
-        rawLpgm >= 1 && rawLpgm <= 4
-          ? (rawLpgm as 1 | 2 | 3 | 4)
-          : estimateLpgmClassFromScale(scaleFrom, scaleTo, rawMag);
+      const lpgmClass = parseLpgmClassValue(
+        a?.lpgmClass ?? a?.Lpgm ?? a?.lpgm ?? a?.LgInt ?? a?.lgInt ?? a?.LgIntensity ?? a?.lgIntensity
+      );
       return {
         pref: /^(.+?[都道府県])/.exec(name)?.[1] || name.slice(0, 3),
         name,
@@ -401,11 +402,22 @@ export function parseWolfxEew(
         getEewAreaRepresentativeScale(b) - getEewAreaRepresentativeScale(a)
     );
 
-  const maxLpgmClass = areas.reduce<0 | 1 | 2 | 3 | 4>(
+  const topLpgmClass = parseLpgmClassValue(
+    item?.MaxLgIntensity ??
+      item?.maxLgIntensity ??
+      item?.MaxLgInt ??
+      item?.maxLgInt ??
+      item?.MaxLpgm ??
+      item?.maxLpgm ??
+      item?.LgIntensity ??
+      item?.lgIntensity
+  );
+  const areaMaxLpgmClass = areas.reduce<0 | 1 | 2 | 3 | 4>(
     (max, a) => (typeof a.lpgmClass === 'number' && a.lpgmClass > max ? a.lpgmClass : max),
     0
   );
-  const maxLpgmLabel = maxLpgmClass > 0 ? `階級${maxLpgmClass}` : undefined;
+  const maxLpgmClass = (Math.max(topLpgmClass, areaMaxLpgmClass) as 0 | 1 | 2 | 3 | 4);
+  const maxLpgmLabel = maxLpgmClass >= 1 ? `階級${maxLpgmClass}` : undefined;
 
   // Use AnnouncedTime (or OriginTime) to determine receivedAtMs so REST polling
   // does not treat an old EEW from hours ago as newly received right now.
@@ -993,6 +1005,58 @@ export function getLpgmClassStyle(lpgmClass: number | undefined): LpgmClassStyle
 }
 
 /**
+ * Parses an explicit JMA Long-Period Ground Motion class (`1`..`4`) from API payloads.
+ * Returns `0` when absent, `"0"`, `"-"`, or invalid (never fabricated from seismic intensity).
+ */
+export function parseLpgmClassValue(raw: unknown): 0 | 1 | 2 | 3 | 4 {
+  if (raw === null || raw === undefined) return 0;
+  if (typeof raw === 'number') {
+    const n = Math.trunc(raw);
+    return n >= 1 && n <= 4 ? (n as 1 | 2 | 3 | 4) : 0;
+  }
+  const s = String(raw)
+    .trim()
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+  const m = /(?:^|階級)([1-4])$/.exec(s);
+  if (!m) return 0;
+  return Number(m[1]) as 1 | 2 | 3 | 4;
+}
+
+/**
+ * True only when the EEW explicitly carries an actual long-period ground motion prediction (階級1〜4).
+ */
+export function hasActualEewLpgm(eew: EewReport | null | undefined): boolean {
+  if (!eew) return false;
+  if (typeof eew.maxLpgmClass === 'number' && eew.maxLpgmClass >= 1) return true;
+  return Array.isArray(eew.areas) && eew.areas.some((a) => (a.lpgmClass ?? 0) >= 1);
+}
+
+/**
+ * True when `selectedEarthquake` corresponds to the same seismic event as `activeEew`
+ * (origin/occurrence time within ±5 minutes), so stale previous earthquakes are not
+ * conflated with an unfolding EEW.
+ */
+export function doesEarthquakeMatchEew(
+  eq: EarthquakeReport | null | undefined,
+  eew: EewReport | null | undefined
+): boolean {
+  if (!eq || !eew) return false;
+  if (eew.isDemo) {
+    return Boolean(eq.isTest && eq.hypocenterName === eew.hypocenterName);
+  }
+  const eqMs = parseJstDateTimeMs(eq.occurrenceTime);
+  const eewOriginMs = parseJstDateTimeMs(eew.originTime || eew.issueTime);
+  if (!Number.isNaN(eqMs) && !Number.isNaN(eewOriginMs)) {
+    return Math.abs(eqMs - eewOriginMs) <= 5 * 60 * 1000;
+  }
+  return Boolean(
+    eq.hypocenterName &&
+      eew.hypocenterName &&
+      eq.hypocenterName === eew.hypocenterName
+  );
+}
+
+/**
  * EEW予測震度・規模（M）から長周期地震動階級（1〜4）を気象庁基準に準拠して推定・付与する
  */
 export function estimateLpgmClassFromScale(
@@ -1143,6 +1207,29 @@ export function computeEewAreaScales(eew: EewReport | null | undefined): Map<str
   }
 
   return scaleMap;
+}
+
+/**
+ * EEW レポートから気象庁細分区域コード（188区域）ごとの長周期地震動予測階級（1〜4）Map を算出する
+ */
+export function computeEewAreaLpgmClasses(eew: EewReport | null | undefined): Map<string, number> {
+  const lpgmMap = new Map<string, number>();
+  if (!eew || !Array.isArray(eew.areas)) return lpgmMap;
+
+  for (const area of eew.areas) {
+    const cls = typeof area.lpgmClass === 'number' ? area.lpgmClass : 0;
+    if (cls < 1 || cls > 4) continue;
+
+    const codes = findSubdivisionAreaCodes(area.pref, area.name);
+    for (const code of codes) {
+      const current = lpgmMap.get(code) || 0;
+      if (cls > current) {
+        lpgmMap.set(code, cls);
+      }
+    }
+  }
+
+  return lpgmMap;
 }
 
 /**

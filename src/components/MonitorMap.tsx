@@ -51,10 +51,12 @@ import {
 import {
   computeEewWaveRadiiKm,
   computeEewAreaScales,
+  computeEewAreaLpgmClasses,
   formatEewArrivalLabel,
   formatEewScaleRange,
   getLpgmClassStyle,
   getTsunamiGradeStyle,
+  hasActualEewLpgm,
   isEewFinal,
   isEewStillActive,
   MAJOR_CITIES,
@@ -1278,18 +1280,22 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       };
     }
 
-    const scaleMap = computeEewAreaScales(activeEew);
+    const useLpgmColors =
+      eewDisplayMode === 'lpgm' && hasActualEewLpgm(activeEew);
+    const scaleMap = useLpgmColors
+      ? computeEewAreaLpgmClasses(activeEew)
+      : computeEewAreaScales(activeEew);
     const areaByScale = new Map<number, CompiledGeoShape[]>();
     const eqShapes = earthquakeCompiledRef.current;
 
     for (let i = 0; i < eqShapes.length; i++) {
       const sh = eqShapes[i];
-      const scale = scaleMap.get(sh.id) || 0;
-      if (scale >= 10) {
-        let list = areaByScale.get(scale);
+      const val = scaleMap.get(sh.id) || 0;
+      if (useLpgmColors ? val >= 1 : val >= 10) {
+        let list = areaByScale.get(val);
         if (!list) {
           list = [];
-          areaByScale.set(scale, list);
+          areaByScale.set(val, list);
         }
         list.push(sh);
       }
@@ -1299,37 +1305,45 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       .sort((a, b) => a[0] - b[0])
       .map(([scale, shapes]) => ({
         scale,
-        hex: getSeismicScaleStyle(scale).hex,
+        hex: useLpgmColors
+          ? getLpgmClassStyle(scale).bg
+          : getSeismicScaleStyle(scale).hex,
         shapes,
       }));
 
-    // Extract nearby major cities within ~500km of EEW epicenter for clean background context
-    const eewLat =
-      typeof activeEew.lat === 'number' && !Number.isNaN(activeEew.lat)
-        ? activeEew.lat
-        : selectedEarthquake.lat;
-    const eewLon =
-      typeof activeEew.lon === 'number' && !Number.isNaN(activeEew.lon)
-        ? activeEew.lon
-        : selectedEarthquake.lon;
+    // Strictly use activeEew's own hypocenter; never fall back to an unrelated previous earthquake
+    const hasEewHypo =
+      typeof activeEew.lat === 'number' &&
+      Number.isFinite(activeEew.lat) &&
+      typeof activeEew.lon === 'number' &&
+      Number.isFinite(activeEew.lon);
     const eewDepth = activeEew.depthKm >= 0 ? activeEew.depthKm : 10;
-    const epiNorm = latLonToNormMercator(eewLat, eewLon);
-    const cosLat = Math.max(0.15, Math.cos(eewLat * DEG_TO_RAD));
-    const kmToNormFactor = 1 / (EARTH_CIRCUMFERENCE_KM * cosLat);
+    const epiNorm = hasEewHypo
+      ? latLonToNormMercator(activeEew.lat, activeEew.lon)
+      : null;
+    const cosLat = hasEewHypo
+      ? Math.max(0.15, Math.cos(activeEew.lat * DEG_TO_RAD))
+      : 1;
+    const kmToNormFactor = hasEewHypo
+      ? 1 / (EARTH_CIRCUMFERENCE_KM * cosLat)
+      : 0;
 
-    const cityLabels = MAJOR_CITIES.filter((city) => {
-      const dLat = city.lat - eewLat;
-      const dLon = (city.lon - eewLon) * Math.cos((eewLat * Math.PI) / 180);
-      const distSq = dLat * dLat + dLon * dLon;
-      return distSq <= 5.0 * 5.0; // ~500km radius
-    }).map((city) => {
-      const { normX, normY } = latLonToNormMercator(city.lat, city.lon);
-      return {
-        name: city.name,
-        normX,
-        normY,
-      };
-    });
+    const cityLabels = hasEewHypo
+      ? MAJOR_CITIES.filter((city) => {
+          const dLat = city.lat - activeEew.lat;
+          const dLon =
+            (city.lon - activeEew.lon) * Math.cos((activeEew.lat * Math.PI) / 180);
+          const distSq = dLat * dLat + dLon * dLon;
+          return distSq <= 5.0 * 5.0; // ~500km radius
+        }).map((city) => {
+          const { normX, normY } = latLonToNormMercator(city.lat, city.lon);
+          return {
+            name: city.name,
+            normX,
+            normY,
+          };
+        })
+      : [];
 
     return {
       areaBuckets,
@@ -1341,9 +1355,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   }, [
     effectiveScene,
     activeEew,
+    eewDisplayMode,
     compiledVersion,
-    selectedEarthquake.lat,
-    selectedEarthquake.lon,
   ]);
 
   // Pre-compile Typhoon tracks, forecast cones, normalized Mercator radii, and deterministic non-overlapping label offsets
@@ -1620,7 +1633,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           effectiveScene === 'warnings'
             ? `warnings|${activeWarningDivision?.divisionCode || ''}`
             : effectiveScene === 'earthquake'
-              ? `earthquake|${hasActiveEew ? 'eew' : 'obs'}|${selectedEarthquake.issueTypeLabel || ''}|${selectedEarthquake.isConfirmed === false ? 0 : 1}`
+              ? `earthquake|${hasActiveEew ? `eew:${activeEew?.id || ''}:${activeEew?.serial || 0}:${eewDisplayMode}` : `obs:${selectedEarthquake.id}`}|${selectedEarthquake.issueTypeLabel || ''}|${selectedEarthquake.isConfirmed === false ? 0 : 1}`
               : effectiveScene === 'tsunami'
                 ? 'tsunami'
                 : 'blank';
@@ -3032,6 +3045,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     preCompiledEarthquake,
     preCompiledEew,
     activeEew,
+    eewDisplayMode,
+    selectedEarthquake.id,
     selectedEarthquake.issueTypeLabel,
     selectedEarthquake.isConfirmed,
     selectedEarthquake.hypocenterUnknown,
@@ -3749,21 +3764,23 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     zoom: number;
   } => {
     if (effectiveScene === 'earthquake') {
-      if (
-        activeEew &&
-        typeof activeEew.lat === 'number' &&
-        !Number.isNaN(activeEew.lat) &&
-        typeof activeEew.lon === 'number' &&
-        !Number.isNaN(activeEew.lon)
-      ) {
-        return fitLatLonBoundsToSafeViewport(
-          activeEew.lat - 1.8,
-          activeEew.lat + 1.8,
-          activeEew.lon - 2.2,
-          activeEew.lon + 2.2,
-          7.0,
-          4.5
-        );
+      if (activeEew && isEewStillActive(activeEew)) {
+        if (
+          typeof activeEew.lat === 'number' &&
+          Number.isFinite(activeEew.lat) &&
+          typeof activeEew.lon === 'number' &&
+          Number.isFinite(activeEew.lon)
+        ) {
+          return fitLatLonBoundsToSafeViewport(
+            activeEew.lat - 1.8,
+            activeEew.lat + 1.8,
+            activeEew.lon - 2.2,
+            activeEew.lon + 2.2,
+            7.0,
+            4.5
+          );
+        }
+        return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.1, 3.0);
       }
 
       if (
@@ -4621,8 +4638,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         </div>
       </div>
 
-      {/* EEW Mode Indicator / Switcher Bar & LPGM Legend (震度予測 ↔ 長周期地震動階級1〜4 定期切替) */}
-      {effectiveScene === 'earthquake' && activeEew && isEewStillActive(activeEew) && (
+      {/* EEW Mode Indicator / Switcher Bar & LPGM Legend (長周期地震動が実際に予測されているときだけ表示) */}
+      {effectiveScene === 'earthquake' &&
+        activeEew &&
+        isEewStillActive(activeEew) &&
+        hasActualEewLpgm(activeEew) && (
         <div
           data-testid="eew-mode-switcher-bar"
           className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-2 ${

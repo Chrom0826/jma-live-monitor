@@ -19,6 +19,7 @@ import {
   INITIAL_WARNINGS,
   INITIAL_WEATHER_BULLETINS,
   INITIAL_XML_ENTRIES,
+  TEST_EEW_FORECAST_REPORT,
   TEST_EEW_REPORTS,
   TEST_INTERRUPT_EARTHQUAKE,
   TEST_TSUNAMI_ANOMALY_STATION,
@@ -62,10 +63,10 @@ import {
 } from './utils/jmaParser';
 import {
   EEW_DISPLAY_HOLD_MS,
-  estimateLpgmClassFromScale,
-  getLpgmClassStyle,
   getTsunamiAlertSeverity,
+  hasActualEewLpgm,
   isEewStillActive,
+  parseJstDateTimeMs,
   parseP2PEew,
   parseP2PEewDetection,
   parseP2PTsunami,
@@ -1587,7 +1588,40 @@ export default function App() {
     setFlipSessionNonce((n) => n + 1);
   }, [updatePinnedEarthquakeId]);
 
-  // Test Interrupt 1-b: EEW (緊急地震速報 Progressive Demo: 第1報 -> 第3報 -> 最終報)
+  const formatJstStamp = useCallback((ms: number): string => {
+    const d = new Date(ms + 9 * 3600 * 1000);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mi = String(d.getUTCMinutes()).padStart(2, '0');
+    const ss = String(d.getUTCSeconds()).padStart(2, '0');
+    return `${yyyy}/${mm}/${dd} ${hh}:${mi}:${ss}`;
+  }, []);
+
+  const stampDemoEewTimestamps = useCallback(
+    (base: EewReport, liveOriginMs: number, nowMs: number): EewReport => {
+      const origMs = parseJstDateTimeMs(base.originTime);
+      return {
+        ...base,
+        originTime: formatJstStamp(liveOriginMs),
+        issueTime: formatJstStamp(nowMs),
+        areas: base.areas.map((a) => {
+          if (!a.arrivalTime || Number.isNaN(origMs)) return a;
+          const arrMs = parseJstDateTimeMs(a.arrivalTime);
+          if (Number.isNaN(arrMs)) return a;
+          return {
+            ...a,
+            arrivalTime: formatJstStamp(liveOriginMs + (arrMs - origMs)),
+          };
+        }),
+        receivedAtMs: nowMs,
+      };
+    },
+    [formatJstStamp]
+  );
+
+  // Test Interrupt 1-b: EEW 警報デモ (第1報: 長周期なし -> 第3報: 階級3 -> 最終報: 階級4)
   const handleTriggerEewDemo = useCallback(() => {
     eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
     eewDemoTimerRef.current = [];
@@ -1598,27 +1632,50 @@ export default function App() {
       eqConfirmedHoldTimerRef.current = null;
     }
 
-    // Step 1: 第1報（M5.9 震度5強以上）
-    const r1 = { ...TEST_EEW_REPORTS[0], receivedAtMs: Date.now() };
+    const baseOriginMs = Date.now() - 2000;
+    // Step 1: 第1報（M5.9 震度5強以上・長周期予測なし）
+    const r1 = stampDemoEewTimestamps(TEST_EEW_REPORTS[0], baseOriginMs, Date.now());
     setEewDisplayMode('intensity');
     setActiveEew(r1);
     setInterruptKind('eew');
     setFlipSessionNonce((n) => n + 1);
 
-    // Step 2: 第3報（M6.8 震度6強） - 4秒後
+    // Step 2: 第3報（M6.8 震度6強・長周期階級3あり） - 4秒後
     const t1 = setTimeout(() => {
-      const r2 = { ...TEST_EEW_REPORTS[1], receivedAtMs: Date.now() };
+      const r2 = stampDemoEewTimestamps(TEST_EEW_REPORTS[1], baseOriginMs, Date.now());
       setActiveEew(r2);
     }, 4000);
     eewDemoTimerRef.current.push(t1);
 
-    // Step 3: 最終報（M7.6 震度7） - 8秒後
+    // Step 3: 最終報（M7.6 震度7・長周期階級4あり） - 8秒後
     const t2 = setTimeout(() => {
-      const r3 = { ...TEST_EEW_REPORTS[2], receivedAtMs: Date.now() };
+      const r3 = stampDemoEewTimestamps(TEST_EEW_REPORTS[2], baseOriginMs, Date.now());
       setActiveEew(r3);
     }, 8000);
     eewDemoTimerRef.current.push(t2);
-  }, []);
+  }, [stampDemoEewTimestamps]);
+
+  // Test Interrupt 1-c: EEW 予報デモ (長周期地震動なし・警報地域なし・深さ50km P/S波)
+  const handleTriggerEewForecastDemo = useCallback(() => {
+    eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
+    eewDemoTimerRef.current = [];
+    eqLockUntilConfirmedRef.current = false;
+    eqUnconfirmedTimedOutRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
+    const nowMs = Date.now();
+    const rForecast = stampDemoEewTimestamps(
+      TEST_EEW_FORECAST_REPORT,
+      nowMs - 2000,
+      nowMs
+    );
+    setEewDisplayMode('intensity');
+    setActiveEew(rForecast);
+    setInterruptKind('eew');
+    setFlipSessionNonce((n) => n + 1);
+  }, [stampDemoEewTimestamps]);
 
   // Test Interrupt 2: Volcano Alert Level Change (zooms directly to volcano)
   const handleTriggerTestVolcano = useCallback(() => {
@@ -1806,55 +1863,21 @@ export default function App() {
     }
   }, [effectiveScene, forecastViewMode, isLoopPaused]);
 
-  // 長周期地震動の表示タイミング制御:
-  // "長周期地震動は震度などが確定してから少しだけ表示するだけでいい"
-  // EEW発令中の頻繁な自動切り替えは行わず、震度確定後に数秒間（4秒間）だけ少し表示して震度に戻す
+  // 長周期地震動の表示モード制御:
+  // 長周期地震動が実際に予測されているときだけ切り替え・表示を許可し、それ以外は常に 'intensity' に保つ
+  const activeEewEventId = activeEew?.eventId || '';
+  const activeEewHasLpgm =
+    Boolean(activeEew && isEewStillActive(activeEew) && hasActualEewLpgm(activeEew));
+
   useEffect(() => {
-    if (effectiveScene !== 'earthquake' || isLoopPaused) {
+    setEewDisplayMode('intensity');
+  }, [activeEewEventId, effectiveScene]);
+
+  useEffect(() => {
+    if (!activeEewHasLpgm && eewDisplayMode !== 'intensity') {
       setEewDisplayMode('intensity');
-      return;
     }
-
-    // EEW発令中は予測震度を常時安定して表示
-    if (activeEew && isEewStillActive(activeEew)) {
-      setEewDisplayMode('intensity');
-      return;
-    }
-
-    // 確定後の地震情報表示時: 長周期地震動（震度4以上/M5.8以上/階級1以上）が存在する場合、
-    // 確定震度を十分（8秒間）表示したあと、4秒間だけ長周期地震動を表示して元に戻す
-    const hasLpgm =
-      (selectedEarthquake.maxScaleCode >= 50 ||
-        (selectedEarthquake.maxScaleCode >= 40 &&
-          selectedEarthquake.magnitude >= 5.8)) &&
-      selectedEarthquake.isConfirmed !== false;
-
-    if (!hasLpgm) {
-      setEewDisplayMode('intensity');
-      return;
-    }
-
-    let revertTimer: ReturnType<typeof setTimeout> | null = null;
-    const showLpgmTimer = setTimeout(() => {
-      setEewDisplayMode('lpgm');
-      revertTimer = setTimeout(() => {
-        setEewDisplayMode('intensity');
-      }, 4000);
-    }, 8000);
-
-    return () => {
-      clearTimeout(showLpgmTimer);
-      if (revertTimer) clearTimeout(revertTimer);
-    };
-  }, [
-    effectiveScene,
-    activeEew,
-    selectedEarthquake.id,
-    selectedEarthquake.maxScaleCode,
-    selectedEarthquake.magnitude,
-    selectedEarthquake.isConfirmed,
-    isLoopPaused,
-  ]);
+  }, [activeEewHasLpgm, eewDisplayMode]);
 
   const sceneMeta =
     SCENE_LIST.find((s) => s.id === effectiveScene) || SCENE_LIST[0];
@@ -1865,15 +1888,6 @@ export default function App() {
         return activeEew.isWarning
           ? '緊急地震速報（警報）'
           : '緊急地震速報（予報）';
-      }
-      if (eewDisplayMode === 'lpgm') {
-        const estClass = estimateLpgmClassFromScale(
-          selectedEarthquake.maxScaleCode,
-          selectedEarthquake.maxScaleCode,
-          selectedEarthquake.magnitude
-        );
-        const lpgmStyle = getLpgmClassStyle(estClass);
-        return `長周期地震動に関する観測情報（最大${lpgmStyle.label}）`;
       }
       return selectedEarthquake.issueTypeLabel || '地震情報（震源・震度に関する情報）';
     }
@@ -2631,6 +2645,7 @@ export default function App() {
           onToggleFullscreen={toggleFullscreen}
           onTriggerTestEarthquake={handleTriggerTestEarthquake}
           onTriggerTestEew={handleTriggerEewDemo}
+          onTriggerTestEewForecast={handleTriggerEewForecastDemo}
           onTriggerTestVolcano={handleTriggerTestVolcano}
           onToggleTsunamiDemo={handleToggleTsunamiDemo}
           isTsunamiDemo={isTsunamiDemo}

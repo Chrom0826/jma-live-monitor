@@ -25,11 +25,13 @@ import {
   renderBroadcastWeatherSvg,
 } from '../utils/jmaParser';
 import {
+  doesEarthquakeMatchEew,
   formatEewScaleRange,
   formatOccurrenceTimeJa,
   getLpgmClassStyle,
   getSeismicScaleBadgeStyle,
   getTsunamiGradeStyle,
+  hasActualEewLpgm,
   isEewStillActive,
 } from '../utils/eewTsunami';
 
@@ -1742,6 +1744,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               {activeEew && isEewStillActive(activeEew) && (() => {
                 const isWarn = activeEew.isWarning !== false;
                 const isFinalReport = Boolean(activeEew.isFinal) || activeEew.serial >= 5;
+                const eewHasLpgm = hasActualEewLpgm(activeEew);
+                const showEewLpgm = eewHasLpgm && eewDisplayMode === 'lpgm';
+                const displayAreas = showEewLpgm
+                  ? activeEew.areas.filter((a) => (a.lpgmClass ?? 0) >= 1)
+                  : activeEew.areas;
                 return (
                   <div
                     data-testid="eew-live-banner"
@@ -1783,15 +1790,16 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         </div>
                         <div className="text-right">
                           <div className="text-[10px] text-neutral-400 font-mono">
-                            {eewDisplayMode === 'lpgm' ? '最大予想階級' : '最大予測震度'}
+                            {showEewLpgm ? '最大予想階級' : '最大予測震度'}
                           </div>
                           <div
                             className={`text-2xl font-black font-mono tracking-wider ${
-                              eewDisplayMode === 'lpgm' ? 'text-orange-400' : 'text-yellow-300'
+                              showEewLpgm ? 'text-orange-400' : 'text-yellow-300'
                             }`}
                           >
-                            {eewDisplayMode === 'lpgm'
-                              ? activeEew.maxLpgmLabel || '階級1以上'
+                            {showEewLpgm
+                              ? activeEew.maxLpgmLabel ||
+                                (activeEew.maxLpgmClass ? `階級${activeEew.maxLpgmClass}` : '')
                               : activeEew.maxScaleLabel === '不明' || activeEew.maxScaleLabel === '解析中'
                                 ? activeEew.maxScaleLabel
                                 : `震度${activeEew.maxScaleLabel}`}
@@ -1799,31 +1807,33 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         </div>
                       </div>
 
-                      {/* Mode Switcher Pills: 予測震度 ↔ 長周期地震動（階級1〜4） */}
-                      <div className="grid grid-cols-2 gap-1 p-0.5 bg-black/50 border border-neutral-700/80 rounded-xs">
-                        <button
-                          type="button"
-                          onClick={() => onChangeEewDisplayMode?.('intensity')}
-                          className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
-                            eewDisplayMode === 'intensity'
-                              ? 'bg-red-600 text-white font-black shadow-xs'
-                              : 'text-neutral-400 hover:text-white'
-                          }`}
-                        >
-                          震度予測 (1〜7)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onChangeEewDisplayMode?.('lpgm')}
-                          className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
-                            eewDisplayMode === 'lpgm'
-                              ? 'bg-amber-600 text-white font-black shadow-xs'
-                              : 'text-neutral-400 hover:text-white'
-                          }`}
-                        >
-                          長周期地震動 (階級1〜4)
-                        </button>
-                      </div>
+                      {/* Mode Switcher Pills: 長周期地震動が実際に予測されているときのみ表示 */}
+                      {eewHasLpgm && (
+                        <div className="grid grid-cols-2 gap-1 p-0.5 bg-black/50 border border-neutral-700/80 rounded-xs">
+                          <button
+                            type="button"
+                            onClick={() => onChangeEewDisplayMode?.('intensity')}
+                            className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
+                              !showEewLpgm
+                                ? 'bg-red-600 text-white font-black shadow-xs'
+                                : 'text-neutral-400 hover:text-white'
+                            }`}
+                          >
+                            震度予測 (1〜7)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onChangeEewDisplayMode?.('lpgm')}
+                            className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center ${
+                              showEewLpgm
+                                ? 'bg-amber-600 text-white font-black shadow-xs'
+                                : 'text-neutral-400 hover:text-white'
+                            }`}
+                          >
+                            長周期地震動 (階級1〜4)
+                          </button>
+                        </div>
+                      )}
 
                       <div
                         className={`text-[11px] font-mono text-neutral-400 flex items-center justify-between border-t pt-1 ${
@@ -1838,20 +1848,20 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       </div>
 
                       {/* Warning / Affected Areas */}
-                      {activeEew.areas.length > 0 && (
+                      {displayAreas.length > 0 && (
                         <div className="space-y-1 pt-1">
                           <div className="text-[11px] font-bold text-red-300 flex items-center justify-between">
                             <span>
-                              {eewDisplayMode === 'lpgm'
+                              {showEewLpgm
                                 ? '長周期地震動 予想地域（階級1〜4）'
                                 : '強い揺れの予想地域'}
                             </span>
                             <span className="font-mono text-[10px] text-neutral-400">
-                              {activeEew.areas.length}地域
+                              {displayAreas.length}地域
                             </span>
                           </div>
                           <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
-                            {activeEew.areas.map((area) => {
+                            {displayAreas.map((area) => {
                               const scaleRange = formatEewScaleRange(
                                 area.scaleFrom,
                                 area.scaleTo
@@ -1870,7 +1880,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                     <span>{area.name}</span>
                                   </div>
                                   <div className="flex items-center gap-1.5 font-mono shrink-0">
-                                    {eewDisplayMode === 'lpgm' ? (
+                                    {showEewLpgm ? (
                                       <span
                                         className="px-1.5 py-0.2 font-black rounded-xs text-[11px]"
                                         style={{
@@ -1903,106 +1913,141 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 );
               })()}
 
-              {/* Red Header Bar */}
-              <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
-                <span>
-                  {selectedEarthquake.issueTypeLabel || '各地の震度に関する情報'}
-                </span>
-              </div>
-
-              {/* Confirmation / Lock Status Bar */}
-              {selectedEarthquake.isConfirmed === false ||
-              (activeEew && isEewStillActive(activeEew)) ? (
-                <div
-                  data-testid="earthquake-awaiting-confirm-badge"
-                  className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                    最終震度・震源の確定まで地震タブ固定中
-                  </span>
-                  <span className="font-mono text-[10px] text-amber-300">
-                    自動取得中
-                  </span>
-                </div>
-              ) : interruptKind === 'earthquake' ? (
-                <div
-                  data-testid="earthquake-confirmed-badge"
-                  className="bg-emerald-950/70 border-b border-emerald-500/60 px-2.5 py-1 text-[11px] font-bold text-emerald-200 flex items-center justify-between"
-                >
-                  <span>✓ 震源・各地の震度 確定</span>
-                  <button
-                    type="button"
-                    onClick={onDismissInterrupt}
-                    className="font-mono text-[10px] bg-emerald-800/80 hover:bg-emerald-700 text-white px-1.5 py-0.5 rounded-xs cursor-pointer"
-                  >
-                    巡回再開
-                  </button>
-                </div>
-              ) : isLoopPaused ? (
-                <div
-                  data-testid="earthquake-manual-pinned-badge"
-                  className="bg-neutral-800/90 border-b border-amber-500/50 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
-                    手動選択中（巡回停止）
-                  </span>
-                  <button
-                    type="button"
-                    onClick={onDismissInterrupt}
-                    className="font-mono text-[10px] bg-amber-700/90 hover:bg-amber-600 text-white px-2 py-0.5 rounded-xs cursor-pointer transition-colors shadow-xs"
-                    title="自動巡回を再開して最新の地震に戻す"
-                  >
-                    巡回再開 ▶
-                  </button>
-                </div>
-              ) : null}
-
-              {/* Hypocenter Info + Big Max Scale Badge on Right (identical to left sidebar style) */}
+              {/* Red Header Bar (EEW対象と無関係な1つ前の地震は表示せず待機表示にする) */}
               {(() => {
-                const scaleStyle = getSeismicScaleStyle(selectedEarthquake.maxScaleCode);
-                return (
-                  <div className="px-2.5 py-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="text-base font-extrabold text-white leading-tight">
-                          {selectedEarthquake.hypocenterName ||
-                            (selectedEarthquake.hypocenterUnknown ? '震源精査中' : '震源情報')}
-                        </div>
-                        <div className="text-xs font-mono text-neutral-200">
-                          {selectedEarthquake.hypocenterUnknown
-                            ? '震源・規模 調査中'
-                            : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
-                        </div>
-                        <div className="text-[11px] font-mono text-neutral-400">
-                          {selectedEarthquake.occurrenceTime}
-                        </div>
-                        <div className="text-xs text-cyan-300 font-bold pt-0.5">
-                          {selectedEarthquake.domesticTsunami}
-                        </div>
+                const eewActive = Boolean(activeEew && isEewStillActive(activeEew));
+                const matchesActiveEew =
+                  !eewActive || doesEarthquakeMatchEew(selectedEarthquake, activeEew);
+                if (!matchesActiveEew) {
+                  return (
+                    <>
+                      <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
+                        <span>地震情報（観測データ待機中）</span>
                       </div>
-
-                      {/* Big Max Intensity Box on Right (identical to left sidebar) */}
-                      {selectedEarthquake.maxScaleCode >= 10 && (
-                        <div
-                          className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
-                        >
-                          <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80">
-                            最大震度
-                          </span>
-                          <span className="text-[23px] font-black leading-none mt-0.5">
-                            {selectedEarthquake.maxScaleLabel}
-                          </span>
-                        </div>
-                      )}
+                      <div
+                        data-testid="earthquake-awaiting-confirm-badge"
+                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                          最終震度・震源の確定まで地震タブ固定中
+                        </span>
+                        <span className="font-mono text-[10px] text-amber-300">
+                          自動取得中
+                        </span>
+                      </div>
+                      <div className="px-2.5 py-3 text-xs text-neutral-300 leading-relaxed">
+                        今回の緊急地震速報（{activeEew?.hypocenterName || '震源調査中'}）に対する気象庁の震度速報・観測点情報の入電を待機しています。
+                      </div>
+                    </>
+                  );
+                }
+                return (
+                  <>
+                    <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
+                      <span>
+                        {selectedEarthquake.issueTypeLabel || '各地の震度に関する情報'}
+                      </span>
                     </div>
-                  </div>
+
+                    {/* Confirmation / Lock Status Bar */}
+                    {selectedEarthquake.isConfirmed === false || eewActive ? (
+                      <div
+                        data-testid="earthquake-awaiting-confirm-badge"
+                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                          最終震度・震源の確定まで地震タブ固定中
+                        </span>
+                        <span className="font-mono text-[10px] text-amber-300">
+                          自動取得中
+                        </span>
+                      </div>
+                    ) : interruptKind === 'earthquake' ? (
+                      <div
+                        data-testid="earthquake-confirmed-badge"
+                        className="bg-emerald-950/70 border-b border-emerald-500/60 px-2.5 py-1 text-[11px] font-bold text-emerald-200 flex items-center justify-between"
+                      >
+                        <span>✓ 震源・各地の震度 確定</span>
+                        <button
+                          type="button"
+                          onClick={onDismissInterrupt}
+                          className="font-mono text-[10px] bg-emerald-800/80 hover:bg-emerald-700 text-white px-1.5 py-0.5 rounded-xs cursor-pointer"
+                        >
+                          巡回再開
+                        </button>
+                      </div>
+                    ) : isLoopPaused ? (
+                      <div
+                        data-testid="earthquake-manual-pinned-badge"
+                        className="bg-neutral-800/90 border-b border-amber-500/50 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
+                          手動選択中（巡回停止）
+                        </span>
+                        <button
+                          type="button"
+                          onClick={onDismissInterrupt}
+                          className="font-mono text-[10px] bg-amber-700/90 hover:bg-amber-600 text-white px-2 py-0.5 rounded-xs cursor-pointer transition-colors shadow-xs"
+                          title="自動巡回を再開して最新の地震に戻す"
+                        >
+                          巡回再開 ▶
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {/* Hypocenter Info + Big Max Scale Badge on Right (identical to left sidebar style) */}
+                    {(() => {
+                      const scaleStyle = getSeismicScaleStyle(selectedEarthquake.maxScaleCode);
+                      return (
+                        <div className="px-2.5 py-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <div className="text-base font-extrabold text-white leading-tight">
+                                {selectedEarthquake.hypocenterName ||
+                                  (selectedEarthquake.hypocenterUnknown ? '震源精査中' : '震源情報')}
+                              </div>
+                              <div className="text-xs font-mono text-neutral-200">
+                                {selectedEarthquake.hypocenterUnknown
+                                  ? '震源・規模 調査中'
+                                  : `M${selectedEarthquake.magnitude.toFixed(1)} / 深さ約${selectedEarthquake.depthKm}km`}
+                              </div>
+                              <div className="text-[11px] font-mono text-neutral-400">
+                                {selectedEarthquake.occurrenceTime}
+                              </div>
+                              <div className="text-xs text-cyan-300 font-bold pt-0.5">
+                                {selectedEarthquake.domesticTsunami}
+                              </div>
+                            </div>
+
+                            {/* Big Max Intensity Box on Right (identical to left sidebar) */}
+                            {selectedEarthquake.maxScaleCode >= 10 && (
+                              <div
+                                className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
+                              >
+                                <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80">
+                                  最大震度
+                                </span>
+                                <span className="text-[23px] font-black leading-none mt-0.5">
+                                  {selectedEarthquake.maxScaleLabel}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </>
                 );
               })()}
             </div>
 
             {/* Scrollable stations container: auto-scrolls down while header stays fixed above */}
+            {(!activeEew ||
+              !isEewStillActive(activeEew) ||
+              doesEarthquakeMatchEew(selectedEarthquake, activeEew)) && (
             <div
               ref={scrollContainerRef}
               data-testid="earthquake-stations-scroll-container"
@@ -2036,6 +2081,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 );
               })}
             </div>
+            )}
           </div>
         )}
       </div>

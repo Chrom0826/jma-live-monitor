@@ -2,17 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { INITIAL_FORECASTS } from '../data/fallbackData';
 import {
+  computeEewAreaLpgmClasses,
   computeEewWaveRadiiKm,
+  doesEarthquakeMatchEew,
   formatEewArrivalLabel,
   formatEewScaleRange,
   formatOccurrenceTimeJa,
   getSeismicScaleBadgeStyle,
   getTsunamiAlertSeverity,
+  hasActualEewLpgm,
   isEewStillActive,
   parseJmaTsunamiDetail,
   isEewFinal,
   isEewWarning,
   mergeEew,
+  parseLpgmClassValue,
   parseP2PEew,
   parseP2PEewDetection,
   parseP2PTsunami,
@@ -1938,4 +1942,122 @@ test('parseWolfxEew: 緊急地震速報（予報）と警報、P2Pとの統合',
   // a different event always replaces
   const other = { ...forecast!, eventId: '20261107210000', serial: 1 };
   assert.equal(mergeEew(m2, other), other);
+});
+
+test('LPGM class is only populated when genuinely predicted (never fabricated for EEW forecast/warning without LPGM)', () => {
+  assert.equal(parseLpgmClassValue(undefined), 0);
+  assert.equal(parseLpgmClassValue('0'), 0);
+  assert.equal(parseLpgmClassValue('-'), 0);
+  assert.equal(parseLpgmClassValue('2'), 2);
+  assert.equal(parseLpgmClassValue('階級3'), 3);
+
+  // EEW Forecast (予報) with M6.0 -> must NOT fabricate LPGM 1+
+  const forecastNoLpgm = parseWolfxEew({
+    type: 'jma_eew',
+    Title: '緊急地震速報（予報）',
+    EventID: '20261108010400',
+    Serial: 1,
+    AnnouncedTime: '2026/11/08 01:04:40',
+    OriginTime: '2026/11/08 01:04:34',
+    Hypocenter: '静岡県西部',
+    Latitude: 34.8,
+    Longitude: 137.8,
+    Magnitude: 6.0,
+    Depth: 50,
+    MaxIntensity: '5強',
+    isWarn: false,
+  })!;
+  assert.equal(forecastNoLpgm.maxLpgmClass, 0);
+  assert.equal(forecastNoLpgm.maxLpgmLabel, undefined);
+  assert.equal(hasActualEewLpgm(forecastNoLpgm), false);
+
+  // P2P 556 EEW Warning (警報) without explicit LPGM fields -> must NOT fabricate LPGM 1+
+  const p2pNoLpgm = parseP2PEew({
+    code: 556,
+    issue: { eventId: '20261108010400', serial: '19', time: '2026/11/08 01:06:08' },
+    earthquake: {
+      originTime: '2026/11/08 01:04:34',
+      hypocenter: { name: '静岡県西部', latitude: 34.8, longitude: 137.8, depth: 50, magnitude: 6.0 },
+    },
+    areas: [
+      { pref: '静岡県', name: '静岡県西部', scaleFrom: 50, scaleTo: 50, kindCode: '10' },
+      { pref: '愛知県', name: '愛知県西部', scaleFrom: 50, scaleTo: 50, kindCode: '10' },
+    ],
+  })!;
+  assert.equal(p2pNoLpgm.maxLpgmClass, 0);
+  assert.equal(p2pNoLpgm.maxLpgmLabel, undefined);
+  assert.equal(hasActualEewLpgm(p2pNoLpgm), false);
+
+  // EEW WITH explicit LPGM class -> accurately parsed and mapped to subdivision codes
+  const wolfxWithLpgm = parseWolfxEew({
+    type: 'jma_eew',
+    Title: '緊急地震速報（警報）',
+    EventID: '20261108020000',
+    Serial: 5,
+    AnnouncedTime: '2026/11/08 02:00:30',
+    OriginTime: '2026/11/08 02:00:10',
+    Hypocenter: '石川県能登地方',
+    Latitude: 37.5,
+    Longitude: 137.3,
+    Magnitude: 6.8,
+    Depth: 12,
+    MaxIntensity: '6強',
+    MaxLgIntensity: '3',
+    WarnArea: [
+      { Chiiki: '石川県能登', Shindo1: '6強', Shindo2: '6弱', LgInt: '3', Type: '警報' },
+      { Chiiki: '富山県西部', Shindo1: '5弱', Shindo2: '4', LgInt: '1', Type: '警報' },
+    ],
+    isWarn: true,
+  })!;
+  assert.equal(wolfxWithLpgm.maxLpgmClass, 3);
+  assert.equal(wolfxWithLpgm.maxLpgmLabel, '階級3');
+  assert.equal(hasActualEewLpgm(wolfxWithLpgm), true);
+  const lpgmMap = computeEewAreaLpgmClasses(wolfxWithLpgm);
+  assert.ok(lpgmMap.size >= 2);
+});
+
+test('doesEarthquakeMatchEew rejects stale previous earthquake during active EEW and matches same event', () => {
+  const shizuokaEew = parseWolfxEew({
+    type: 'jma_eew',
+    Title: '緊急地震速報（警報）',
+    EventID: '20261108010400',
+    Serial: 19,
+    AnnouncedTime: '2026/11/08 01:06:08',
+    OriginTime: '2026/11/08 01:04:34',
+    Hypocenter: '静岡県西部',
+    Latitude: 34.8,
+    Longitude: 137.8,
+    Magnitude: 6.0,
+    Depth: 50,
+    MaxIntensity: '5強',
+    isWarn: true,
+  })!;
+
+  const prevIbarakiQuake: any = {
+    id: 'eq-ibaraki-prev',
+    occurrenceTime: '2026/11/07 20:07:00',
+    hypocenterName: '茨城県沖',
+    maxScaleCode: 30,
+    maxScaleLabel: '3',
+    magnitude: 5.6,
+    depthKm: 20,
+    lat: 36.2,
+    lon: 141.5,
+    stations: [{ pref: '福島県', city: '郡山市', scaleCode: 30, scaleLabel: '3' }],
+  };
+  assert.equal(doesEarthquakeMatchEew(prevIbarakiQuake, shizuokaEew), false);
+
+  const matchingShizuokaQuake: any = {
+    id: 'eq-shizuoka-new',
+    occurrenceTime: '2026/11/08 01:04:35',
+    hypocenterName: '震源調査中',
+    maxScaleCode: 45,
+    maxScaleLabel: '5弱',
+    magnitude: 4.0,
+    depthKm: 10,
+    lat: 34.8,
+    lon: 137.8,
+    stations: [],
+  };
+  assert.equal(doesEarthquakeMatchEew(matchingShizuokaQuake, shizuokaEew), true);
 });

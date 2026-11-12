@@ -999,7 +999,7 @@ export function buildBottomFlipFeed(
         id: `eew-lpgm-${activeEew.serial}`,
         badge: '長周期地震動',
         badgeBg: 'bg-orange-600 text-white font-bold',
-        mainText: `長周期地震動 最大予測階級${activeEew.maxLpgmLabel || activeEew.maxLpgmClass}`,
+        mainText: `長周期地震動 最大予測 ${activeEew.maxLpgmLabel || `階級${activeEew.maxLpgmClass}`}`,
         subText: '超高層ビル・集合住宅では大きく長い揺れに厳重に警戒してください',
         accentColor: '#EA580C',
       });
