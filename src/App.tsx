@@ -56,12 +56,12 @@ import {
   getNextSceneId,
   getSeismicScaleStyle,
   mergeProgressiveEarthquakeReports,
-  parseEarthquakeTimeMs,
   REGION_CONFIGS,
   SCENE_LIST,
   sortEarthquakesByNewest,
 } from './utils/jmaParser';
 import {
+  EEW_DISPLAY_HOLD_MS,
   estimateLpgmClassFromScale,
   getLpgmClassStyle,
   getTsunamiAlertSeverity,
@@ -75,7 +75,18 @@ import {
 import {
   buildSceneFeed,
   buildBottomFlipFeed,
+  BottomFlipFeedResult,
+  SceneFeedData,
 } from './utils/sceneFeedBuilder';
+import {
+  areEarthquakeListsEquivalent,
+  computeFlipCycleState,
+  createInitialEarthquakeTrackerState,
+  EarthquakeTrackerState,
+  evaluateEarthquakeLoopCompletion,
+  evaluateIncomingEarthquakeUpdate,
+  isEarthquakeAwaitingDetail,
+} from './utils/quakeInterrupt';
 
 const INITIAL_BUNDLE: MonitorDataBundle = {
   xmlEntries: [],
@@ -309,6 +320,461 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
   }
 );
 
+interface EarthquakeHistoryListProps {
+  variant: 'desktop' | 'mobile';
+  earthquakes: EarthquakeReport[];
+  selectedEarthquakeId: string;
+  pinnedEarthquakeId: string | null;
+  isLoopPaused: boolean;
+  isEewActive: boolean;
+  onSelect: (eq: EarthquakeReport) => void;
+}
+
+const EarthquakeHistoryList = memo(function EarthquakeHistoryList({
+  variant,
+  earthquakes,
+  selectedEarthquakeId,
+  pinnedEarthquakeId,
+  isLoopPaused,
+  isEewActive,
+  onSelect,
+}: EarthquakeHistoryListProps) {
+  return (
+    <div
+      key={variant === 'desktop' ? 'desktop-quake-history-list' : 'mobile-quake-history-list'}
+      aria-label="地震履歴一覧"
+      data-testid="left-earthquake-history-list"
+      className="flex-1 overflow-y-auto divide-y divide-[#2B303C] animate-title-swap"
+    >
+      {isEewActive && (
+        <div
+          data-testid="eew-history-locked-banner"
+          className="bg-red-950/95 border-b border-red-500/80 px-2.5 py-1.5 text-xs text-red-200 font-bold flex items-center gap-1.5 shrink-0"
+        >
+          <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-ping shrink-0" />
+          <span className="truncate">緊急地震速報 発表中（手動選択無効）</span>
+        </div>
+      )}
+      {earthquakes.map((eq) => {
+        const isSelected = selectedEarthquakeId === eq.id;
+        const isPinned =
+          isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
+        return (
+          <EarthquakeHistoryItem
+            key={eq.id}
+            eq={eq}
+            isSelected={isSelected}
+            isPinned={isPinned}
+            isEewActive={isEewActive}
+            onSelect={onSelect}
+          />
+        );
+      })}
+    </div>
+  );
+});
+
+interface XmlTimelineListProps {
+  variant: 'desktop' | 'mobile';
+  xmlEntries: JmaXmlEntry[];
+  selectedXmlEntryId: string | null;
+  onSelectEntry: (entry: JmaXmlEntry) => void;
+}
+
+const XmlTimelineList = memo(function XmlTimelineList({
+  variant,
+  xmlEntries,
+  selectedXmlEntryId,
+  onSelectEntry,
+}: XmlTimelineListProps) {
+  return (
+    <div
+      aria-label="気象庁XML電文タイムライン"
+      data-testid="left-xml-timeline-list"
+      className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
+    >
+      {xmlEntries.map((entry) => {
+        const isSelected = selectedXmlEntryId === entry.id;
+        return (
+          <button
+            key={entry.id}
+            type="button"
+            onClick={() => onSelectEntry(entry)}
+            className={`w-full text-left px-3 transition-colors cursor-pointer block ${
+              variant === 'mobile' ? 'py-2' : 'py-2.5'
+            } ${
+              isSelected
+                ? 'bg-[#1D222B] border-l-2 border-amber-400'
+                : 'hover:bg-[#181B22]'
+            }`}
+          >
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs font-mono text-neutral-400 shrink-0">
+                {formatTimeHm(entry.updated)}
+              </span>
+              <span className="text-[13px] font-bold text-white leading-snug">
+                {entry.title}
+              </span>
+            </div>
+            <div
+              className={`text-[11px] text-neutral-300 leading-relaxed break-words ${
+                variant === 'mobile' ? 'mt-0.5' : 'mt-1'
+              }`}
+            >
+              {entry.content}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+});
+
+interface BroadcastBottomBarProps {
+  variant: 'desktop' | 'mobile';
+  flipFeed: BottomFlipFeedResult | null;
+  sceneFeed: SceneFeedData;
+  flipSessionKey: string;
+  onFlipRoundsChange: (sessionKey: string, completedRounds: number) => void;
+}
+
+/**
+ * Isolated bottom/feed bar owning the 4.8s flip timer and compositor ticker measurements
+ * so flip card transitions never re-render App, MonitorMap, or SceneDetailPanel.
+ */
+const BroadcastBottomBar = memo(function BroadcastBottomBar({
+  variant,
+  flipFeed,
+  sceneFeed,
+  flipSessionKey,
+  onFlipRoundsChange,
+}: BroadcastBottomBarProps) {
+  const cardCount = flipFeed?.cards.length ?? 0;
+  const isFlipFeedActive = cardCount > 0;
+
+  const [flipState, setFlipState] = useState<{
+    sessionKey: string;
+    ticks: number;
+  }>(() => ({ sessionKey: flipSessionKey, ticks: 0 }));
+
+  useEffect(() => {
+    setFlipState({ sessionKey: flipSessionKey, ticks: 0 });
+    if (!isFlipFeedActive) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setFlipState((prev) => ({
+        sessionKey: flipSessionKey,
+        ticks: prev.sessionKey === flipSessionKey ? prev.ticks + 1 : 1,
+      }));
+    }, 4800);
+    return () => clearInterval(timer);
+  }, [flipSessionKey, isFlipFeedActive]);
+
+  const activeTicks =
+    flipState.sessionKey === flipSessionKey ? flipState.ticks : 0;
+  const { cardIndex: safeFlipIndex, completedRounds } = computeFlipCycleState(
+    activeTicks,
+    cardCount
+  );
+  const currentFlipCard = flipFeed?.cards[safeFlipIndex];
+
+  const onFlipRoundsChangeRef = useRef(onFlipRoundsChange);
+  useEffect(() => {
+    onFlipRoundsChangeRef.current = onFlipRoundsChange;
+  }, [onFlipRoundsChange]);
+
+  const lastReportedRef = useRef<{ sessionKey: string; rounds: number }>({
+    sessionKey: flipSessionKey,
+    rounds: 0,
+  });
+
+  useEffect(() => {
+    if (
+      lastReportedRef.current.sessionKey === flipSessionKey &&
+      lastReportedRef.current.rounds === completedRounds
+    ) {
+      return;
+    }
+    lastReportedRef.current = {
+      sessionKey: flipSessionKey,
+      rounds: completedRounds,
+    };
+    onFlipRoundsChangeRef.current(flipSessionKey, completedRounds);
+  }, [flipSessionKey, completedRounds]);
+
+  const tickerTrackRef = useRef<HTMLDivElement | null>(null);
+  const tickerFirstCopyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (isFlipFeedActive) return;
+    const track = tickerTrackRef.current;
+    const copy = tickerFirstCopyRef.current;
+    const speedPxPerSec = 72;
+    const applyTickerGeometry = () => {
+      if (!track || !copy) return;
+      const w = copy.offsetWidth;
+      if (w <= 0) return;
+      track.style.setProperty('--ticker-shift', `${w}px`);
+      track.style.setProperty(
+        '--ticker-duration',
+        `${Math.max(10, w / speedPxPerSec)}s`
+      );
+    };
+    applyTickerGeometry();
+    const resizeObserver =
+      copy && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(applyTickerGeometry)
+        : null;
+    if (resizeObserver && copy) resizeObserver.observe(copy);
+
+    return () => {
+      resizeObserver?.disconnect();
+    };
+  }, [sceneFeed.textKey, variant, isFlipFeedActive]);
+
+  const accentColor =
+    isFlipFeedActive && flipFeed ? flipFeed.accentColor : sceneFeed.accentColor;
+  const headerTitle =
+    isFlipFeedActive && flipFeed ? flipFeed.headerTitle : sceneFeed.title;
+  const headerTime =
+    isFlipFeedActive && flipFeed ? flipFeed.headerTime : sceneFeed.timeLabel;
+
+  if (variant === 'mobile') {
+    return (
+      <section
+        aria-label="気象防災ライブフィード"
+        data-testid="mobile-top-feed-bar"
+        className="h-[58px] shrink-0 border-b-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden z-20 px-2.5 py-1"
+      >
+        <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span
+              className="w-1.5 h-3.5 rounded-xs shrink-0"
+              style={{ backgroundColor: accentColor }}
+            />
+            <span className="text-[11px] font-black text-neutral-100 tracking-wider truncate">
+              {headerTitle}
+            </span>
+            <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[10px] text-neutral-300">
+              <span>{headerTime}</span>
+              <span className="px-1 py-0.2 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[10px] font-sans font-bold">
+                気象庁発表
+              </span>
+              {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
+                <span className="px-1 py-0.2 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[10px] font-mono font-bold">
+                  {safeFlipIndex + 1}/{flipFeed.cards.length}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {isFlipFeedActive && currentFlipCard ? (
+            <div
+              key={`mobile-flip-${safeFlipIndex}-${currentFlipCard.id}`}
+              data-testid="mobile-flip-feed-card"
+              className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+            >
+              <div className="flex items-center gap-2 w-full min-w-0">
+                <span
+                  className={`px-1.5 py-0.5 text-[10px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
+                >
+                  {currentFlipCard.badge}
+                </span>
+                <div className="min-w-0 flex-1 truncate">
+                  <span className="text-[14px] font-black text-white tracking-wide truncate block">
+                    {currentFlipCard.mainText}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div
+              data-testid="xml-ticker-scroll-container"
+              className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
+            >
+              <div ref={tickerTrackRef} className="ticker-track">
+                <div
+                  ref={tickerFirstCopyRef}
+                  className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
+                >
+                  {sceneFeed.items.map((item, idx) => (
+                    <span
+                      key={`mobile-feed-copy1-${idx}`}
+                      className="inline-flex items-center gap-2 shrink-0"
+                    >
+                      {item.prefix && (
+                        <span
+                          className="font-extrabold"
+                          style={{ color: sceneFeed.accentColor }}
+                        >
+                          {item.prefix}
+                        </span>
+                      )}
+                      <span className="text-neutral-100">{item.text}</span>
+                      <span
+                        aria-hidden="true"
+                        className="text-neutral-600 ml-2 font-normal"
+                      >
+                        ｜
+                      </span>
+                    </span>
+                  ))}
+                </div>
+                <div
+                  aria-hidden="true"
+                  className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
+                >
+                  {sceneFeed.items.map((item, idx) => (
+                    <span
+                      key={`mobile-feed-copy2-${idx}`}
+                      className="inline-flex items-center gap-2 shrink-0"
+                    >
+                      {item.prefix && (
+                        <span
+                          className="font-extrabold"
+                          style={{ color: sceneFeed.accentColor }}
+                        >
+                          {item.prefix}
+                        </span>
+                      )}
+                      <span className="text-neutral-100">{item.text}</span>
+                      <span
+                        aria-hidden="true"
+                        className="text-neutral-600 ml-2 font-normal"
+                      >
+                        ｜
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <footer
+      aria-label="気象防災ライブフィード"
+      className="h-[84px] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
+    >
+      <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
+        <div className="flex items-center gap-2 min-w-0">
+          <span
+            className="w-1.5 h-4 rounded-xs shrink-0"
+            style={{ backgroundColor: accentColor }}
+          />
+          <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
+            {headerTitle}
+          </span>
+          <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300">
+            <span>{headerTime}</span>
+            <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold">
+              気象庁発表
+            </span>
+            {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
+              <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[11px] font-mono font-bold">
+                {safeFlipIndex + 1}/{flipFeed.cards.length}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {isFlipFeedActive && currentFlipCard ? (
+          <div
+            key={`desktop-flip-${safeFlipIndex}-${currentFlipCard.id}`}
+            data-testid="desktop-flip-feed-card"
+            className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+          >
+            <div className="flex items-center gap-3 w-full min-w-0">
+              <span
+                className={`px-2.5 py-0.5 text-xs md:text-[13px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
+              >
+                {currentFlipCard.badge}
+              </span>
+              <div className="min-w-0 flex-1 flex items-baseline gap-3 truncate">
+                <span className="text-[19px] md:text-[23px] font-black text-white tracking-wide truncate">
+                  {currentFlipCard.mainText}
+                </span>
+                {currentFlipCard.subText && (
+                  <span className="text-xs md:text-sm font-mono text-neutral-400 truncate">
+                    {currentFlipCard.subText}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div
+            data-testid="xml-ticker-scroll-container"
+            className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
+          >
+            <div ref={tickerTrackRef} className="ticker-track">
+              <div
+                ref={tickerFirstCopyRef}
+                className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
+              >
+                {sceneFeed.items.map((item, idx) => (
+                  <span
+                    key={`feed-item-copy1-${idx}`}
+                    className="inline-flex items-center gap-2.5 shrink-0"
+                  >
+                    {item.prefix && (
+                      <span
+                        className="font-extrabold"
+                        style={{ color: sceneFeed.accentColor }}
+                      >
+                        {item.prefix}
+                      </span>
+                    )}
+                    <span className="text-neutral-100">{item.text}</span>
+                    <span
+                      aria-hidden="true"
+                      className="text-neutral-600 ml-4 font-normal"
+                    >
+                      ｜
+                    </span>
+                  </span>
+                ))}
+              </div>
+              <div
+                aria-hidden="true"
+                className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
+              >
+                {sceneFeed.items.map((item, idx) => (
+                  <span
+                    key={`feed-item-copy2-${idx}`}
+                    className="inline-flex items-center gap-2.5 shrink-0"
+                  >
+                    {item.prefix && (
+                      <span
+                        className="font-extrabold"
+                        style={{ color: sceneFeed.accentColor }}
+                      >
+                        {item.prefix}
+                      </span>
+                    )}
+                    <span className="text-neutral-100">{item.text}</span>
+                    <span
+                      aria-hidden="true"
+                      className="text-neutral-600 ml-4 font-normal"
+                    >
+                      ｜
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </footer>
+  );
+});
+
 export default function App() {
   const [data, setData] = useState<MonitorDataBundle>(INITIAL_BUNDLE);
   // Start on 'warnings' so the NERV choropleth map is immediately visible, then rotate through normal loop scenes
@@ -429,21 +895,31 @@ export default function App() {
     return `${yyyy}年${month}月${day}日 ${hm} 更新`;
   }, [data.lastXmlFetchTime]);
 
-  const latestEqIdRef = useRef<string>(INITIAL_EARTHQUAKES[0].id);
-  const latestEqReportKeyRef = useRef<string>('');
-  const hasInitializedEqRef = useRef<boolean>(false);
+  const eqTrackerRef = useRef<EarthquakeTrackerState>(
+    createInitialEarthquakeTrackerState()
+  );
   // True while an active EEW or an unconfirmed earthquake (震度速報 / 震源情報) is unfolding;
   // locks the monitor onto the 'earthquake' scene until the final confirmed report (各地の震度に関する情報) arrives!
   const eqLockUntilConfirmedRef = useRef<boolean>(false);
+  const eqUnconfirmedTimedOutRef = useRef<boolean>(false);
   const eqConfirmedHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null
   );
   const latestVolcanoXmlIdRef = useRef<string>('');
+  const [flipSessionNonce, setFlipSessionNonce] = useState<number>(0);
 
-  // Bottom XML Ticker refs (uses tiled scrollLeft with cached copyWidth so it never triggers forced layout reflows)
-  const tickerTrackRef = useRef<HTMLDivElement | null>(null);
-  const tickerFirstCopyRef = useRef<HTMLDivElement | null>(null);
-  const tickerCopyWidthRef = useRef<number>(0);
+  // Refs synced in render/effect so callbacks passed to memoized children & WS effects stay 100% stable
+  const activeEewRef = useRef<EewReport | null>(activeEew);
+  activeEewRef.current = activeEew;
+  const interruptKindRef = useRef<InterruptKind>(interruptKind);
+  interruptKindRef.current = interruptKind;
+  const selectedEarthquakeRef = useRef<EarthquakeReport>(selectedEarthquake);
+  selectedEarthquakeRef.current = selectedEarthquake;
+  const typhoonsRef = useRef<TyphoonReport[]>(data.typhoons);
+  typhoonsRef.current = data.typhoons;
+  const tsunamiSeverityRef = useRef<'none' | 'forecast' | 'warning_or_above'>(
+    'none'
+  );
 
   // Unified handler for incoming EEW (緊急地震速報 予報・警報・発表検出)
   const handleIncomingEew = useCallback((eew: EewReport) => {
@@ -455,104 +931,50 @@ export default function App() {
     });
     if (!eew.isCancelled) {
       eqLockUntilConfirmedRef.current = true;
+      eqUnconfirmedTimedOutRef.current = false;
       if (eqConfirmedHoldTimerRef.current) {
         clearTimeout(eqConfirmedHoldTimerRef.current);
         eqConfirmedHoldTimerRef.current = null;
       }
       setEewDisplayMode('intensity');
       setInterruptKind('eew');
-      setActiveScene('earthquake');
     }
   }, []);
 
   // Unified handler for earthquake list updates (JMA bosai + P2P 551):
-  // Immediately switches to 'earthquake' when a new quake or progressive report upgrade arrives,
-  // and keeps 'earthquake' locked until `isConfirmed === true` (final seismic intensity & hypocenter confirmed).
+  // Immediately interrupts onto 'earthquake' when a newly arrived quake (with or without EEW)
+  // or progressive report upgrade arrives, locks while unconfirmed, and returns after 2 bottom-bar loops once confirmed.
   const applyEarthquakeListUpdate = useCallback(
-    (rawList: EarthquakeReport[]) => {
+    (
+      rawList: EarthquakeReport[],
+      options?: { isLive?: boolean; isRealtimePush?: boolean }
+    ) => {
       if (!rawList || rawList.length === 0) return;
       const merged = mergeProgressiveEarthquakeReports(rawList);
       if (merged.length === 0) return;
-      const newest = merged[0];
-      const nextKey =
-        newest.reportKey ||
-        `${newest.id}|${newest.issueTypeLabel || ''}|${newest.maxScaleCode}|${newest.stations.length}|${newest.isConfirmed ? 1 : 0}`;
 
-      if (!hasInitializedEqRef.current) {
-        hasInitializedEqRef.current = true;
-        latestEqIdRef.current = newest.id;
-        latestEqReportKeyRef.current = nextKey;
-        setSelectedEarthquake(newest);
+      const isLive = options?.isLive ?? true;
+      const isRealtimePush = options?.isRealtimePush ?? false;
+      const isTsunamiWarningActive =
+        tsunamiSeverityRef.current === 'warning_or_above';
 
-        // If the app starts up while an earthquake is still unconfirmed (e.g. 震度速報 / 震源情報 within the last 15 min),
-        // immediately switch to and lock onto the 'earthquake' tab!
-        const eqTimeMs =
-          parseEarthquakeTimeMs(newest.occurrenceTime) ||
-          parseEarthquakeTimeMs(newest.issueTime);
-        const isRecentUnconfirmed =
-          newest.isConfirmed === false &&
-          eqTimeMs > 0 &&
-          Date.now() - eqTimeMs <= 15 * 60 * 1000;
-        if (isRecentUnconfirmed) {
-          eqLockUntilConfirmedRef.current = true;
-          setInterruptKind('earthquake');
-          setActiveScene('earthquake');
-        }
+      const action = evaluateIncomingEarthquakeUpdate({
+        mergedList: merged,
+        tracker: eqTrackerRef.current,
+        nowMs: Date.now(),
+        isLive,
+        isRealtimePush,
+        isTsunamiWarningActive,
+        currentInterruptKind: interruptKindRef.current,
+      });
+
+      eqTrackerRef.current = action.nextTracker;
+
+      if (action.type === 'noop') {
         return;
       }
 
-      const isNewEvent = Boolean(
-        latestEqIdRef.current &&
-          newest.id !== latestEqIdRef.current &&
-          latestEqIdRef.current !== INITIAL_EARTHQUAKES[0].id
-      );
-      const isReportUpgraded = Boolean(
-        latestEqReportKeyRef.current &&
-          nextKey !== latestEqReportKeyRef.current
-      );
-
-      latestEqIdRef.current = newest.id;
-      latestEqReportKeyRef.current = nextKey;
-
-      if (isNewEvent || isReportUpgraded) {
-        updatePinnedEarthquakeId(null);
-        setSelectedEarthquake(newest);
-        setActiveScene('earthquake');
-
-        const isAwaitingDetail =
-          newest.isConfirmed === false ||
-          newest.issueTypeLabel === '震度速報' ||
-          newest.issueTypeLabel === '震源に関する情報' ||
-          (newest.maxScaleCode >= 30 && newest.issueTypeLabel !== '各地の震度に関する情報');
-
-        if (isAwaitingDetail) {
-          // Interim report (震度速報 / 震源に関する情報 / 震源・震度に関する情報):
-          // Keep locked on 'earthquake' tab continuously until all stations down to intensity 1 arrive!
-          eqLockUntilConfirmedRef.current = true;
-          if (eqConfirmedHoldTimerRef.current) {
-            clearTimeout(eqConfirmedHoldTimerRef.current);
-            eqConfirmedHoldTimerRef.current = null;
-          }
-          setInterruptKind((prev) => (prev === 'eew' ? 'eew' : 'earthquake'));
-        } else {
-          // Final comprehensive seismic intensity & hypocenter confirmed (`各地の震度に関する情報` with all stations)!
-          eqLockUntilConfirmedRef.current = false;
-          setInterruptKind('earthquake');
-          if (eqConfirmedHoldTimerRef.current) {
-            clearTimeout(eqConfirmedHoldTimerRef.current);
-          }
-          // Hold on the confirmed earthquake view for 60 seconds so the user can inspect the final result,
-          // then release the interrupt lock so normal patrol can resume.
-          eqConfirmedHoldTimerRef.current = setTimeout(() => {
-            eqConfirmedHoldTimerRef.current = null;
-            if (!eqLockUntilConfirmedRef.current) {
-              setInterruptKind((prev) =>
-                prev === 'earthquake' || prev === 'eew' ? 'none' : prev
-              );
-            }
-          }, 60000);
-        }
-      } else {
+      if (action.type === 'silent_sync') {
         setSelectedEarthquake((prev) => {
           if (prev.isTest) return prev;
           // ユーザーが手動で特定の地震を選択・固定している場合は勝手に最新に書き換えない
@@ -562,12 +984,94 @@ export default function App() {
             );
             return matched || prev;
           }
-          return newest;
+          if (
+            prev.id === action.selectedEarthquake.id &&
+            prev.reportKey === action.selectedEarthquake.reportKey
+          ) {
+            return prev;
+          }
+          return action.selectedEarthquake;
         });
+        return;
+      }
+
+      // If patrol was paused only because a historical quake was pinned, clear pin & resume
+      // so the newly arrived earthquake interrupt can auto-return after 2 bottom-bar loops.
+      if (pinnedEarthquakeIdRef.current) {
+        setIsLoopPaused(false);
+      }
+      updatePinnedEarthquakeId(null);
+      setSelectedEarthquake(action.selectedEarthquake);
+      eqUnconfirmedTimedOutRef.current = false;
+
+      if (action.type === 'interrupt_unconfirmed') {
+        // Interim report (震度速報 / 震源に関する情報 / 震源・震度に関する情報):
+        // Keep locked on 'earthquake' tab until confirmed report arrives (5-min safety cap if feed stalls).
+        eqLockUntilConfirmedRef.current = true;
+        if (eqConfirmedHoldTimerRef.current) {
+          clearTimeout(eqConfirmedHoldTimerRef.current);
+        }
+        eqConfirmedHoldTimerRef.current = setTimeout(() => {
+          eqConfirmedHoldTimerRef.current = null;
+          eqLockUntilConfirmedRef.current = false;
+          eqUnconfirmedTimedOutRef.current = true;
+          setFlipSessionNonce((n) => n + 1);
+        }, 5 * 60 * 1000);
+
+        setInterruptKind((prev) =>
+          prev === 'eew' && isEewStillActive(activeEewRef.current)
+            ? 'eew'
+            : 'earthquake'
+        );
+        if (action.resetFlipLoop) {
+          setFlipSessionNonce((n) => n + 1);
+        }
+      } else {
+        // Confirmed earthquake report (including non-EEW earthquakes):
+        // Release unconfirmed lock and let the bottom flip bar play 2 full loops before returning.
+        eqLockUntilConfirmedRef.current = false;
+        if (eqConfirmedHoldTimerRef.current) {
+          clearTimeout(eqConfirmedHoldTimerRef.current);
+          eqConfirmedHoldTimerRef.current = null;
+        }
+        setInterruptKind((prev) =>
+          prev === 'eew' && isEewStillActive(activeEewRef.current)
+            ? 'eew'
+            : 'earthquake'
+        );
+        if (action.resetFlipLoop) {
+          setFlipSessionNonce((n) => n + 1);
+        }
       }
     },
-    []
+    [updatePinnedEarthquakeId]
   );
+
+  // Automatically clear expired EEW state so non-EEW/confirmed earthquakes or normal loop can resume cleanly
+  useEffect(() => {
+    if (!activeEew) return;
+    const holdMs = activeEew.isCancelled ? 15 * 1000 : EEW_DISPLAY_HOLD_MS;
+    const remainingMs = Math.max(
+      0,
+      holdMs - (Date.now() - activeEew.receivedAtMs)
+    );
+    const timer = setTimeout(() => {
+      setActiveEew(null);
+      setFlipSessionNonce((n) => n + 1);
+      setInterruptKind((prev) => {
+        if (prev !== 'eew') return prev;
+        if (
+          eqLockUntilConfirmedRef.current ||
+          (!eqUnconfirmedTimedOutRef.current &&
+            isEarthquakeAwaitingDetail(selectedEarthquakeRef.current))
+        ) {
+          return 'earthquake';
+        }
+        return 'none';
+      });
+    }, remainingMs);
+    return () => clearTimeout(timer);
+  }, [activeEew]);
 
   // Fast 10-second background poll specifically for EEW (Wolfx + P2P 556) & Earthquake (JMA + P2P 551)
   const pollFastEarthquakeAndEew = useCallback(async () => {
@@ -580,15 +1084,26 @@ export default function App() {
         handleIncomingEew(liveEew);
       }
       if (eqRes.live && eqRes.earthquakes.length > 0) {
-        setData((prev) => ({
-          ...prev,
-          earthquakes: eqRes.earthquakes,
-          dataSourceStatus: {
-            ...prev.dataSourceStatus,
-            p2pQuakeLive: true,
-          },
-        }));
-        applyEarthquakeListUpdate(eqRes.earthquakes);
+        setData((prev) => {
+          if (
+            prev.dataSourceStatus.p2pQuakeLive &&
+            areEarthquakeListsEquivalent(prev.earthquakes, eqRes.earthquakes)
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            earthquakes: eqRes.earthquakes,
+            dataSourceStatus: {
+              ...prev.dataSourceStatus,
+              p2pQuakeLive: true,
+            },
+          };
+        });
+        applyEarthquakeListUpdate(eqRes.earthquakes, {
+          isLive: true,
+          isRealtimePush: false,
+        });
       }
     } catch {
       // Ignore fast poll network errors
@@ -603,7 +1118,27 @@ export default function App() {
         fetchMonitorDataBundle(),
         fetchLatestLiveEew(),
       ]);
-      setData(bundle);
+      let nextEarthquakesForDecision = bundle.earthquakes;
+      setData((prev) => {
+        const prevLiveEq = prev.dataSourceStatus.p2pQuakeLive
+          ? prev.earthquakes
+          : [];
+        const mergedEq =
+          prevLiveEq.length > 0 && bundle.dataSourceStatus.p2pQuakeLive
+            ? mergeProgressiveEarthquakeReports([
+                ...bundle.earthquakes,
+                ...prevLiveEq,
+              ]).slice(0, 20)
+            : bundle.earthquakes;
+        nextEarthquakesForDecision = mergedEq;
+        const nextEq = areEarthquakeListsEquivalent(prev.earthquakes, mergedEq)
+          ? prev.earthquakes
+          : mergedEq;
+        return {
+          ...bundle,
+          earthquakes: nextEq,
+        };
+      });
 
       if (liveEew && isEewStillActive(liveEew)) {
         handleIncomingEew(liveEew);
@@ -618,8 +1153,11 @@ export default function App() {
       }
 
       // 1. Check for new or upgraded earthquake report
-      if (bundle.earthquakes.length > 0) {
-        applyEarthquakeListUpdate(bundle.earthquakes);
+      if (nextEarthquakesForDecision.length > 0) {
+        applyEarthquakeListUpdate(nextEarthquakesForDecision, {
+          isLive: bundle.dataSourceStatus.p2pQuakeLive,
+          isRealtimePush: false,
+        });
       }
 
       // 2. Check for Volcano Alert Level change in eqvol.xml
@@ -689,7 +1227,6 @@ export default function App() {
               } else {
                 eqLockUntilConfirmedRef.current = true;
                 setInterruptKind('eew');
-                setActiveScene('earthquake');
               }
               pollFastEarthquakeAndEew();
             }
@@ -712,14 +1249,26 @@ export default function App() {
               const report = convertP2PQuakeItem(payload);
               if (report) {
                 setData((prev) => {
+                  const basePrev = prev.dataSourceStatus.p2pQuakeLive
+                    ? prev.earthquakes
+                    : [];
                   const nextList = mergeProgressiveEarthquakeReports([
                     report,
-                    ...prev.earthquakes,
+                    ...basePrev,
                   ]).slice(0, 20);
-                  queueMicrotask(() => applyEarthquakeListUpdate(nextList));
+                  queueMicrotask(() =>
+                    applyEarthquakeListUpdate(nextList, {
+                      isLive: true,
+                      isRealtimePush: true,
+                    })
+                  );
                   return {
                     ...prev,
                     earthquakes: nextList,
+                    dataSourceStatus: {
+                      ...prev.dataSourceStatus,
+                      p2pQuakeLive: true,
+                    },
                   };
                 });
                 // Also fetch JMA bosai detail JSON shortly after for exact station lat/lon coordinates
@@ -810,6 +1359,7 @@ export default function App() {
     () => getTsunamiAlertSeverity(data.tsunamiForecast),
     [data.tsunamiForecast]
   );
+  tsunamiSeverityRef.current = tsunamiSeverity;
 
   // If a Tsunami Warning or Major Warning or Advisory is active, continuously lock onto the tsunami scene until cancelled!
   useEffect(() => {
@@ -855,13 +1405,11 @@ export default function App() {
       return;
     }
 
-    // If locked onto earthquake (active EEW or unconfirmed seismic intensity / hypocenter),
-    // stay on the 'earthquake' scene continuously until final comprehensive report (各地の震度に関する情報) arrives!
+    // While an interrupt (EEW or non-EEW earthquake) or unconfirmed detail lock is active,
+    // keep the current interrupt active without overwriting `activeScene` (so return restores the interrupted scene).
     const isAwaitingDetail =
-      selectedEarthquake.isConfirmed === false ||
-      selectedEarthquake.issueTypeLabel === '震度速報' ||
-      selectedEarthquake.issueTypeLabel === '震源に関する情報' ||
-      (selectedEarthquake.maxScaleCode >= 30 && selectedEarthquake.issueTypeLabel !== '各地の震度に関する情報');
+      !eqUnconfirmedTimedOutRef.current &&
+      isEarthquakeAwaitingDetail(selectedEarthquakeRef.current);
 
     if (
       eqLockUntilConfirmedRef.current ||
@@ -870,7 +1418,6 @@ export default function App() {
       isAwaitingDetail ||
       (activeEew && isEewStillActive(activeEew))
     ) {
-      setActiveScene('earthquake');
       return;
     }
 
@@ -978,7 +1525,6 @@ export default function App() {
     data.amedas,
     data.typhoons,
     interruptKind,
-    selectedTyphoon.id,
     typhoonPatrolStep,
     effectiveEnabledScenes,
     regionScope,
@@ -988,32 +1534,43 @@ export default function App() {
     tsunamiSeverity,
   ]);
 
-  const handleSelectSceneManual = (sceneId: SceneId) => {
-    eqLockUntilConfirmedRef.current = false;
-    if (eqConfirmedHoldTimerRef.current) {
-      clearTimeout(eqConfirmedHoldTimerRef.current);
-      eqConfirmedHoldTimerRef.current = null;
-    }
-    setInterruptKind('none');
-    setWarningPatrolStep(0);
-    const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
-    setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
-    if (sceneId === 'amedas') {
-      setAmedasMetric('temp');
-    }
-    if (sceneId === 'forecast') {
-      setForecastViewMode('today_3h');
-      setForecast3hIndex(0);
-    }
-    if (sceneId === 'typhoon' && data.typhoons.length > 0) {
-      setSelectedTyphoon(data.typhoons[0]);
-    }
-    if (regionScope === 'auto') {
-      setPatrolStepIndex(0);
-      setPatrolRegionId('national');
-    }
-    setActiveScene(sceneId);
-  };
+  const advanceSceneRef = useRef(advanceScene);
+  advanceSceneRef.current = advanceScene;
+  const advanceSceneStable = useCallback(() => {
+    advanceSceneRef.current();
+  }, []);
+
+  const handleSelectSceneManual = useCallback(
+    (sceneId: SceneId) => {
+      eqLockUntilConfirmedRef.current = false;
+      eqUnconfirmedTimedOutRef.current = false;
+      if (eqConfirmedHoldTimerRef.current) {
+        clearTimeout(eqConfirmedHoldTimerRef.current);
+        eqConfirmedHoldTimerRef.current = null;
+      }
+      setInterruptKind('none');
+      setWarningPatrolStep(0);
+      const totalTyphoons =
+        typhoonsRef.current.length > 0 ? typhoonsRef.current.length : 1;
+      setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
+      if (sceneId === 'amedas') {
+        setAmedasMetric('temp');
+      }
+      if (sceneId === 'forecast') {
+        setForecastViewMode('today_3h');
+        setForecast3hIndex(0);
+      }
+      if (sceneId === 'typhoon' && typhoonsRef.current.length > 0) {
+        setSelectedTyphoon(typhoonsRef.current[0]);
+      }
+      if (regionScope === 'auto') {
+        setPatrolStepIndex(0);
+        setPatrolRegionId('national');
+      }
+      setActiveScene(sceneId);
+    },
+    [regionScope]
+  );
 
   const handleChangeForecastViewMode = useCallback((mode: ForecastViewMode) => {
     setForecastViewMode(mode);
@@ -1022,24 +1579,38 @@ export default function App() {
     }
   }, []);
 
-  // Test Interrupt 1: Earthquake
-  const handleTriggerTestEarthquake = () => {
+  // Test Interrupt 1: Earthquake (returns cleanly after 2 loops of the bottom info bar)
+  const handleTriggerTestEarthquake = useCallback(() => {
+    eqLockUntilConfirmedRef.current = false;
+    eqUnconfirmedTimedOutRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
+    updatePinnedEarthquakeId(null);
+    setIsLoopPaused(false);
     setSelectedEarthquake(TEST_INTERRUPT_EARTHQUAKE);
     setInterruptKind('earthquake');
-    setActiveScene('earthquake');
-  };
+    setFlipSessionNonce((n) => n + 1);
+  }, [updatePinnedEarthquakeId]);
 
   // Test Interrupt 1-b: EEW (緊急地震速報 Progressive Demo: 第1報 -> 第3報 -> 最終報)
   const handleTriggerEewDemo = useCallback(() => {
     eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
     eewDemoTimerRef.current = [];
+    eqLockUntilConfirmedRef.current = false;
+    eqUnconfirmedTimedOutRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
 
     // Step 1: 第1報（M5.9 震度5強以上）
     const r1 = { ...TEST_EEW_REPORTS[0], receivedAtMs: Date.now() };
     setEewDisplayMode('intensity');
     setActiveEew(r1);
     setInterruptKind('eew');
-    setActiveScene('earthquake');
+    setFlipSessionNonce((n) => n + 1);
 
     // Step 2: 第3報（M6.8 震度6強） - 4秒後
     const t1 = setTimeout(() => {
@@ -1057,11 +1628,10 @@ export default function App() {
   }, []);
 
   // Test Interrupt 2: Volcano Alert Level Change (zooms directly to volcano)
-  const handleTriggerTestVolcano = () => {
+  const handleTriggerTestVolcano = useCallback(() => {
     setActiveVolcano(TEST_VOLCANO_LEVEL_CHANGE);
     setInterruptKind('volcano');
-    setActiveScene('volcano');
-  };
+  }, []);
 
   // Tsunami Full-scale Demo Toggle (大津波警報・津波警報・注意報シミュレーション)
   const handleToggleTsunamiDemo = useCallback(() => {
@@ -1083,23 +1653,7 @@ export default function App() {
     });
   }, []);
 
-  const handleDismissInterrupt = () => {
-    eqLockUntilConfirmedRef.current = false;
-    if (eqConfirmedHoldTimerRef.current) {
-      clearTimeout(eqConfirmedHoldTimerRef.current);
-      eqConfirmedHoldTimerRef.current = null;
-    }
-    setInterruptKind('none');
-    setActiveEew(null);
-    eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
-    eewDemoTimerRef.current = [];
-    if (selectedEarthquake.isTest && data.earthquakes.length > 0) {
-      setSelectedEarthquake(data.earthquakes[0]);
-    }
-    setActiveScene('warnings');
-  };
-
-  const handleToggleSceneEnabled = (sceneId: SceneId) => {
+  const handleToggleSceneEnabled = useCallback((sceneId: SceneId) => {
     setEnabledScenes((prev) => {
       if (prev.includes(sceneId)) {
         if (prev.length <= 1) return prev;
@@ -1107,9 +1661,9 @@ export default function App() {
       }
       return [...prev, sceneId];
     });
-  };
+  }, []);
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = useCallback(() => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen?.().catch(() => {});
       setIsFullscreen(true);
@@ -1117,57 +1671,87 @@ export default function App() {
       document.exitFullscreen?.().catch(() => {});
       setIsFullscreen(false);
     }
-  };
+  }, []);
 
   // Sort earthquake list in reverse chronological order (most recently occurred first / 最近発生した順)
   const sortedEarthquakes = useMemo(
     () => sortEarthquakesByNewest(data.earthquakes),
     [data.earthquakes]
   );
+  const sortedEarthquakesRef = useRef<EarthquakeReport[]>(sortedEarthquakes);
+  sortedEarthquakesRef.current = sortedEarthquakes;
 
   // "地震情報でほかの地震を選択したら勝手に巡回するのをやめてそれを表示しておくようにしたい"
   // 地震を選択したら自動巡回ループを停止し、選択された地震を固定表示する
   const handleSelectEarthquake = useCallback(
     (eq: EarthquakeReport) => {
       // "緊急地震速報 表示中は 選択しない"
-      if (activeEew && isEewStillActive(activeEew)) {
+      if (activeEewRef.current && isEewStillActive(activeEewRef.current)) {
         return;
       }
       setSelectedEarthquake(eq);
       setActiveScene('earthquake');
       setIsLoopPaused(true);
       updatePinnedEarthquakeId(eq.id);
+      setFlipSessionNonce((n) => n + 1);
     },
-    [activeEew, updatePinnedEarthquakeId]
+    [updatePinnedEarthquakeId]
   );
 
-  // 巡回再開: 固定を解除して最新の地震に戻し、自動巡回を再開する
+  // 巡回再開: 固定解除・割り込み解除し、最新の地震に戻して自動巡回を再開する
   const handleResumePatrol = useCallback(() => {
     setIsLoopPaused(false);
     updatePinnedEarthquakeId(null);
-    if (interruptKind === 'earthquake') {
+    eqLockUntilConfirmedRef.current = false;
+    eqUnconfirmedTimedOutRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
+    if (
+      interruptKindRef.current === 'earthquake' ||
+      interruptKindRef.current === 'volcano'
+    ) {
       setInterruptKind('none');
     }
-    if (sortedEarthquakes.length > 0) {
-      setSelectedEarthquake(sortedEarthquakes[0]);
+    if (sortedEarthquakesRef.current.length > 0) {
+      setSelectedEarthquake(sortedEarthquakesRef.current[0]);
     }
-  }, [sortedEarthquakes, interruptKind, updatePinnedEarthquakeId]);
+  }, [updatePinnedEarthquakeId]);
 
-  const handleSelectTyphoonFromPanel = useCallback(
-    (ty: TyphoonReport) => {
-      const idx = data.typhoons.findIndex((t) => t.id === ty.id);
-      setTyphoonPatrolStep(idx !== -1 ? idx + 1 : 1);
-      setSelectedTyphoon(ty);
-      setActiveScene('typhoon');
-    },
-    [data.typhoons]
-  );
+  const handleSelectTyphoonFromPanel = useCallback((ty: TyphoonReport) => {
+    const idx = typhoonsRef.current.findIndex((t) => t.id === ty.id);
+    setTyphoonPatrolStep(idx !== -1 ? idx + 1 : 1);
+    setSelectedTyphoon(ty);
+    setActiveScene('typhoon');
+  }, []);
 
   const handleReturnTyphoonOverview = useCallback(() => {
-    const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+    const totalTyphoons =
+      typhoonsRef.current.length > 0 ? typhoonsRef.current.length : 1;
     setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
     setActiveScene('typhoon');
-  }, [data.typhoons.length]);
+  }, []);
+
+  const handleSelectXmlEntryFromList = useCallback((entry: JmaXmlEntry) => {
+    setSelectedXmlEntry(entry);
+    setModalInitialTab('xml');
+    setIsXmlModalOpen(true);
+  }, []);
+
+  const handleCloseXmlModal = useCallback(() => {
+    setIsXmlModalOpen(false);
+  }, []);
+
+  const handleChangeRegionScope = useCallback((val: 'auto' | RegionId) => {
+    setRegionScope(val);
+    setPatrolStepIndex(0);
+    if (val !== 'auto') {
+      setPatrolRegionId(val);
+    } else {
+      setPatrolRegionId('national');
+    }
+  }, []);
 
   const activeRegionConfig = useMemo(() => {
     const targetId = regionScope === 'auto' ? patrolRegionId : regionScope;
@@ -1223,11 +1807,11 @@ export default function App() {
 
     if (forecastViewMode === 'day_after') {
       const timer = setTimeout(() => {
-        advanceScene();
+        advanceSceneRef.current();
       }, 6500);
       return () => clearTimeout(timer);
     }
-  }, [effectiveScene, forecastViewMode, isLoopPaused, advanceScene]);
+  }, [effectiveScene, forecastViewMode, isLoopPaused]);
 
   // 長周期地震動の表示タイミング制御:
   // "長周期地震動は震度などが確定してから少しだけ表示するだけでいい"
@@ -1257,15 +1841,18 @@ export default function App() {
       return;
     }
 
+    let revertTimer: ReturnType<typeof setTimeout> | null = null;
     const showLpgmTimer = setTimeout(() => {
       setEewDisplayMode('lpgm');
-      const revertTimer = setTimeout(() => {
+      revertTimer = setTimeout(() => {
         setEewDisplayMode('intensity');
       }, 4000);
-      return () => clearTimeout(revertTimer);
     }, 8000);
 
-    return () => clearTimeout(showLpgmTimer);
+    return () => {
+      clearTimeout(showLpgmTimer);
+      if (revertTimer) clearTimeout(revertTimer);
+    };
   }, [
     effectiveScene,
     activeEew,
@@ -1343,6 +1930,7 @@ export default function App() {
     sceneMeta.title,
     activeEew,
     eewDisplayMode,
+    selectedEarthquake,
   ]);
 
   // Real-time scene-aware broadcast feed (Pattern B: 画面の現在情報に完全に合致するリアルタイムテロップ)
@@ -1372,7 +1960,6 @@ export default function App() {
     ]
   );
 
-
   // High-priority bottom flip feed for Earthquake, EEW, and Tsunami alerts (Pattern B TV disaster style)
   const flipFeed = useMemo(
     () =>
@@ -1394,120 +1981,91 @@ export default function App() {
     ]
   );
 
-  const isFlipFeedActive = Boolean(flipFeed && flipFeed.cards.length > 0);
-  const [bottomFlipIndex, setBottomFlipIndex] = useState<number>(0);
-  const [flipCompletedRounds, setFlipCompletedRounds] = useState<number>(0);
+  const currentFlipSessionKey = `${effectiveScene}|${flipSessionNonce}`;
+  const [flipRoundsState, setFlipRoundsState] = useState<{
+    sessionKey: string;
+    rounds: number;
+  }>({ sessionKey: currentFlipSessionKey, rounds: 0 });
   const [isEarthquakeScrollDone, setIsEarthquakeScrollDone] = useState<boolean>(false);
 
-  // Reset flip index, rounds counter, and right-panel scroll state whenever scene or target quake changes
+  // Reset right-panel scroll completion state when scene, selected earthquake, or interrupt session changes
   useEffect(() => {
-    setBottomFlipIndex(0);
-    setFlipCompletedRounds(0);
     setIsEarthquakeScrollDone(false);
-  }, [effectiveScene, selectedEarthquake?.id]);
+  }, [effectiveScene, selectedEarthquake?.id, flipSessionNonce]);
 
-  const handleSceneComplete = useCallback(() => {
-    if (effectiveScene === 'earthquake') {
+  const handleFlipRoundsChange = useCallback(
+    (sessionKey: string, completedRounds: number) => {
+      setFlipRoundsState({ sessionKey, rounds: completedRounds });
+    },
+    []
+  );
+
+  const activeFlipCompletedRounds =
+    flipRoundsState.sessionKey === currentFlipSessionKey
+      ? flipRoundsState.rounds
+      : 0;
+
+  const isEewActive = Boolean(activeEew && isEewStillActive(activeEew));
+
+  const effectiveSceneRef = useRef<SceneId>(effectiveScene);
+  effectiveSceneRef.current = effectiveScene;
+
+  const handleSceneCompleteStable = useCallback(() => {
+    if (effectiveSceneRef.current === 'earthquake') {
       setIsEarthquakeScrollDone(true);
       return;
     }
-    advanceScene();
-  }, [effectiveScene, advanceScene]);
+    advanceSceneRef.current();
+  }, []);
 
+  // Return cleanly after 2 bottom-bar loops on non-EEW earthquake interrupts,
+  // or advance in normal patrol once BOTH 2 bottom-bar loops and right-panel scroll finish.
   useEffect(() => {
-    if (!isFlipFeedActive || !flipFeed || flipFeed.cards.length === 0) {
-      setBottomFlipIndex(0);
-      setFlipCompletedRounds(0);
-      return;
-    }
-    const cardCount = flipFeed.cards.length;
-    // Slightly longer duration per card (~4.8s) as requested
-    const intervalMs = 4800;
-    const timer = setInterval(() => {
-      setBottomFlipIndex((prev) => {
-        const next = (prev + 1) % cardCount;
-        if (next === 0) {
-          setFlipCompletedRounds((r) => r + 1);
-        }
-        return next;
-      });
-    }, intervalMs);
-    return () => clearInterval(timer);
-  }, [isFlipFeedActive, flipFeed?.cards.length]);
+    const outcome = evaluateEarthquakeLoopCompletion({
+      effectiveScene,
+      interruptKind,
+      isLoopPaused,
+      pinnedEarthquakeId,
+      isEewActive,
+      eqLockUntilConfirmed: eqLockUntilConfirmedRef.current,
+      selectedEarthquake: eqUnconfirmedTimedOutRef.current
+        ? { ...selectedEarthquake, isConfirmed: true }
+        : selectedEarthquake,
+      flipCompletedRounds: activeFlipCompletedRounds,
+      isEarthquakeScrollDone,
+      isMobileDetachedFromDetailTab:
+        isMobilePortrait && mobileBottomTab !== 'detail',
+    });
 
-  // When in 'earthquake' scene during normal patrol loop, advance after BOTH:
-  // 1. Bottom flip cards have completed at least 2 full rounds (flipCompletedRounds >= 2)
-  // 2. AND right panel stations scroll has finished (isEarthquakeScrollDone === true)
-  useEffect(() => {
-    if (
-      effectiveScene === 'earthquake' &&
-      !isLoopPaused &&
-      interruptKind === 'none' &&
-      !pinnedEarthquakeId &&
-      !(activeEew && isEewStillActive(activeEew)) &&
-      flipCompletedRounds >= 2 &&
-      (isEarthquakeScrollDone || (isMobilePortrait && mobileBottomTab !== 'detail'))
-    ) {
-      advanceScene();
+    if (outcome === 'return_from_interrupt') {
+      if (eqConfirmedHoldTimerRef.current) {
+        clearTimeout(eqConfirmedHoldTimerRef.current);
+        eqConfirmedHoldTimerRef.current = null;
+      }
+      eqLockUntilConfirmedRef.current = false;
+      eqUnconfirmedTimedOutRef.current = false;
+      setInterruptKind('none');
+      setActiveScene((prev) =>
+        prev === 'earthquake'
+          ? getNextSceneId('earthquake', effectiveEnabledScenes)
+          : prev
+      );
+    } else if (outcome === 'advance_normal_patrol') {
+      advanceSceneRef.current();
     }
   }, [
     effectiveScene,
-    isLoopPaused,
     interruptKind,
+    isLoopPaused,
     pinnedEarthquakeId,
-    activeEew,
-    flipCompletedRounds,
+    isEewActive,
+    selectedEarthquake,
+    activeFlipCompletedRounds,
     isEarthquakeScrollDone,
     isMobilePortrait,
     mobileBottomTab,
-    advanceScene,
+    effectiveEnabledScenes,
   ]);
-
-  const safeFlipIndex =
-    flipFeed && flipFeed.cards.length > 0
-      ? bottomFlipIndex % flipFeed.cards.length
-      : 0;
-  const currentFlipCard = flipFeed?.cards[safeFlipIndex];
-  const isEewActive = Boolean(activeEew && isEewStillActive(activeEew));
-
-  // Smooth scrollLeft-based bottom XML ticker with cached width (zero layout thrashing)
-  useEffect(() => {
-    const measureCopyWidth = () => {
-      if (tickerFirstCopyRef.current) {
-        tickerCopyWidthRef.current = tickerFirstCopyRef.current.offsetWidth;
-      }
-    };
-    measureCopyWidth();
-    window.addEventListener('resize', measureCopyWidth);
-
-    // Compositor-driven ticker: the track is moved by a CSS `transform` animation (no main-thread timer,
-    // no scrollLeft layout/paint work). Only the loop distance (one copy's width) and duration are set here.
-    const track = tickerTrackRef.current;
-    const copy = tickerFirstCopyRef.current;
-    const speedPxPerSec = 72;
-    const applyTickerGeometry = () => {
-      if (!track || !copy) return;
-      const w = copy.offsetWidth;
-      if (w <= 0) return;
-      tickerCopyWidthRef.current = w;
-      track.style.setProperty('--ticker-shift', `${w}px`);
-      track.style.setProperty(
-        '--ticker-duration',
-        `${Math.max(10, w / speedPxPerSec)}s`
-      );
-    };
-    applyTickerGeometry();
-    const resizeObserver =
-      copy && typeof ResizeObserver !== 'undefined'
-        ? new ResizeObserver(applyTickerGeometry)
-        : null;
-    if (resizeObserver && copy) resizeObserver.observe(copy);
-
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', measureCopyWidth);
-    };
-  }, [sceneFeed.textKey, effectiveMobilePortrait]);
 
   return (
     <div className="h-screen w-screen bg-[#0D0F12] text-white p-1 md:p-1.5 overflow-hidden select-none flex">
@@ -1550,7 +2108,7 @@ export default function App() {
                 <button
                   type="button"
                   data-testid="mobile-next-scene-btn"
-                  onClick={advanceScene}
+                  onClick={advanceSceneStable}
                   className="px-2 py-1 text-[11px] font-bold bg-[#181C24] border border-neutral-700 text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   次画面 ⏭
@@ -1624,124 +2182,14 @@ export default function App() {
             </div>
           </header>
 
-          {/* 2. UPPER BROADCAST FEED BAR (Placed directly below the Top Header as requested: "上にFEEDを表示してその上にヘッダーとして設定とかを表示する") */}
-          <section
-            aria-label="気象防災ライブフィード"
-            data-testid="mobile-top-feed-bar"
-            className="h-[58px] shrink-0 border-b-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden z-20 px-2.5 py-1"
-          >
-            <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
-              {/* Row 1: Feed Headline Bar */}
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span
-                  className="w-1.5 h-3.5 rounded-xs shrink-0"
-                  style={{
-                    backgroundColor: isFlipFeedActive && flipFeed
-                      ? flipFeed.accentColor
-                      : sceneFeed.accentColor,
-                  }}
-                />
-                <span className="text-[11px] font-black text-neutral-100 tracking-wider truncate">
-                  {isFlipFeedActive && flipFeed ? flipFeed.headerTitle : sceneFeed.title}
-                </span>
-                <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[10px] text-neutral-300">
-                  <span>{isFlipFeedActive && flipFeed ? flipFeed.headerTime : sceneFeed.timeLabel}</span>
-                  <span className="px-1 py-0.2 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[10px] font-sans font-bold">
-                    気象庁発表
-                  </span>
-                  {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
-                    <span className="px-1 py-0.2 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[10px] font-mono font-bold">
-                      {safeFlipIndex + 1}/{flipFeed.cards.length}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Row 2: Flip Card (Vertical Animation) OR Continuous Scrolling Ticker */}
-              {isFlipFeedActive && currentFlipCard ? (
-                <div
-                  key={`mobile-flip-${safeFlipIndex}-${currentFlipCard.id}`}
-                  data-testid="mobile-flip-feed-card"
-                  className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
-                >
-                  <div className="flex items-center gap-2 w-full min-w-0">
-                    <span
-                      className={`px-1.5 py-0.5 text-[10px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
-                    >
-                      {currentFlipCard.badge}
-                    </span>
-                    <div className="min-w-0 flex-1 truncate">
-                      <span className="text-[14px] font-black text-white tracking-wide truncate block">
-                        {currentFlipCard.mainText}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-              <div
-                data-testid="xml-ticker-scroll-container"
-                className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
-              >
-                <div ref={tickerTrackRef} className="ticker-track">
-                  <div
-                    ref={tickerFirstCopyRef}
-                    className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
-                  >
-                    {sceneFeed.items.map((item, idx) => (
-                      <span
-                        key={`mobile-feed-copy1-${idx}`}
-                        className="inline-flex items-center gap-2 shrink-0"
-                      >
-                        {item.prefix && (
-                          <span
-                            className="font-extrabold"
-                            style={{ color: sceneFeed.accentColor }}
-                          >
-                            {item.prefix}
-                          </span>
-                        )}
-                        <span className="text-neutral-100">{item.text}</span>
-                        <span
-                          aria-hidden="true"
-                          className="text-neutral-600 ml-2 font-normal"
-                        >
-                          ｜
-                        </span>
-                      </span>
-                    ))}
-                  </div>
-                  <div
-                    aria-hidden="true"
-                    className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
-                  >
-                    {sceneFeed.items.map((item, idx) => (
-                      <span
-                        key={`mobile-feed-copy2-${idx}`}
-                        className="inline-flex items-center gap-2 shrink-0"
-                      >
-                        {item.prefix && (
-                          <span
-                            className="font-extrabold"
-                            style={{ color: sceneFeed.accentColor }}
-                          >
-                            {item.prefix}
-                          </span>
-                        )}
-                        <span className="text-neutral-100">{item.text}</span>
-                        <span
-                          aria-hidden="true"
-                          className="text-neutral-600 ml-2 font-normal"
-                        >
-                          ｜
-                        </span>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
+          {/* 2. UPPER BROADCAST FEED BAR (Isolated memo component so 4.8s flip ticks never re-render App/Map/Panel) */}
+          <BroadcastBottomBar
+            variant="mobile"
+            flipFeed={flipFeed}
+            sceneFeed={sceneFeed}
+            flipSessionKey={currentFlipSessionKey}
+            onFlipRoundsChange={handleFlipRoundsChange}
+          />
 
           {/* 3. INTERACTIVE CENTER MAP STAGE */}
           <div
@@ -1772,7 +2220,7 @@ export default function App() {
               isMobilePortrait={true}
               eewDisplayMode={eewDisplayMode}
               onChangeEewDisplayMode={setEewDisplayMode}
-              onSceneComplete={advanceScene}
+              onSceneComplete={advanceSceneStable}
             />
           </div>
 
@@ -1879,80 +2327,27 @@ export default function App() {
                     loopIntervalSec={loopIntervalSec}
                     eewDisplayMode={eewDisplayMode}
                     onChangeEewDisplayMode={setEewDisplayMode}
-                    onSceneComplete={handleSceneComplete}
+                    onSceneComplete={handleSceneCompleteStable}
                     isMobilePortrait={true}
                   />
                 </div>
               ) : mobileBottomTab === 'earthquake' ? (
-                <div
-                  key="mobile-quake-history-list"
-                  aria-label="地震履歴一覧"
-                  data-testid="left-earthquake-history-list"
-                  className="flex-1 overflow-y-auto divide-y divide-[#2B303C] animate-title-swap"
-                >
-                  {isEewActive && (
-                    <div
-                      data-testid="eew-history-locked-banner"
-                      className="bg-red-950/95 border-b border-red-500/80 px-2.5 py-1.5 text-xs text-red-200 font-bold flex items-center gap-1.5 shrink-0"
-                    >
-                      <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-ping shrink-0" />
-                      <span className="truncate">緊急地震速報 発表中（手動選択無効）</span>
-                    </div>
-                  )}
-                  {sortedEarthquakes.map((eq) => {
-                    const isSelected = selectedEarthquake.id === eq.id;
-                    const isPinned =
-                      isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
-                    return (
-                      <EarthquakeHistoryItem
-                        key={eq.id}
-                        eq={eq}
-                        isSelected={isSelected}
-                        isPinned={isPinned}
-                        isEewActive={isEewActive}
-                        onSelect={handleSelectEarthquake}
-                      />
-                    );
-                  })}
-                </div>
+                <EarthquakeHistoryList
+                  variant="mobile"
+                  earthquakes={sortedEarthquakes}
+                  selectedEarthquakeId={selectedEarthquake.id}
+                  pinnedEarthquakeId={pinnedEarthquakeId}
+                  isLoopPaused={isLoopPaused}
+                  isEewActive={isEewActive}
+                  onSelect={handleSelectEarthquake}
+                />
               ) : (
-                <div
-                  aria-label="気象庁XML電文タイムライン"
-                  data-testid="left-xml-timeline-list"
-                  className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
-                >
-                  {data.xmlEntries.map((entry) => {
-                    const isSelected = selectedXmlEntry?.id === entry.id;
-                    return (
-                      <button
-                        key={entry.id}
-                        type="button"
-                        onClick={() => {
-                          setSelectedXmlEntry(entry);
-                          setModalInitialTab('xml');
-                          setIsXmlModalOpen(true);
-                        }}
-                        className={`w-full text-left px-3 py-2 transition-colors cursor-pointer block ${
-                          isSelected
-                            ? 'bg-[#1D222B] border-l-2 border-amber-400'
-                            : 'hover:bg-[#181B22]'
-                        }`}
-                      >
-                        <div className="flex items-baseline gap-2">
-                          <span className="text-xs font-mono text-neutral-400 shrink-0">
-                            {formatTimeHm(entry.updated)}
-                          </span>
-                          <span className="text-[13px] font-bold text-white leading-snug">
-                            {entry.title}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-neutral-300 leading-relaxed mt-0.5 break-words">
-                          {entry.content}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                <XmlTimelineList
+                  variant="mobile"
+                  xmlEntries={data.xmlEntries}
+                  selectedXmlEntryId={selectedXmlEntry?.id ?? null}
+                  onSelectEntry={handleSelectXmlEntryFromList}
+                />
               )}
             </div>
           </section>
@@ -2018,75 +2413,22 @@ export default function App() {
 
             {/* Middle List: Earthquake History when effectiveScene === 'earthquake', otherwise XML Feed Timeline */}
             {effectiveScene === 'earthquake' ? (
-              <div
-                key="desktop-quake-history-list"
-                aria-label="地震履歴一覧"
-                data-testid="left-earthquake-history-list"
-                className="flex-1 overflow-y-auto divide-y divide-[#2B303C] animate-title-swap"
-              >
-                {isEewActive && (
-                  <div
-                    data-testid="eew-history-locked-banner"
-                    className="bg-red-950/95 border-b border-red-500/80 px-2.5 py-1.5 text-xs text-red-200 font-bold flex items-center gap-1.5 shrink-0"
-                  >
-                    <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-ping shrink-0" />
-                    <span className="truncate">緊急地震速報 発表中（手動選択無効）</span>
-                  </div>
-                )}
-                {sortedEarthquakes.map((eq) => {
-                  const isSelected = selectedEarthquake.id === eq.id;
-                  const isPinned =
-                    isSelected && pinnedEarthquakeId === eq.id && isLoopPaused;
-                  return (
-                    <EarthquakeHistoryItem
-                      key={eq.id}
-                      eq={eq}
-                      isSelected={isSelected}
-                      isPinned={isPinned}
-                      isEewActive={isEewActive}
-                      onSelect={handleSelectEarthquake}
-                    />
-                  );
-                })}
-              </div>
+              <EarthquakeHistoryList
+                variant="desktop"
+                earthquakes={sortedEarthquakes}
+                selectedEarthquakeId={selectedEarthquake.id}
+                pinnedEarthquakeId={pinnedEarthquakeId}
+                isLoopPaused={isLoopPaused}
+                isEewActive={isEewActive}
+                onSelect={handleSelectEarthquake}
+              />
             ) : (
-              <div
-                aria-label="気象庁XML電文タイムライン"
-                data-testid="left-xml-timeline-list"
-                className="flex-1 overflow-y-auto divide-y divide-[#2B303C]"
-              >
-                {data.xmlEntries.map((entry) => {
-                  const isSelected = selectedXmlEntry?.id === entry.id;
-                  return (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedXmlEntry(entry);
-                        setModalInitialTab('xml');
-                        setIsXmlModalOpen(true);
-                      }}
-                      className={`w-full text-left px-3 py-2.5 transition-colors cursor-pointer block ${
-                        isSelected
-                          ? 'bg-[#1D222B] border-l-2 border-amber-400'
-                          : 'hover:bg-[#181B22]'
-                      }`}
-                    >
-                      <div className="flex items-baseline gap-2">
-                        <span className="text-xs font-mono text-neutral-400 shrink-0">
-                          {formatTimeHm(entry.updated)}
-                        </span>
-                        <span className="text-[13px] font-bold text-white leading-snug">
-                          {entry.title}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-neutral-300 leading-relaxed mt-1 break-words">
-                        {entry.content}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+              <XmlTimelineList
+                variant="desktop"
+                xmlEntries={data.xmlEntries}
+                selectedXmlEntryId={selectedXmlEntry?.id ?? null}
+                onSelectEntry={handleSelectXmlEntryFromList}
+              />
             )}
 
             {/* Compact Bottom-Left Control Bar (Pause/Resume, Next Scene, Mobile Preview, and Settings Popup Button) */}
@@ -2111,7 +2453,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={advanceScene}
+                onClick={advanceSceneStable}
                 className="px-1 py-1.5 bg-[#181C24] border border-neutral-700 text-neutral-200 hover:bg-neutral-800 transition-colors text-center cursor-pointer whitespace-nowrap"
               >
                 次画面 ⏭
@@ -2170,7 +2512,7 @@ export default function App() {
                 isMobilePortrait={false}
                 eewDisplayMode={eewDisplayMode}
                 onChangeEewDisplayMode={setEewDisplayMode}
-                onSceneComplete={advanceScene}
+                onSceneComplete={advanceSceneStable}
               />
 
               {/* Floating Top-Left Scene Title Box (Matches NERV防災ライブ `全国の気象警報・注意報`) */}
@@ -2253,174 +2595,51 @@ export default function App() {
                   loopIntervalSec={loopIntervalSec}
                   eewDisplayMode={eewDisplayMode}
                   onChangeEewDisplayMode={setEewDisplayMode}
-                  onSceneComplete={handleSceneComplete}
+                  onSceneComplete={handleSceneCompleteStable}
                   isMobilePortrait={false}
                 />
               </div>
             </div>
 
-            {/* ==================== BROADCAST FEED FOOTER (Pattern B: Scene-Aware Large Ticker) ==================== */}
-            <footer
-              aria-label="気象防災ライブフィード"
-              className="h-[84px] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
-            >
-              {/* Main Feed Box: Two-Row Layout (Title Bar + Large Bold Ticker) */}
-              <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
-                {/* Row 1: Headline Bar */}
-                <div className="flex items-center gap-2 min-w-0">
-                  <span
-                    className="w-1.5 h-4 rounded-xs shrink-0"
-                    style={{
-                      backgroundColor: isFlipFeedActive && flipFeed
-                        ? flipFeed.accentColor
-                        : sceneFeed.accentColor,
-                    }}
-                  />
-                  <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
-                    {isFlipFeedActive && flipFeed ? flipFeed.headerTitle : sceneFeed.title}
-                  </span>
-                  <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300">
-                    <span>{isFlipFeedActive && flipFeed ? flipFeed.headerTime : sceneFeed.timeLabel}</span>
-                    <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold">
-                      気象庁発表
-                    </span>
-                    {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
-                      <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[11px] font-mono font-bold">
-                        {safeFlipIndex + 1}/{flipFeed.cards.length}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Row 2: Flip Card (Vertical Animation) OR Large Continuous Ticker */}
-                {isFlipFeedActive && currentFlipCard ? (
-                  <div
-                    key={`desktop-flip-${safeFlipIndex}-${currentFlipCard.id}`}
-                    data-testid="desktop-flip-feed-card"
-                    className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
-                  >
-                    <div className="flex items-center gap-3 w-full min-w-0">
-                      <span
-                        className={`px-2.5 py-0.5 text-xs md:text-[13px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
-                      >
-                        {currentFlipCard.badge}
-                      </span>
-                      <div className="min-w-0 flex-1 flex items-baseline gap-3 truncate">
-                        <span className="text-[19px] md:text-[23px] font-black text-white tracking-wide truncate">
-                          {currentFlipCard.mainText}
-                        </span>
-                        {currentFlipCard.subText && (
-                          <span className="text-xs md:text-sm font-mono text-neutral-400 truncate">
-                            {currentFlipCard.subText}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                <div
-                  data-testid="xml-ticker-scroll-container"
-                  className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
-                >
-                  <div ref={tickerTrackRef} className="ticker-track">
-                    <div
-                      ref={tickerFirstCopyRef}
-                      className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
-                    >
-                      {sceneFeed.items.map((item, idx) => (
-                        <span
-                          key={`feed-item-copy1-${idx}`}
-                          className="inline-flex items-center gap-2.5 shrink-0"
-                        >
-                          {item.prefix && (
-                            <span
-                              className="font-extrabold"
-                              style={{ color: sceneFeed.accentColor }}
-                            >
-                              {item.prefix}
-                            </span>
-                          )}
-                          <span className="text-neutral-100">{item.text}</span>
-                          <span
-                            aria-hidden="true"
-                            className="text-neutral-600 ml-4 font-normal"
-                          >
-                            ｜
-                          </span>
-                        </span>
-                      ))}
-                    </div>
-                    <div
-                      aria-hidden="true"
-                      className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
-                    >
-                      {sceneFeed.items.map((item, idx) => (
-                        <span
-                          key={`feed-item-copy2-${idx}`}
-                          className="inline-flex items-center gap-2.5 shrink-0"
-                        >
-                          {item.prefix && (
-                            <span
-                              className="font-extrabold"
-                              style={{ color: sceneFeed.accentColor }}
-                            >
-                              {item.prefix}
-                            </span>
-                          )}
-                          <span className="text-neutral-100">{item.text}</span>
-                          <span
-                            aria-hidden="true"
-                            className="text-neutral-600 ml-4 font-normal"
-                          >
-                            ｜
-                          </span>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </footer>
+            {/* ==================== BROADCAST FEED FOOTER (Isolated memo component) ==================== */}
+            <BroadcastBottomBar
+              variant="desktop"
+              flipFeed={flipFeed}
+              sceneFeed={sceneFeed}
+              flipSessionKey={currentFlipSessionKey}
+              onFlipRoundsChange={handleFlipRoundsChange}
+            />
           </div>
         </div>
       )}
 
       {/* ==================== XML INSPECTOR & SETTINGS POPUP MODAL ==================== */}
-      <XmlInspectorModal
-        isOpen={isXmlModalOpen}
-        initialTab={modalInitialTab}
-        onClose={() => setIsXmlModalOpen(false)}
-        xmlEntries={data.xmlEntries}
-        selectedEntry={selectedXmlEntry}
-        onSelectEntry={setSelectedXmlEntry}
-        enabledScenes={enabledScenes}
-        onToggleSceneEnabled={handleToggleSceneEnabled}
-        regionScope={regionScope}
-        onChangeRegionScope={(val) => {
-          setRegionScope(val);
-          setPatrolStepIndex(0);
-          if (val !== 'auto') {
-            setPatrolRegionId(val);
-          } else {
-            setPatrolRegionId('national');
-          }
-        }}
-        loopIntervalSec={loopIntervalSec}
-        onChangeLoopIntervalSec={(sec) => {
-          setLoopIntervalSec(sec);
-        }}
-        isFullscreen={isFullscreen}
-        onToggleFullscreen={toggleFullscreen}
-        onTriggerTestEarthquake={handleTriggerTestEarthquake}
-        onTriggerTestEew={handleTriggerEewDemo}
-        onTriggerTestVolcano={handleTriggerTestVolcano}
-        onToggleTsunamiDemo={handleToggleTsunamiDemo}
-        isTsunamiDemo={isTsunamiDemo}
-        onManualRefresh={refreshJmaData}
-        isRefreshing={isRefreshingXml}
-        lastFetchTime={data.lastXmlFetchTime}
-      />
+      {isXmlModalOpen && (
+        <XmlInspectorModal
+          isOpen={isXmlModalOpen}
+          initialTab={modalInitialTab}
+          onClose={handleCloseXmlModal}
+          xmlEntries={data.xmlEntries}
+          selectedEntry={selectedXmlEntry}
+          onSelectEntry={setSelectedXmlEntry}
+          enabledScenes={enabledScenes}
+          onToggleSceneEnabled={handleToggleSceneEnabled}
+          regionScope={regionScope}
+          onChangeRegionScope={handleChangeRegionScope}
+          loopIntervalSec={loopIntervalSec}
+          onChangeLoopIntervalSec={setLoopIntervalSec}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={toggleFullscreen}
+          onTriggerTestEarthquake={handleTriggerTestEarthquake}
+          onTriggerTestEew={handleTriggerEewDemo}
+          onTriggerTestVolcano={handleTriggerTestVolcano}
+          onToggleTsunamiDemo={handleToggleTsunamiDemo}
+          isTsunamiDemo={isTsunamiDemo}
+          onManualRefresh={refreshJmaData}
+          isRefreshing={isRefreshingXml}
+          lastFetchTime={data.lastXmlFetchTime}
+        />
+      )}
     </div>
   );
 }
