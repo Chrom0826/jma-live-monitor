@@ -90,7 +90,7 @@ const WarningDivisionRow: React.FC<{
       }`}
     >
       <div
-        className={`px-2.5 py-0.5 text-[13px] font-bold tracking-wide flex items-center justify-between gap-1.5 ${
+        className={`px-2.5 py-0.5 text-[0.8125rem] font-bold tracking-wide flex items-center justify-between gap-1.5 ${
           isFocusedDivision
             ? 'bg-sky-600 text-white font-extrabold'
             : w.severity === 'special'
@@ -102,7 +102,7 @@ const WarningDivisionRow: React.FC<{
       >
         <span className="min-w-0 truncate">{w.prefecture}</span>
         {(w.severity === 'warning' || w.severity === 'special') && (
-          <span className="text-[10px] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs whitespace-nowrap shrink-0">
+          <span className="text-[0.625rem] font-mono px-1.5 py-0.2 bg-red-600 text-white rounded-xs whitespace-nowrap shrink-0">
             {w.severity === 'special' ? '特別警報' : '警報'}
           </span>
         )}
@@ -112,7 +112,7 @@ const WarningDivisionRow: React.FC<{
           w.badgeItems.map((badge) => (
             <span
               key={`${w.id}-${badge.code}`}
-              className="inline-flex items-center gap-1 text-[13px] font-bold text-white whitespace-nowrap"
+              className="inline-flex items-center gap-1 text-[0.8125rem] font-bold text-white whitespace-nowrap"
             >
               {renderSeverityDot(badge.severity)}
               <span>{badge.name}</span>
@@ -141,11 +141,11 @@ const ForecastCity3hCard: React.FC<{
           <span className="font-black text-white whitespace-nowrap">
             {fc.cityName}
           </span>
-          <span className="text-[11px] text-sky-200 font-bold truncate">
+          <span className="text-[0.6875rem] text-sky-200 font-bold truncate">
             {fc.todayWeather}
           </span>
         </div>
-        <span className="font-mono text-[11px] shrink-0">
+        <span className="font-mono text-[0.6875rem] shrink-0">
           <span className="text-red-400 font-bold">
             {fc.todayTempMax ?? fc.tempMax}℃
           </span>
@@ -172,14 +172,14 @@ const ForecastCity3hCard: React.FC<{
               }`}
             >
               <span
-                className={`text-[9px] font-mono leading-none ${
+                className={`text-[0.5625rem] font-mono leading-none ${
                   isCurrent ? 'text-amber-300 font-black' : 'text-neutral-400'
                 }`}
               >
                 {slot.hour}時
               </span>
               <div
-                className="my-0.5"
+                className="my-0.5 w-[1.5rem] h-[1.0625rem] [&_svg]:w-full [&_svg]:h-full"
                 dangerouslySetInnerHTML={{
                   __html: getCachedBroadcastWeatherSvg(
                     slot.weatherCode,
@@ -189,7 +189,7 @@ const ForecastCity3hCard: React.FC<{
                   ),
                 }}
               />
-              <span className="text-[10px] font-mono font-bold text-white leading-none">
+              <span className="text-[0.625rem] font-mono font-bold text-white leading-none">
                 {slot.temp}°
               </span>
             </button>
@@ -486,7 +486,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
       // Pause briefly at top, smoothly scroll down to the bottom, and hold so the total scene display time
       // is ALWAYS at least `minSceneDurationMs` (never flashes by in an instant when scroll distance is short!)
       let virtualScrollTop = el.scrollTop;
-      const scrollSpeedPxPerTick = 2.4; // ~72px/s at 30fps
+      const rootFontPx =
+        typeof window !== 'undefined'
+          ? parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+          : 16;
+      const scrollSpeedPxPerTick = 2.4 * (rootFontPx / 16); // ~72px/s scaled at 30fps
 
       startDelayTimer = setTimeout(() => {
         if (cancelled) return;
@@ -574,7 +578,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     <aside
       aria-label="地域別防災ステータス一覧"
       className={`${
-        isMobilePortrait ? 'w-full' : 'w-[244px]'
+        isMobilePortrait ? 'w-full' : 'w-[15.25rem]'
       } h-full flex flex-col gap-1.5 md:gap-2 pointer-events-auto select-none`}
     >
       {/* Interrupt Dismiss Box when an emergency / anomaly interrupt is active */}
@@ -617,7 +621,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
           >
             <div className="flex items-center justify-between gap-2">
               <span
-                className={`text-[11px] font-mono font-bold whitespace-nowrap min-w-0 truncate ${
+                className={`text-[0.6875rem] font-mono font-bold whitespace-nowrap min-w-0 truncate ${
                   isPurple
                     ? 'text-purple-200'
                     : isAmber
@@ -642,7 +646,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               <button
                 type="button"
                 onClick={onDismissInterrupt}
-                className={`px-2 py-0.5 text-[11px] font-bold text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`px-2 py-0.5 text-[0.6875rem] font-bold text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   isPurple
                     ? 'bg-purple-600 hover:bg-purple-500'
                     : isAmber
@@ -670,7 +674,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {/* ==================== WARNINGS (NERV Style 57-Division Regional Strip) ==================== */}
         {effectiveScene === 'warnings' && (
           <>
-            <div className="bg-[#1A1E26] px-2.5 py-1 text-[11px] font-mono text-amber-300 font-bold flex items-center justify-between gap-1.5">
+            <div className="bg-[#1A1E26] px-2.5 py-1 text-[0.6875rem] font-mono text-amber-300 font-bold flex items-center justify-between gap-1.5">
               <span className="min-w-0 truncate">
                 {activeWarningDivision
                   ? `警報発表地域 (${activeWarningDivision.prefecture})`
@@ -713,7 +717,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     <span className="w-2 h-2 rounded-full bg-white animate-pulse shrink-0" />
                     <span className="truncate">低気圧一覧（全 {data.typhoons.length} 件）</span>
                   </div>
-                  <span className="text-[10px] font-mono text-red-200 shrink-0 whitespace-nowrap">
+                  <span className="text-[0.625rem] font-mono text-red-200 shrink-0 whitespace-nowrap">
                     気象庁実況
                   </span>
                 </div>
@@ -740,7 +744,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                             </span>
                           )}
                         </div>
-                        <span className="text-[10px] font-mono text-neutral-400 shrink-0 whitespace-nowrap">
+                        <span className="text-[0.625rem] font-mono text-neutral-400 shrink-0 whitespace-nowrap">
                           {p0?.timeLabel || tc.issueTimeJst}
                         </span>
                       </div>
@@ -770,7 +774,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   <span className="text-base font-black text-cyan-300 ml-1.5">
                                     {p0.speedKmh}
                                   </span>
-                                  <span className="text-[10px] text-neutral-400 ml-0.5">
+                                  <span className="text-[0.625rem] text-neutral-400 ml-0.5">
                                     km/h
                                   </span>
                                 </>
@@ -785,7 +789,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         <div className="grid grid-cols-2 gap-2">
                           {/* Pressure */}
                           <div className="bg-[#0B0F17] border border-neutral-800 p-2.5 rounded flex flex-col justify-between">
-                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                            <span className="text-[0.625rem] text-neutral-400 font-bold tracking-wider">
                               中心気圧
                             </span>
                             <div className="flex items-baseline gap-1 mt-0.5">
@@ -796,14 +800,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 hPa
                               </span>
                             </div>
-                            <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                            <div className="text-[0.6875rem] font-mono text-transparent mt-0.5 select-none leading-tight">
                               -
                             </div>
                           </div>
 
                           {/* Max Wind */}
                           <div className="bg-[#0B0F17] border border-neutral-800 p-2.5 rounded flex flex-col justify-between">
-                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                            <span className="text-[0.625rem] text-neutral-400 font-bold tracking-wider">
                               最大風速
                             </span>
                             <div className="flex items-baseline gap-1 mt-0.5">
@@ -815,17 +819,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               </span>
                             </div>
                             {p0?.maxGustMs ? (
-                              <div className="text-[11px] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
+                              <div className="text-[0.6875rem] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
                                 <span className="text-neutral-400">最大瞬間</span>{' '}
                                 <span className="font-bold text-yellow-400">
                                   {p0.maxGustMs}
                                 </span>{' '}
-                                <span className="text-[10px] text-neutral-400">
+                                <span className="text-[0.625rem] text-neutral-400">
                                   m/s
                                 </span>
                               </div>
                             ) : (
-                              <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                              <div className="text-[0.6875rem] font-mono text-transparent mt-0.5 select-none leading-tight">
                                 -
                               </div>
                             )}
@@ -875,7 +879,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     <button
                       type="button"
                       onClick={onReturnTyphoonOverview}
-                      className="px-2 py-0.5 text-[11px] font-bold bg-[#1C2230] border border-neutral-600 text-neutral-300 hover:text-white hover:border-sky-400 rounded transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                      className="px-2 py-0.5 text-[0.6875rem] font-bold bg-[#1C2230] border border-neutral-600 text-neutral-300 hover:text-white hover:border-sky-400 rounded transition-colors cursor-pointer shrink-0 whitespace-nowrap"
                     >
                       全低気圧一覧 ↩
                     </button>
@@ -906,7 +910,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               </span>
                             )}
                         </div>
-                        <span className="text-[10px] font-bold bg-sky-950 px-2 py-0.5 rounded-full text-sky-200 border border-sky-400/50 shrink-0 whitespace-nowrap">
+                        <span className="text-[0.625rem] font-bold bg-sky-950 px-2 py-0.5 rounded-full text-sky-200 border border-sky-400/50 shrink-0 whitespace-nowrap">
                           実況
                         </span>
                       </div>
@@ -935,7 +939,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   <span className="text-base font-black text-cyan-300 ml-1.5">
                                     {p0.speedKmh}
                                   </span>
-                                  <span className="text-[10px] text-neutral-400 ml-0.5">
+                                  <span className="text-[0.625rem] text-neutral-400 ml-0.5">
                                     km/h
                                   </span>
                                 </>
@@ -948,7 +952,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
                         <div className="grid grid-cols-2 gap-2">
                           <div className="bg-[#0B0F17] border border-neutral-700/80 p-2.5 rounded flex flex-col justify-between">
-                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                            <span className="text-[0.625rem] text-neutral-400 font-bold tracking-wider">
                               現在中心気圧
                             </span>
                             <div className="flex items-baseline gap-1 mt-0.5">
@@ -959,13 +963,13 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 hPa
                               </span>
                             </div>
-                            <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                            <div className="text-[0.6875rem] font-mono text-transparent mt-0.5 select-none leading-tight">
                               -
                             </div>
                           </div>
 
                           <div className="bg-[#0B0F17] border border-neutral-700/80 p-2.5 rounded flex flex-col justify-between">
-                            <span className="text-[10px] text-neutral-400 font-bold tracking-wider">
+                            <span className="text-[0.625rem] text-neutral-400 font-bold tracking-wider">
                               現在最大風速
                             </span>
                             <div className="flex items-baseline gap-1 mt-0.5">
@@ -977,17 +981,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               </span>
                             </div>
                             {p0?.maxGustMs ? (
-                              <div className="text-[11px] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
+                              <div className="text-[0.6875rem] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
                                 <span className="text-neutral-400">最大瞬間</span>{' '}
                                 <span className="font-bold text-yellow-400">
                                   {p0.maxGustMs}
                                 </span>{' '}
-                                <span className="text-[10px] text-neutral-400">
+                                <span className="text-[0.625rem] text-neutral-400">
                                   m/s
                                 </span>
                               </div>
                             ) : (
-                              <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                              <div className="text-[0.6875rem] font-mono text-transparent mt-0.5 select-none leading-tight">
                                 -
                               </div>
                             )}
@@ -1064,7 +1068,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               <span className="text-sm font-black text-white tracking-wide font-mono whitespace-nowrap">
                                 {pt.timeLabel}
                               </span>
-                              <span className="text-[11px] font-mono text-neutral-300 shrink-0 whitespace-nowrap">
+                              <span className="text-[0.6875rem] font-mono text-neutral-300 shrink-0 whitespace-nowrap">
                                 {pt.partLabel}
                               </span>
                             </div>
@@ -1074,7 +1078,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               <div className="grid grid-cols-2 gap-2">
                                 {/* Pressure */}
                                 <div className="bg-[#0B0F17] border border-neutral-800 p-2 rounded flex flex-col justify-between">
-                                  <span className="text-[10px] text-neutral-400 font-bold">
+                                  <span className="text-[0.625rem] text-neutral-400 font-bold">
                                     予想中心気圧
                                   </span>
                                   <div className="flex items-baseline gap-1 mt-0.5">
@@ -1085,14 +1089,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                       hPa
                                     </span>
                                   </div>
-                                  <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                                  <div className="text-[0.6875rem] font-mono text-transparent mt-0.5 select-none leading-tight">
                                     -
                                   </div>
                                 </div>
 
                                 {/* Max Wind (Gust on next line) */}
                                 <div className="bg-[#0B0F17] border border-neutral-800 p-2 rounded flex flex-col justify-between">
-                                  <span className="text-[10px] text-neutral-400 font-bold">
+                                  <span className="text-[0.625rem] text-neutral-400 font-bold">
                                     予想最大風速
                                   </span>
                                   <div className="flex items-baseline gap-1 mt-0.5">
@@ -1104,17 +1108,17 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                     </span>
                                   </div>
                                   {pt.maxGustMs > 0 ? (
-                                    <div className="text-[11px] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
+                                    <div className="text-[0.6875rem] font-mono text-neutral-300 mt-0.5 leading-tight whitespace-nowrap">
                                       <span className="text-neutral-400">最大瞬間</span>{' '}
                                       <span className="font-bold text-yellow-400">
                                         {pt.maxGustMs}
                                       </span>{' '}
-                                      <span className="text-[10px] text-neutral-400">
+                                      <span className="text-[0.625rem] text-neutral-400">
                                         m/s
                                       </span>
                                     </div>
                                   ) : (
-                                    <div className="text-[11px] font-mono text-transparent mt-0.5 select-none leading-tight">
+                                    <div className="text-[0.6875rem] font-mono text-transparent mt-0.5 select-none leading-tight">
                                       -
                                     </div>
                                   )}
@@ -1134,7 +1138,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                     <span className="font-bold text-white text-sm ml-1">
                                       {pt.speedKmh}
                                     </span>
-                                    <span className="text-[10px] text-neutral-400 ml-0.5">
+                                    <span className="text-[0.625rem] text-neutral-400 ml-0.5">
                                       km/h
                                     </span>
                                   </div>
@@ -1148,7 +1152,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                       <span className="font-bold text-white text-sm">
                                         {pt.probabilityCircleRadiusKm}
                                       </span>
-                                      <span className="text-[10px] text-neutral-400 ml-0.5">
+                                      <span className="text-[0.625rem] text-neutral-400 ml-0.5">
                                         km
                                       </span>
                                     </div>
@@ -1171,7 +1175,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {effectiveScene === 'radar' && (
           <>
             <div className="pb-2">
-              <div className="bg-[#3E434F] px-2.5 py-1 text-[13px] font-bold text-white">
+              <div className="bg-[#3E434F] px-2.5 py-1 text-[0.8125rem] font-bold text-white">
                 高解像度ナウキャスト
               </div>
               <div className="px-2.5 pt-1.5 text-xs text-neutral-200 space-y-1 font-mono">
@@ -1184,9 +1188,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             </div>
             {radarRainStations.map((st) => (
                 <div key={st.id} className="pb-1.5">
-                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[0.8125rem] font-bold text-white flex items-center justify-between gap-1.5">
                     <span className="min-w-0 truncate">{st.stationName}</span>
-                    <span className="text-[11px] font-mono text-neutral-200 whitespace-nowrap shrink-0">
+                    <span className="text-[0.6875rem] font-mono text-neutral-200 whitespace-nowrap shrink-0">
                       {st.prefecture}
                     </span>
                   </div>
@@ -1220,9 +1224,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   data-testid={`amedas-rank-item-${sectionKey}`}
                   className="pb-1.5"
                 >
-                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                  <div className="bg-[#3E434F] px-2.5 py-0.5 text-[0.8125rem] font-bold text-white flex items-center justify-between gap-1.5">
                     <span className="inline-flex items-center gap-1.5 min-w-0">
-                      <span className="text-[11px] font-mono font-extrabold text-amber-300 shrink-0">
+                      <span className="text-[0.6875rem] font-mono font-extrabold text-amber-300 shrink-0">
                         {rankIdx + 1}.
                       </span>
                       <span
@@ -1231,7 +1235,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       />
                       <span className="truncate">{st.stationName}</span>
                     </span>
-                    <span className="text-[11px] text-neutral-200 whitespace-nowrap shrink-0">
+                    <span className="text-[0.6875rem] text-neutral-200 whitespace-nowrap shrink-0">
                       {st.prefecture}
                     </span>
                   </div>
@@ -1291,9 +1295,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             return (
               <>
                 <div className="pb-2">
-                  <div className="bg-[#3E434F] px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
+                  <div className="bg-[#3E434F] px-2.5 py-1 text-[0.8125rem] font-bold text-white flex items-center justify-between">
                     <span>アメダス観測ランキング</span>
-                    <span className="text-[11px] font-mono text-amber-300">
+                    <span className="text-[0.6875rem] font-mono text-amber-300">
                       TOP 5
                     </span>
                   </div>
@@ -1310,7 +1314,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         key={m.id}
                         type="button"
                         onClick={() => onChangeAmedasMetric(m.id)}
-                        className={`py-0.5 text-[11px] font-bold border transition-colors cursor-pointer ${
+                        className={`py-0.5 text-[0.6875rem] font-bold border transition-colors cursor-pointer ${
                           amedasMetric === m.id
                             ? 'bg-amber-500/25 border-amber-400 text-white'
                             : 'bg-[#181B22] border-neutral-700 text-neutral-400 hover:text-neutral-200'
@@ -1329,7 +1333,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       className="bg-red-950/80 border-y border-red-500/50 px-2.5 py-1 text-xs font-extrabold text-red-200 flex items-center justify-between"
                     >
                       <span>▲ 気温が高い順</span>
-                      <span className="font-mono text-[10px]">上位5地点</span>
+                      <span className="font-mono text-[0.625rem]">上位5地点</span>
                     </div>
                     {rankings.tempHigh5.map((st, idx) =>
                       renderRankingCard(st, idx, 'temp-high')
@@ -1339,7 +1343,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       className="bg-sky-950/80 border-y border-sky-500/50 px-2.5 py-1 text-xs font-extrabold text-sky-200 flex items-center justify-between"
                     >
                       <span>▼ 気温が低い順</span>
-                      <span className="font-mono text-[10px]">上位5地点</span>
+                      <span className="font-mono text-[0.625rem]">上位5地点</span>
                     </div>
                     {rankings.tempLow5.map((st, idx) =>
                       renderRankingCard(st, idx, 'temp-low')
@@ -1352,7 +1356,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       className="bg-cyan-950/80 border-y border-cyan-500/50 px-2.5 py-1 text-xs font-extrabold text-cyan-200 flex items-center justify-between"
                     >
                       <span>▲ 降水量が多い順</span>
-                      <span className="font-mono text-[10px]">上位5地点</span>
+                      <span className="font-mono text-[0.625rem]">上位5地点</span>
                     </div>
                     {rankings.precipTop5.length === 0 ? (
                       <div className="px-2.5 py-4 text-xs text-neutral-400 font-mono text-center">
@@ -1371,7 +1375,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       className="bg-emerald-950/80 border-y border-emerald-500/50 px-2.5 py-1 text-xs font-extrabold text-emerald-200 flex items-center justify-between"
                     >
                       <span>▲ 風が強い順</span>
-                      <span className="font-mono text-[10px]">上位5地点</span>
+                      <span className="font-mono text-[0.625rem]">上位5地点</span>
                     </div>
                     {rankings.windTop5.map((st, idx) =>
                       renderRankingCard(st, idx, 'wind-top')
@@ -1384,7 +1388,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       className="bg-indigo-950/80 border-y border-indigo-500/50 px-2.5 py-1 text-xs font-extrabold text-indigo-200 flex items-center justify-between"
                     >
                       <span>▲ 積雪量が多い順</span>
-                      <span className="font-mono text-[10px]">上位5地点</span>
+                      <span className="font-mono text-[0.625rem]">上位5地点</span>
                     </div>
                     {rankings.snowTop5.length === 0 ? (
                       <div className="px-2.5 py-4 text-xs text-neutral-400 font-mono text-center">
@@ -1432,7 +1436,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                           ? `明日の全国の天気 (${tomorrowDateLabel})`
                           : `明後日の全国の天気 (${dayAfterDateLabel})`}
                     </span>
-                    <span className="font-mono text-[10px] bg-sky-950/80 px-1.5 py-0.5 rounded text-sky-200 whitespace-nowrap shrink-0">
+                    <span className="font-mono text-[0.625rem] bg-sky-950/80 px-1.5 py-0.5 rounded text-sky-200 whitespace-nowrap shrink-0">
                       全{scopedForecasts.length}地域
                     </span>
                   </div>
@@ -1449,7 +1453,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         key={m.id}
                         type="button"
                         onClick={() => onChangeForecastViewMode?.(m.id)}
-                        className={`py-1 text-[11px] font-bold rounded-xs border transition-colors cursor-pointer truncate ${
+                        className={`py-1 text-[0.6875rem] font-bold rounded-xs border transition-colors cursor-pointer truncate ${
                           forecastViewMode === m.id
                             ? 'bg-sky-600 border-sky-300 text-white'
                             : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-white'
@@ -1465,7 +1469,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   /* ==================== 1. TODAY 3-HOURLY UPCOMING WEATHER ==================== */
                   <div className="space-y-1.5">
                     {activeSlot && (
-                      <div className="flex items-center justify-between px-2 py-1 bg-amber-950/40 border border-amber-500/50 rounded-xs text-[11px]">
+                      <div className="flex items-center justify-between px-2 py-1 bg-amber-950/40 border border-amber-500/50 rounded-xs text-[0.6875rem]">
                         <span className="text-amber-200 font-bold">
                           マップ表示時刻:
                         </span>
@@ -1513,7 +1517,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                           {/* Dark Theme Header */}
                           <div className="px-2 py-0.5 text-xs font-bold text-slate-200 bg-[#1A2230] flex items-center justify-between border-b border-[#262E3D]">
                             <span className="truncate">{fc.cityName}</span>
-                            <span className="text-[10px] font-mono font-bold text-sky-400 shrink-0">
+                            <span className="text-[0.625rem] font-mono font-bold text-sky-400 shrink-0">
                               {popVal}%
                             </span>
                           </div>
@@ -1522,7 +1526,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                           <div className="p-1.5 flex items-center justify-between gap-1.5 bg-[#0D1017]">
                             <div className="flex flex-col items-center min-w-0">
                               <div
-                                className="border border-[#262E3D] rounded-xs overflow-hidden shrink-0 bg-[#0B0F17]"
+                                className="w-[2.875rem] h-[2rem] [&_svg]:w-full [&_svg]:h-full border border-[#262E3D] rounded-xs overflow-hidden shrink-0 bg-[#0B0F17]"
                                 dangerouslySetInnerHTML={{
                                   __html: getCachedBroadcastWeatherSvg(
                                     wCode,
@@ -1532,7 +1536,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   ),
                                 }}
                               />
-                              <span className="text-[10px] font-bold text-slate-300 truncate max-w-[68px] mt-0.5">
+                              <span className="text-[0.625rem] font-bold text-slate-300 truncate max-w-[4.25rem] mt-0.5">
                                 {wText}
                               </span>
                             </div>
@@ -1560,7 +1564,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {effectiveScene === 'volcano' && (
           <>
             <div className="pb-2">
-              <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white">
+              <div className="bg-red-700 px-2.5 py-1 text-[0.8125rem] font-bold text-white">
                 噴火警戒レベル変化・詳細監視
               </div>
               <div className="px-2.5 pt-2 space-y-1.5">
@@ -1573,14 +1577,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 <p className="text-xs text-neutral-200 leading-relaxed pt-1">
                   {activeVolcano.headline}
                 </p>
-                <div className="text-[11px] text-neutral-400 font-mono pt-1">
+                <div className="text-[0.6875rem] text-neutral-400 font-mono pt-1">
                   {activeVolcano.office} · {activeVolcano.lastUpdated}
                 </div>
               </div>
             </div>
             {data.volcanoes.map((v) => (
               <div key={v.id} className="pb-1.5">
-                <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                <div className="bg-[#3E434F] px-2.5 py-0.5 text-[0.8125rem] font-bold text-white flex items-center justify-between gap-1.5">
                   <span className="min-w-0 truncate">{v.name.split(' ')[0]}</span>
                   <span className="text-xs font-mono text-yellow-300 font-bold whitespace-nowrap shrink-0">
                     Lv.{v.alertLevel}
@@ -1694,7 +1698,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               data-testid="tsunami-panel-root"
               className={
                 tsunamiStripeClass
-                  ? `p-[3px] ${tsunamiStripeClass} ${
+                  ? `p-[0.1875rem] ${tsunamiStripeClass} ${
                       isMajorTsunami
                         ? 'shadow-[0_0_20px_rgba(168,85,247,0.5)]'
                         : 'shadow-[0_0_18px_rgba(255,255,255,0.35)]'
@@ -1707,7 +1711,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   <div className={`h-2.5 w-full ${tsunamiStripeClass}`} />
                 )}
                 <div
-                  className={`px-2.5 py-1 text-[13px] font-black flex items-center justify-between gap-1.5 ${
+                  className={`px-2.5 py-1 text-[0.8125rem] font-black flex items-center justify-between gap-1.5 ${
                     isMajorTsunami
                       ? 'bg-purple-700 text-white border-y border-white/80'
                       : isWarningTsunami
@@ -1724,7 +1728,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   </span>
                   {hasActiveTsunami && activeTsunamiForecast && (
                     <span
-                      className={`font-mono text-[11px] px-1.5 py-0.2 rounded-xs whitespace-nowrap shrink-0 ${
+                      className={`font-mono text-[0.6875rem] px-1.5 py-0.2 rounded-xs whitespace-nowrap shrink-0 ${
                         isMajorTsunami || isWarningTsunami
                           ? 'bg-white text-slate-950 font-black'
                           : 'bg-slate-950/60 text-white'
@@ -1786,7 +1790,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                           }`}
                         >
                           <div
-                            className={`px-2 py-1 text-[10.5px] font-black text-white flex items-center justify-between gap-1 ${
+                            className={`px-2 py-1 text-[0.65625rem] font-black text-white flex items-center justify-between gap-1 ${
                               isSpecialWarn
                                 ? 'bg-purple-700'
                                 : isWarn
@@ -1804,7 +1808,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                     : '緊急地震速報(予報)'}
                               </span>
                             </span>
-                            <span className="font-mono text-[9.5px] bg-black/35 px-1 py-0.2 rounded-xs whitespace-nowrap shrink-0">
+                            <span className="font-mono text-[0.59375rem] bg-black/35 px-1 py-0.2 rounded-xs whitespace-nowrap shrink-0">
                               P/S波·{isFinalReport ? '最終' : `第${activeEew.serial}報`}
                             </span>
                           </div>
@@ -1812,10 +1816,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                           <div className="p-2 space-y-1.5">
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0 flex-1">
-                                <div className="text-[13px] font-black text-white leading-snug truncate">
+                                <div className="text-[0.8125rem] font-black text-white leading-snug truncate">
                                   {activeEew.hypocenterName || '震源調査中'}
                                 </div>
-                                <div className="text-[11px] font-mono text-neutral-300 flex flex-wrap items-baseline gap-x-1 mt-0.5">
+                                <div className="text-[0.6875rem] font-mono text-neutral-300 flex flex-wrap items-baseline gap-x-1 mt-0.5">
                                   <span>
                                     {activeEew.magnitude > 0
                                       ? `M${activeEew.magnitude.toFixed(1)}`
@@ -1832,41 +1836,41 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
                               {showEewLpgm ? (
                                 <div
-                                  className="shrink-0 flex flex-col items-center justify-center min-w-[54px] h-[44px] px-1 rounded-xs border"
+                                  className="shrink-0 flex flex-col items-center justify-center min-w-[3.375rem] h-[2.75rem] px-1 rounded-xs border"
                                   style={{
                                     backgroundColor: maxLpgmStyle.bg,
                                     color: maxLpgmStyle.text,
                                     borderColor: maxLpgmStyle.border,
                                   }}
                                 >
-                                  <span className="text-[8px] font-bold leading-none opacity-90 whitespace-nowrap">
+                                  <span className="text-[0.5rem] font-bold leading-none opacity-90 whitespace-nowrap">
                                     最大予想階級
                                   </span>
                                   <div className="flex items-baseline gap-0.5 leading-none mt-0.5 whitespace-nowrap">
-                                    <span className="text-[9px] font-bold">階級</span>
-                                    <span className="text-[18px] font-black font-mono">
+                                    <span className="text-[0.5625rem] font-bold">階級</span>
+                                    <span className="text-[1.125rem] font-black font-mono">
                                       {activeEew.maxLpgmClass || '-'}
                                     </span>
                                   </div>
                                 </div>
                               ) : (
                                 <div
-                                  className={`shrink-0 flex flex-col items-center justify-center min-w-[54px] h-[44px] px-1 rounded-xs border ${eewScaleStyle.border} ${eewScaleStyle.bg} ${eewScaleStyle.text}`}
+                                  className={`shrink-0 flex flex-col items-center justify-center min-w-[3.375rem] h-[2.75rem] px-1 rounded-xs border ${eewScaleStyle.border} ${eewScaleStyle.bg} ${eewScaleStyle.text}`}
                                 >
-                                  <span className="text-[8px] font-bold leading-none opacity-85 whitespace-nowrap">
+                                  <span className="text-[0.5rem] font-bold leading-none opacity-85 whitespace-nowrap">
                                     最大予測震度
                                   </span>
                                   {isUnknownScale ? (
-                                    <span className="text-[11px] font-black leading-none mt-1 whitespace-nowrap">
+                                    <span className="text-[0.6875rem] font-black leading-none mt-1 whitespace-nowrap">
                                       {rawScaleLabel || '不明'}
                                     </span>
                                   ) : (
                                     <div className="flex items-baseline justify-center gap-0.5 leading-none mt-0.5 whitespace-nowrap">
-                                      <span className="text-[18px] font-black leading-none tracking-tight">
+                                      <span className="text-[1.125rem] font-black leading-none tracking-tight">
                                         {baseScaleLabel}
                                       </span>
                                       {hasOrMore && (
-                                        <span className="text-[8px] font-extrabold leading-none">
+                                        <span className="text-[0.5rem] font-extrabold leading-none">
                                           以上
                                         </span>
                                       )}
@@ -1881,7 +1885,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 <button
                                   type="button"
                                   onClick={() => onChangeEewDisplayMode?.('intensity')}
-                                  className={`py-0.5 px-1 text-[9.5px] font-bold rounded-xs transition-colors cursor-pointer text-center truncate ${
+                                  className={`py-0.5 px-1 text-[0.59375rem] font-bold rounded-xs transition-colors cursor-pointer text-center truncate ${
                                     !showEewLpgm
                                       ? isSpecialWarn
                                         ? 'bg-purple-600 text-white font-black'
@@ -1894,7 +1898,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 <button
                                   type="button"
                                   onClick={() => onChangeEewDisplayMode?.('lpgm')}
-                                  className={`py-0.5 px-1 text-[9.5px] font-bold rounded-xs transition-colors cursor-pointer text-center truncate ${
+                                  className={`py-0.5 px-1 text-[0.59375rem] font-bold rounded-xs transition-colors cursor-pointer text-center truncate ${
                                     showEewLpgm
                                       ? 'bg-amber-600 text-white font-black'
                                       : 'text-neutral-400 hover:text-white'
@@ -1916,14 +1920,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   return (
                                     <div
                                       key={`${area.pref}-${area.name}`}
-                                      className="flex items-center justify-between gap-1 text-[11px] bg-black/30 px-1.5 py-0.5 rounded-xs"
+                                      className="flex items-center justify-between gap-1 text-[0.6875rem] bg-black/30 px-1.5 py-0.5 rounded-xs"
                                     >
                                       <span className="font-bold text-neutral-100 truncate">
                                         {area.name}
                                       </span>
                                       {showEewLpgm ? (
                                         <span
-                                          className="px-1 py-0.2 font-mono font-black rounded-xs text-[10px] shrink-0 whitespace-nowrap"
+                                          className="px-1 py-0.2 font-mono font-black rounded-xs text-[0.625rem] shrink-0 whitespace-nowrap"
                                           style={{
                                             backgroundColor: lpgmStyle.bg,
                                             color: lpgmStyle.text,
@@ -1933,7 +1937,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                         </span>
                                       ) : (
                                         <span
-                                          className={`px-1 py-0.2 font-mono font-black rounded-xs text-[10px] shrink-0 whitespace-nowrap ${
+                                          className={`px-1 py-0.2 font-mono font-black rounded-xs text-[0.625rem] shrink-0 whitespace-nowrap ${
                                             area.scaleTo >= 50 || area.scaleFrom >= 50
                                               ? 'bg-red-600 text-white'
                                               : 'bg-white text-slate-950'
@@ -1949,7 +1953,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                             )}
 
                             {activeEq && (
-                              <div className="text-[10px] font-mono text-neutral-300 border-t border-neutral-800/80 pt-1 flex items-center justify-between gap-1">
+                              <div className="text-[0.625rem] font-mono text-neutral-300 border-t border-neutral-800/80 pt-1 flex items-center justify-between gap-1">
                                 <span className="truncate">
                                   観測震度 {activeEq.maxScaleLabel}（{activeEq.hypocenterName}）
                                 </span>
@@ -1973,32 +1977,32 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     {!isEewLive && (
                       <div className="mx-2.5 mt-2 bg-neutral-900 border border-neutral-700/80 rounded-xs overflow-hidden shadow-md">
                         <div className="bg-neutral-800/95 px-2.5 py-1 flex items-center justify-between gap-1.5 border-b border-neutral-700/60">
-                          <span className="text-[11px] font-mono font-bold text-neutral-300 whitespace-nowrap">
+                          <span className="text-[0.6875rem] font-mono font-bold text-neutral-300 whitespace-nowrap">
                             震源・地震情報
                           </span>
                           {activeTsunamiForecast.source === 'demo' && (
-                            <span className="bg-purple-600 text-white px-1.5 py-0.2 rounded-xs font-bold text-[10px] whitespace-nowrap shrink-0">
+                            <span className="bg-purple-600 text-white px-1.5 py-0.2 rounded-xs font-bold text-[0.625rem] whitespace-nowrap shrink-0">
                               デモデータ
                             </span>
                           )}
                         </div>
                         <div className="p-2 space-y-2">
                           <div>
-                            <div className="text-[10px] text-neutral-400 font-mono">地震の発生日時</div>
-                            <div className="text-[13px] font-bold text-white tracking-wide whitespace-nowrap">
+                            <div className="text-[0.625rem] text-neutral-400 font-mono">地震の発生日時</div>
+                            <div className="text-[0.8125rem] font-bold text-white tracking-wide whitespace-nowrap">
                               {formatOccurrenceTimeJa(occurrenceTimeStr)}
                             </div>
                           </div>
 
                           <div className="grid grid-cols-2 gap-1.5 text-xs">
                             <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
-                              <div className="text-[10px] text-neutral-400 font-mono">震央地名</div>
-                              <div className="font-bold text-neutral-100 truncate text-[12px]" title={hypocenterName}>
+                              <div className="text-[0.625rem] text-neutral-400 font-mono">震央地名</div>
+                              <div className="font-bold text-neutral-100 truncate text-[0.75rem]" title={hypocenterName}>
                                 {hypocenterName}
                               </div>
                             </div>
                             <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
-                              <div className="text-[10px] text-neutral-400 font-mono">最大震度</div>
+                              <div className="text-[0.625rem] text-neutral-400 font-mono">最大震度</div>
                               <div className="flex items-center gap-1 mt-0.5">
                                 <span
                                   className="px-1.5 py-0.2 rounded-xs font-black text-xs whitespace-nowrap"
@@ -2012,14 +2016,14 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                               </div>
                             </div>
                             <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
-                              <div className="text-[10px] text-neutral-400 font-mono">深さ</div>
-                              <div className="font-bold font-mono text-neutral-100 text-[12px] whitespace-nowrap">
+                              <div className="text-[0.625rem] text-neutral-400 font-mono">深さ</div>
+                              <div className="font-bold font-mono text-neutral-100 text-[0.75rem] whitespace-nowrap">
                                 {depthText}
                               </div>
                             </div>
                             <div className="bg-neutral-950/70 p-1.5 rounded-xs border border-neutral-800 min-w-0">
-                              <div className="text-[10px] text-neutral-400 font-mono">規模</div>
-                              <div className="font-bold font-mono text-white text-[12px] whitespace-nowrap">
+                              <div className="text-[0.625rem] text-neutral-400 font-mono">規模</div>
+                              <div className="font-bold font-mono text-white text-[0.75rem] whitespace-nowrap">
                                 {magText}
                               </div>
                             </div>
@@ -2029,7 +2033,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     )}
 
                     <div className="px-2.5 pt-2 space-y-2">
-                      <div className="flex items-center justify-between text-[11px] font-mono text-neutral-300">
+                      <div className="flex items-center justify-between text-[0.6875rem] font-mono text-neutral-300">
                         <span className="whitespace-nowrap">
                           発表: {formatCompactDateTime(activeTsunamiForecast.issueTime) || '随時'}
                         </span>
@@ -2056,7 +2060,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 }}
                               >
                                 <span className="truncate">{style.label}</span>
-                                <span className="font-mono text-[11px] whitespace-nowrap shrink-0">
+                                <span className="font-mono text-[0.6875rem] whitespace-nowrap shrink-0">
                                   {matchedAreas.length}沿岸
                                 </span>
                               </div>
@@ -2070,12 +2074,12 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                       <span className="font-bold text-white min-w-0 truncate">
                                         {area.name}
                                       </span>
-                                      <span className="text-amber-300 font-mono font-bold text-[11px] whitespace-nowrap shrink-0">
+                                      <span className="text-amber-300 font-mono font-bold text-[0.6875rem] whitespace-nowrap shrink-0">
                                         {area.maxHeightText}
                                       </span>
                                     </div>
                                     {area.firstHeightText && (
-                                      <div className="text-[10px] font-mono text-neutral-400 text-right whitespace-nowrap">
+                                      <div className="text-[0.625rem] font-mono text-neutral-400 text-right whitespace-nowrap">
                                         {area.firstHeightText}
                                       </div>
                                     )}
@@ -2142,9 +2146,9 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     data-testid="eew-live-banner"
                     className={`mb-2 rounded-xs shadow-lg ${
                       isSpecialWarn
-                        ? `p-[2px] ${stripeClass} shadow-[0_0_16px_rgba(147,51,234,0.45)]`
+                        ? `p-[0.125rem] ${stripeClass} shadow-[0_0_16px_rgba(147,51,234,0.45)]`
                         : isWarn
-                          ? `p-[2px] ${stripeClass} shadow-[0_0_14px_rgba(220,38,38,0.4)]`
+                          ? `p-[0.125rem] ${stripeClass} shadow-[0_0_14px_rgba(220,38,38,0.4)]`
                           : 'border-2 border-amber-500 bg-[#1C1408] shadow-amber-950/60 pb-2'
                     }`}
                   >
@@ -2157,7 +2161,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     >
                       {stripeClass && <div className={`h-2 w-full ${stripeClass}`} />}
                       <div
-                        className={`px-2.5 py-1 text-[12.5px] font-black text-white flex items-center justify-between gap-1.5 tracking-wide ${
+                        className={`px-2.5 py-1 text-[0.78125rem] font-black text-white flex items-center justify-between gap-1.5 tracking-wide ${
                           isSpecialWarn
                             ? 'bg-purple-700'
                             : isWarn
@@ -2175,7 +2179,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 : '緊急地震速報 (予報)'}
                           </span>
                         </span>
-                        <span className="font-mono text-[11px] text-neutral-100 whitespace-nowrap shrink-0">
+                        <span className="font-mono text-[0.6875rem] text-neutral-100 whitespace-nowrap shrink-0">
                           {isFinalReport ? '最終報' : `第${activeEew.serial}報`}
                         </span>
                       </div>
@@ -2183,10 +2187,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       <div className="px-2.5 pt-2 space-y-2">
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0 flex-1">
-                            <div className="text-[15px] font-black text-white leading-snug tracking-tight break-words">
+                            <div className="text-[0.9375rem] font-black text-white leading-snug tracking-tight break-words">
                               {activeEew.hypocenterName || '震源調査中'}
                             </div>
-                            <div className="text-[11px] font-mono text-neutral-300 flex flex-wrap items-baseline gap-x-1 mt-0.5">
+                            <div className="text-[0.6875rem] font-mono text-neutral-300 flex flex-wrap items-baseline gap-x-1 mt-0.5">
                               <span className="whitespace-nowrap">
                                 {activeEew.magnitude > 0
                                   ? `M${activeEew.magnitude.toFixed(1)}`
@@ -2203,28 +2207,28 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
                           {showEewLpgm ? (
                             <div
-                              className="shrink-0 flex flex-col items-center justify-center min-w-[60px] h-[52px] px-1.5 rounded-xs shadow-md border"
+                              className="shrink-0 flex flex-col items-center justify-center min-w-[3.75rem] h-[3.25rem] px-1.5 rounded-xs shadow-md border"
                               style={{
                                 backgroundColor: maxLpgmStyle.bg,
                                 color: maxLpgmStyle.text,
                                 borderColor: maxLpgmStyle.border,
                               }}
                             >
-                              <span className="text-[9px] font-bold leading-none tracking-tighter opacity-90 whitespace-nowrap">
+                              <span className="text-[0.5625rem] font-bold leading-none tracking-tighter opacity-90 whitespace-nowrap">
                                 最大予想階級
                               </span>
                               <div className="flex items-baseline justify-center gap-0.5 leading-none mt-1 whitespace-nowrap">
-                                <span className="text-[10px] font-bold leading-none">階級</span>
-                                <span className="text-[22px] font-black leading-none font-mono">
+                                <span className="text-[0.625rem] font-bold leading-none">階級</span>
+                                <span className="text-[1.375rem] font-black leading-none font-mono">
                                   {activeEew.maxLpgmClass || '-'}
                                 </span>
                               </div>
                             </div>
                           ) : (
                             <div
-                              className={`shrink-0 flex flex-col items-center justify-center min-w-[60px] h-[52px] px-1.5 rounded-xs shadow-md border ${eewScaleStyle.border} ${eewScaleStyle.bg} ${eewScaleStyle.text}`}
+                              className={`shrink-0 flex flex-col items-center justify-center min-w-[3.75rem] h-[3.25rem] px-1.5 rounded-xs shadow-md border ${eewScaleStyle.border} ${eewScaleStyle.bg} ${eewScaleStyle.text}`}
                             >
-                              <span className="text-[9px] font-bold leading-none tracking-tighter opacity-85 whitespace-nowrap">
+                              <span className="text-[0.5625rem] font-bold leading-none tracking-tighter opacity-85 whitespace-nowrap">
                                 最大予測震度
                               </span>
                               {isUnknownScale ? (
@@ -2233,11 +2237,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                 </span>
                               ) : (
                                 <div className="flex items-baseline justify-center gap-0.5 leading-none mt-1 whitespace-nowrap">
-                                  <span className="text-[22px] font-black leading-none tracking-tight">
+                                  <span className="text-[1.375rem] font-black leading-none tracking-tight">
                                     {baseScaleLabel}
                                   </span>
                                   {hasOrMore && (
-                                    <span className="text-[9px] font-extrabold leading-none opacity-95">
+                                    <span className="text-[0.5625rem] font-extrabold leading-none opacity-95">
                                       以上
                                     </span>
                                   )}
@@ -2253,7 +2257,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                             <button
                               type="button"
                               onClick={() => onChangeEewDisplayMode?.('intensity')}
-                              className={`py-0.5 px-1 text-[9.5px] font-bold rounded-xs transition-colors cursor-pointer text-center min-w-0 truncate ${
+                              className={`py-0.5 px-1 text-[0.59375rem] font-bold rounded-xs transition-colors cursor-pointer text-center min-w-0 truncate ${
                                 !showEewLpgm
                                   ? isSpecialWarn
                                     ? 'bg-purple-600 text-white font-black shadow-xs'
@@ -2266,7 +2270,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                             <button
                               type="button"
                               onClick={() => onChangeEewDisplayMode?.('lpgm')}
-                              className={`py-0.5 px-1 text-[9.5px] font-bold rounded-xs transition-colors cursor-pointer text-center min-w-0 truncate ${
+                              className={`py-0.5 px-1 text-[0.59375rem] font-bold rounded-xs transition-colors cursor-pointer text-center min-w-0 truncate ${
                                 showEewLpgm
                                   ? 'bg-amber-600 text-white font-black shadow-xs'
                                   : 'text-neutral-400 hover:text-white'
@@ -2278,7 +2282,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         )}
 
                         <div
-                          className={`text-[10.5px] font-mono text-neutral-400 flex items-center justify-between gap-1.5 border-t pt-1 ${
+                          className={`text-[0.65625rem] font-mono text-neutral-400 flex items-center justify-between gap-1.5 border-t pt-1 ${
                             isSpecialWarn
                               ? 'border-purple-900/60'
                               : isWarn
@@ -2289,7 +2293,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                           <span className="whitespace-nowrap">
                             発生: {formatCompactDateTime(activeEew.originTime)}
                           </span>
-                          <span className="flex items-center gap-1 text-[10px] text-amber-300 whitespace-nowrap shrink-0">
+                          <span className="flex items-center gap-1 text-[0.625rem] text-amber-300 whitespace-nowrap shrink-0">
                             <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0" />
                             自動切替中
                           </span>
@@ -2299,7 +2303,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         {displayAreas.length > 0 && (
                           <div className="space-y-1 pt-1">
                             <div
-                              className={`text-[11px] font-bold flex items-center justify-between gap-1.5 ${
+                              className={`text-[0.6875rem] font-bold flex items-center justify-between gap-1.5 ${
                                 isSpecialWarn ? 'text-purple-300' : 'text-red-300'
                               }`}
                             >
@@ -2308,7 +2312,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   ? '長周期地震動 予想地域（階級1〜4）'
                                   : '強い揺れの予想地域'}
                               </span>
-                              <span className="font-mono text-[10px] text-neutral-400 whitespace-nowrap shrink-0">
+                              <span className="font-mono text-[0.625rem] text-neutral-400 whitespace-nowrap shrink-0">
                                 {displayAreas.length}地域
                               </span>
                             </div>
@@ -2326,7 +2330,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                     className="bg-[#121620] border border-neutral-800 px-2 py-1 rounded-xs flex items-center justify-between gap-1.5 text-xs"
                                   >
                                     <div className="font-bold text-white min-w-0 flex-1 truncate">
-                                      <span className="text-[10px] text-neutral-400 mr-1 font-normal">
+                                      <span className="text-[0.625rem] text-neutral-400 mr-1 font-normal">
                                         {area.pref}
                                       </span>
                                       <span>{area.name}</span>
@@ -2334,7 +2338,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                     <div className="flex items-center gap-1 font-mono shrink-0">
                                       {showEewLpgm ? (
                                         <span
-                                          className="px-1.5 py-0.2 font-black rounded-xs text-[11px] whitespace-nowrap shrink-0"
+                                          className="px-1.5 py-0.2 font-black rounded-xs text-[0.6875rem] whitespace-nowrap shrink-0"
                                           style={{
                                             backgroundColor: lpgmStyle.bg,
                                             color: lpgmStyle.text,
@@ -2344,7 +2348,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                         </span>
                                       ) : (
                                         <span
-                                          className={`px-1.5 py-0.2 font-black rounded-xs text-[11px] whitespace-nowrap shrink-0 ${
+                                          className={`px-1.5 py-0.2 font-black rounded-xs text-[0.6875rem] whitespace-nowrap shrink-0 ${
                                             area.scaleTo >= 50 || area.scaleFrom >= 50
                                               ? 'bg-red-600 text-white'
                                               : 'bg-yellow-400 text-slate-950'
@@ -2374,18 +2378,18 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 if (!matchesActiveEew) {
                   return (
                     <>
-                      <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
+                      <div className="bg-red-700 px-2.5 py-1 text-[0.8125rem] font-bold text-white flex items-center justify-between">
                         <span className="truncate">地震情報（観測データ待機中）</span>
                       </div>
                       <div
                         data-testid="earthquake-awaiting-confirm-badge"
-                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[10.5px] font-bold text-amber-200 flex items-center justify-between gap-1.5"
+                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[0.65625rem] font-bold text-amber-200 flex items-center justify-between gap-1.5"
                       >
                         <span className="flex items-center gap-1.5 min-w-0 truncate">
                           <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
                           <span className="truncate">震源・震度確定まで固定中</span>
                         </span>
-                        <span className="font-mono text-[10px] text-amber-300 whitespace-nowrap shrink-0">
+                        <span className="font-mono text-[0.625rem] text-amber-300 whitespace-nowrap shrink-0">
                           自動取得中
                         </span>
                       </div>
@@ -2397,7 +2401,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 }
                 return (
                   <>
-                    <div className="bg-red-700 px-2.5 py-1 text-[13px] font-bold text-white flex items-center justify-between">
+                    <div className="bg-red-700 px-2.5 py-1 text-[0.8125rem] font-bold text-white flex items-center justify-between">
                       <span className="truncate">
                         {selectedEarthquake.issueTypeLabel || '各地の震度に関する情報'}
                       </span>
@@ -2407,26 +2411,26 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     {selectedEarthquake.isConfirmed === false || eewActive ? (
                       <div
                         data-testid="earthquake-awaiting-confirm-badge"
-                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[10.5px] font-bold text-amber-200 flex items-center justify-between gap-1.5"
+                        className="bg-amber-950/80 border-b border-amber-500/70 px-2.5 py-1 text-[0.65625rem] font-bold text-amber-200 flex items-center justify-between gap-1.5"
                       >
                         <span className="flex items-center gap-1.5 min-w-0 truncate">
                           <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
                           <span className="truncate">震源・震度確定まで固定中</span>
                         </span>
-                        <span className="font-mono text-[10px] text-amber-300 whitespace-nowrap shrink-0">
+                        <span className="font-mono text-[0.625rem] text-amber-300 whitespace-nowrap shrink-0">
                           自動取得中
                         </span>
                       </div>
                     ) : interruptKind === 'earthquake' ? (
                       <div
                         data-testid="earthquake-confirmed-badge"
-                        className="bg-emerald-950/70 border-b border-emerald-500/60 px-2.5 py-1 text-[11px] font-bold text-emerald-200 flex items-center justify-between gap-1.5"
+                        className="bg-emerald-950/70 border-b border-emerald-500/60 px-2.5 py-1 text-[0.6875rem] font-bold text-emerald-200 flex items-center justify-between gap-1.5"
                       >
                         <span className="min-w-0 truncate">✓ 震源・各地の震度 確定</span>
                         <button
                           type="button"
                           onClick={onDismissInterrupt}
-                          className="font-mono text-[10px] bg-emerald-800/80 hover:bg-emerald-700 text-white px-1.5 py-0.5 rounded-xs cursor-pointer whitespace-nowrap shrink-0"
+                          className="font-mono text-[0.625rem] bg-emerald-800/80 hover:bg-emerald-700 text-white px-1.5 py-0.5 rounded-xs cursor-pointer whitespace-nowrap shrink-0"
                         >
                           巡回再開
                         </button>
@@ -2434,7 +2438,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     ) : isLoopPaused ? (
                       <div
                         data-testid="earthquake-manual-pinned-badge"
-                        className="bg-neutral-800/90 border-b border-amber-500/50 px-2.5 py-1 text-[11px] font-bold text-amber-200 flex items-center justify-between gap-1.5"
+                        className="bg-neutral-800/90 border-b border-amber-500/50 px-2.5 py-1 text-[0.6875rem] font-bold text-amber-200 flex items-center justify-between gap-1.5"
                       >
                         <span className="flex items-center gap-1.5 min-w-0 truncate">
                           <span className="inline-block w-2 h-2 rounded-full bg-amber-400 shrink-0" />
@@ -2443,7 +2447,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         <button
                           type="button"
                           onClick={onDismissInterrupt}
-                          className="font-mono text-[10px] bg-amber-700/90 hover:bg-amber-600 text-white px-2 py-0.5 rounded-xs cursor-pointer transition-colors shadow-xs whitespace-nowrap shrink-0"
+                          className="font-mono text-[0.625rem] bg-amber-700/90 hover:bg-amber-600 text-white px-2 py-0.5 rounded-xs cursor-pointer transition-colors shadow-xs whitespace-nowrap shrink-0"
                           title="自動巡回を再開して最新の地震に戻す"
                         >
                           巡回再開 ▶
@@ -2458,7 +2462,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         <div className="px-2.5 py-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex-1 space-y-1">
-                              <div className="text-[15px] font-extrabold text-white leading-snug break-words">
+                              <div className="text-[0.9375rem] font-extrabold text-white leading-snug break-words">
                                 {selectedEarthquake.hypocenterName ||
                                   (selectedEarthquake.hypocenterUnknown ? '震源精査中' : '震源情報')}
                               </div>
@@ -2477,7 +2481,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   </>
                                 )}
                               </div>
-                              <div className="text-[10.5px] font-mono text-neutral-400 whitespace-nowrap min-w-0 truncate">
+                              <div className="text-[0.65625rem] font-mono text-neutral-400 whitespace-nowrap min-w-0 truncate">
                                 {formatCompactDateTime(selectedEarthquake.occurrenceTime)}
                               </div>
                               <div className="text-xs text-cyan-300 font-bold pt-0.5">
@@ -2488,12 +2492,12 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                             {/* Big Max Intensity Box on Right (identical to left sidebar) */}
                             {selectedEarthquake.maxScaleCode >= 10 && (
                               <div
-                                className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
+                                className={`shrink-0 flex flex-col items-center justify-center w-[3.375rem] h-[3rem] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
                               >
-                                <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80 whitespace-nowrap">
+                                <span className="text-[0.5625rem] font-bold leading-none tracking-tighter opacity-80 whitespace-nowrap">
                                   最大震度
                                 </span>
-                                <span className="text-[23px] font-black leading-none mt-0.5 whitespace-nowrap">
+                                <span className="text-[1.4375rem] font-black leading-none mt-0.5 whitespace-nowrap">
                                   {selectedEarthquake.maxScaleLabel}
                                 </span>
                               </div>
@@ -2524,7 +2528,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                     key={`${grp.prefecture}-${grp.scaleCode}-${idx}`}
                     className="pb-1.5"
                   >
-                    <div className="bg-[#3E434F] px-2.5 py-0.5 text-[13px] font-bold text-white flex items-center justify-between gap-1.5">
+                    <div className="bg-[#3E434F] px-2.5 py-0.5 text-[0.8125rem] font-bold text-white flex items-center justify-between gap-1.5">
                       <span className="min-w-0 truncate">{grp.prefecture}</span>
                       <span
                         className="px-1.5 text-xs font-mono font-extrabold rounded-sm whitespace-nowrap shrink-0"
@@ -2561,7 +2565,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
       {/* Bottom Compact Legend Box */}
       <div className="bg-[#111318]/95 border border-[#686E7A] px-2.5 py-1.5 shrink-0">
         {effectiveScene === 'warnings' ? (
-          <div className="flex items-center justify-between text-[11px] font-bold text-white whitespace-nowrap">
+          <div className="flex items-center justify-between text-[0.6875rem] font-bold text-white whitespace-nowrap">
             <span className="inline-flex items-center gap-1">
               <span className="inline-block w-2.5 h-2.5 rounded-full bg-purple-600 border border-purple-300" />
               特別警報
@@ -2580,7 +2584,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             </span>
           </div>
         ) : effectiveScene === 'typhoon' ? (
-          <div className="flex items-center justify-between text-[11px] font-bold text-white whitespace-nowrap">
+          <div className="flex items-center justify-between text-[0.6875rem] font-bold text-white whitespace-nowrap">
             <span className="inline-flex items-center gap-1">
               <span className="inline-block w-3 h-0.5 bg-sky-400" />
               過去軌跡
@@ -2599,7 +2603,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             </span>
           </div>
         ) : effectiveScene === 'radar' ? (
-          <div className="flex items-center justify-between text-[10px] font-mono text-neutral-200 whitespace-nowrap">
+          <div className="flex items-center justify-between text-[0.625rem] font-mono text-neutral-200 whitespace-nowrap">
             <span className="inline-flex items-center gap-1">
               <span className="w-2 h-2 bg-sky-300 inline-block" />1
             </span>
@@ -2622,7 +2626,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
           </div>
         ) : effectiveScene === 'amedas' ? (
           amedasMetric === 'precip' ? (
-            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+            <div className="flex items-center justify-between text-[0.625rem] font-mono font-bold text-white whitespace-nowrap">
               <span className="inline-flex items-center gap-1">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#38BDF8] inline-block" />
                 1mm
@@ -2645,7 +2649,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               </span>
             </div>
           ) : amedasMetric === 'wind' ? (
-            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+            <div className="flex items-center justify-between text-[0.625rem] font-mono font-bold text-white whitespace-nowrap">
               <span className="inline-flex items-center gap-1">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#64748B] inline-block" />
                 &lt;5m/s
@@ -2668,7 +2672,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               </span>
             </div>
           ) : amedasMetric === 'snow' ? (
-            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+            <div className="flex items-center justify-between text-[0.625rem] font-mono font-bold text-white whitespace-nowrap">
               <span className="inline-flex items-center gap-1">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#F8FAFC] inline-block" />
                 1cm+
@@ -2687,7 +2691,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               </span>
             </div>
           ) : (
-            <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+            <div className="flex items-center justify-between text-[0.625rem] font-mono font-bold text-white whitespace-nowrap">
               <span className="inline-flex items-center gap-1">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#93C5FD] inline-block" />
                 0℃
@@ -2711,7 +2715,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             </div>
           )
         ) : effectiveScene === 'earthquake' ? (
-          <div className="flex items-center justify-between text-[10px] font-mono font-bold text-white whitespace-nowrap">
+          <div className="flex items-center justify-between text-[0.625rem] font-mono font-bold text-white whitespace-nowrap">
             <span className="text-neutral-300">震度</span>
             <span className="px-1 bg-[#64748B] text-white rounded-xs">1</span>
             <span className="px-1 bg-[#38BDF8] text-slate-950 rounded-xs">2</span>
@@ -2723,7 +2727,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
           </div>
         ) : effectiveScene === 'tsunami' ? (
           <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px] font-bold text-white whitespace-nowrap">
+            <div className="flex items-center justify-between text-[0.6875rem] font-bold text-white whitespace-nowrap">
               <span className="inline-flex items-center gap-1">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#C026D3] inline-block" />
                 大津波
@@ -2742,7 +2746,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
               </span>
             </div>
             {activeEew && isEewStillActive(activeEew) && (
-              <div className="flex items-center justify-between text-[10px] font-bold text-neutral-200 border-t border-neutral-800 pt-1 whitespace-nowrap">
+              <div className="flex items-center justify-between text-[0.625rem] font-bold text-neutral-200 border-t border-neutral-800 pt-1 whitespace-nowrap">
                 <span className="inline-flex items-center gap-1">
                   <span className="w-2.5 h-2.5 rounded-full border border-dashed border-[#38BDF8] inline-block" />
                   P波(初期微動)
@@ -2755,7 +2759,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
             )}
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-neutral-300 whitespace-nowrap">
+          <div className="flex items-center justify-between gap-2 text-[0.6875rem] font-mono text-neutral-300 whitespace-nowrap">
             <span>気象庁防災情報XML</span>
             <span className="shrink-0">更新 {data.lastXmlFetchTime}</span>
           </div>

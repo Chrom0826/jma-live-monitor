@@ -73,6 +73,10 @@ import {
   type TopoViewport,
 } from '../utils/jmaTopology';
 import { resolveEffectiveScene } from '../utils/quakeInterrupt';
+import {
+  getSafeViewportPadding,
+  getScaledMaxZoom,
+} from '../utils/responsiveLayout';
 
 let cachedJmaTopology: JmaTopology | null = null;
 let cachedClass20GeoJson: any = null;
@@ -505,6 +509,7 @@ interface MonitorMapProps {
   isLoopPaused: boolean;
   isRightPanelHidden?: boolean;
   isMobilePortrait?: boolean;
+  uiScale?: number;
   eewDisplayMode?: EewDisplayMode;
   onChangeEewDisplayMode?: (mode: EewDisplayMode) => void;
   onSceneComplete: () => void;
@@ -728,6 +733,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   isLoopPaused,
   isRightPanelHidden = false,
   isMobilePortrait = false,
+  uiScale = 1,
   eewDisplayMode = 'intensity',
   onChangeEewDisplayMode,
   onSceneComplete,
@@ -745,6 +751,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const radarLayerCacheRef = useRef<Map<string, L.GridLayer>>(new Map());
   const overlayRendererRef = useRef<L.SVG | null>(null);
   const isFirstMountRef = useRef<boolean>(true);
+  const overlayScale = isMobilePortrait
+    ? 1
+    : Number.isFinite(uiScale) && uiScale > 0
+      ? uiScale
+      : 1;
+  const prevScaleKeyRef = useRef<string>(`${isMobilePortrait}|${overlayScale}`);
   const warningZoomTierRef = useRef<WarningMapZoomTier>('prefecture');
   const onSceneCompleteRef = useRef<() => void>(onSceneComplete);
   const onViewportChangeRef = useRef<typeof onViewportChange>(onViewportChange);
@@ -822,6 +834,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   });
   const forecastOverlayCacheRef = useRef<{
     forecasts: MonitorDataBundle['forecasts'];
+    scale: number;
     markers: Array<{
       fc: MonitorDataBundle['forecasts'][number];
       marker: L.Marker;
@@ -2479,17 +2492,19 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         setDs(canvas, 'warningZoomTier', tier);
         const drawnLabels: string[] = [];
 
-        const minSafeX = 28;
-        const maxSafeX = width - 28;
-        const minSafeY = 92;
-        const maxSafeY = height - 42;
+        const minSafeX = 28 * overlayScale;
+        const maxSafeX =
+          width -
+          (isMobilePortrait || isRightPanelHidden ? 28 : 260) * overlayScale;
+        const minSafeY = 92 * overlayScale;
+        const maxSafeY = height - 42 * overlayScale;
 
         if (focusedDivCode && tier === 'municipality') {
-          ctx.font =
-            '800 11px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif';
+          const warnFontPx = Math.round(11 * overlayScale);
+          ctx.font = `800 ${warnFontPx}px "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.lineWidth = 3.2;
+          ctx.lineWidth = 3.2 * overlayScale;
           ctx.lineJoin = 'round';
           ctx.strokeStyle = '#0B0D12';
           ctx.fillStyle = '#FFFFFF';
@@ -2511,8 +2526,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             if (!labelText) continue;
             const posX = entry.normX * worldScale - originX;
             const posY = entry.normY * worldScale - originY;
-            const boxW = Math.max(38, labelText.length * 11 + 4);
-            const boxH = 16;
+            const boxW = Math.max(
+              38 * overlayScale,
+              labelText.length * warnFontPx + 4 * overlayScale
+            );
+            const boxH = 16 * overlayScale;
 
             if (
               posX - boxW / 2 < minSafeX ||
@@ -2524,11 +2542,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             }
 
             let overlaps = false;
+            const padGap = 3 * overlayScale;
             for (let i = 0; i < placedMuniBoxes.length; i++) {
               const b = placedMuniBoxes[i];
               if (
-                Math.abs(posX - b.x) < (boxW + b.w) / 2 + 3 &&
-                Math.abs(posY - b.y) < (boxH + b.h) / 2 + 3
+                Math.abs(posX - b.x) < (boxW + b.w) / 2 + padGap &&
+                Math.abs(posY - b.y) < (boxH + b.h) / 2 + padGap
               ) {
                 overlaps = true;
                 break;
@@ -2597,29 +2616,30 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
           // EEW Epicenter Cross (`✕`) drawn on top of wave circles
           if (
-            epiX >= -32 &&
-            epiX <= width + 32 &&
-            epiY >= -32 &&
-            epiY <= height + 32
+            epiX >= -32 * overlayScale &&
+            epiX <= width + 32 * overlayScale &&
+            epiY >= -32 * overlayScale &&
+            epiY <= height + 32 * overlayScale
           ) {
+            const crossArm = 11 * overlayScale;
             ctx.save();
             ctx.lineCap = 'square';
             ctx.beginPath();
-            ctx.moveTo(epiX - 11, epiY - 11);
-            ctx.lineTo(epiX + 11, epiY + 11);
-            ctx.moveTo(epiX + 11, epiY - 11);
-            ctx.lineTo(epiX - 11, epiY + 11);
+            ctx.moveTo(epiX - crossArm, epiY - crossArm);
+            ctx.lineTo(epiX + crossArm, epiY + crossArm);
+            ctx.moveTo(epiX + crossArm, epiY - crossArm);
+            ctx.lineTo(epiX - crossArm, epiY + crossArm);
 
             ctx.strokeStyle = '#050810';
-            ctx.lineWidth = 8;
+            ctx.lineWidth = 8 * overlayScale;
             ctx.stroke();
 
             ctx.strokeStyle = '#EF4444';
-            ctx.lineWidth = 5;
+            ctx.lineWidth = 5 * overlayScale;
             ctx.stroke();
 
             ctx.strokeStyle = '#FFFFFF';
-            ctx.lineWidth = 1.8;
+            ctx.lineWidth = 1.8 * overlayScale;
             ctx.stroke();
             ctx.restore();
           }
@@ -2627,37 +2647,42 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
         const cities = preCompiledEew.cityLabels;
         if (cities.length > 0) {
+          const cityFontPx = Math.round(11 * overlayScale);
           ctx.save();
-          ctx.font = '800 11px "Noto Sans JP", sans-serif';
+          ctx.font = `800 ${cityFontPx}px "Noto Sans JP", sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.lineJoin = 'round';
           ctx.miterLimit = 2;
           ctx.strokeStyle = '#05070A';
-          ctx.lineWidth = 3.2;
+          ctx.lineWidth = 3.2 * overlayScale;
           ctx.fillStyle = '#FFFFFF';
 
           const placedCityBoxes: Array<{ x: number; y: number; w: number; h: number }> = [];
-          const labelH = 14;
+          const labelH = 14 * overlayScale;
+          const cityGap = 2 * overlayScale;
           for (let i = 0; i < cities.length; i++) {
             const c = cities[i];
             const cx = c.normX * worldScale - originX;
             const cy = c.normY * worldScale - originY;
             if (
-              cx < -40 ||
-              cx > width + 40 ||
-              cy < -20 ||
-              cy > height + 20
+              cx < -40 * overlayScale ||
+              cx > width + 40 * overlayScale ||
+              cy < -20 * overlayScale ||
+              cy > height + 20 * overlayScale
             ) {
               continue;
             }
-            const labelW = Math.max(24, ctx.measureText(c.name).width + 6);
+            const labelW = Math.max(
+              24 * overlayScale,
+              ctx.measureText(c.name).width + 6 * overlayScale
+            );
             let overlaps = false;
             for (let j = 0; j < placedCityBoxes.length; j++) {
               const b = placedCityBoxes[j];
               if (
-                Math.abs(cx - b.x) < (labelW + b.w) / 2 + 2 &&
-                Math.abs(cy - b.y) < (labelH + b.h) / 2 + 2
+                Math.abs(cx - b.x) < (labelW + b.w) / 2 + cityGap &&
+                Math.abs(cy - b.y) < (labelH + b.h) / 2 + cityGap
               ) {
                 overlaps = true;
                 break;
@@ -2692,29 +2717,30 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             const epiY =
               preCompiledEarthquake.epiNorm.normY * worldScale - originY;
             if (
-              epiX >= -32 &&
-              epiX <= width + 32 &&
-              epiY >= -32 &&
-              epiY <= height + 32
+              epiX >= -32 * overlayScale &&
+              epiX <= width + 32 * overlayScale &&
+              epiY >= -32 * overlayScale &&
+              epiY <= height + 32 * overlayScale
             ) {
+              const eqCrossArm = 10 * overlayScale;
               ctx.save();
               ctx.lineCap = 'square';
               ctx.beginPath();
-              ctx.moveTo(epiX - 10, epiY - 10);
-              ctx.lineTo(epiX + 10, epiY + 10);
-              ctx.moveTo(epiX + 10, epiY - 10);
-              ctx.lineTo(epiX - 10, epiY + 10);
+              ctx.moveTo(epiX - eqCrossArm, epiY - eqCrossArm);
+              ctx.lineTo(epiX + eqCrossArm, epiY + eqCrossArm);
+              ctx.moveTo(epiX + eqCrossArm, epiY - eqCrossArm);
+              ctx.lineTo(epiX - eqCrossArm, epiY + eqCrossArm);
 
               ctx.strokeStyle = '#0B0D12';
-              ctx.lineWidth = 6.5;
+              ctx.lineWidth = 6.5 * overlayScale;
               ctx.stroke();
 
               ctx.strokeStyle = '#EF4444';
-              ctx.lineWidth = 3.8;
+              ctx.lineWidth = 3.8 * overlayScale;
               ctx.stroke();
 
               ctx.strokeStyle = '#FCA5A5';
-              ctx.lineWidth = 1.2;
+              ctx.lineWidth = 1.2 * overlayScale;
               ctx.stroke();
               ctx.restore();
             }
@@ -2730,12 +2756,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }> = [];
 
           const stations = preCompiledEarthquake.sortedStations;
+          const badgeGap = 2 * overlayScale;
           for (let i = 0; i < stations.length; i++) {
             const item = stations[i];
             const posX = item.normX * worldScale - originX;
             const posY = item.normY * worldScale - originY;
-            const w = item.compactW;
-            const h = item.compactH;
+            const w = item.compactW * overlayScale;
+            const h = item.compactH * overlayScale;
 
             if (
               posX < -w ||
@@ -2750,8 +2777,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             for (let j = 0; j < stationBoxes.length; j++) {
               const b = stationBoxes[j];
               if (
-                Math.abs(posX - b.x) < (w + b.w) / 2 + 2 &&
-                Math.abs(posY - b.y) < (h + b.h) / 2 + 2
+                Math.abs(posX - b.x) < (w + b.w) / 2 + badgeGap &&
+                Math.abs(posY - b.y) < (h + b.h) / 2 + badgeGap
               ) {
                 collides = true;
                 break;
@@ -2762,10 +2789,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }
 
           // Draw badges in reverse order so highest intensity badges sit on top
-          ctx.font = '900 11px "JetBrains Mono", monospace';
+          const eqFontPx = Math.round(11 * overlayScale);
+          ctx.font = `900 ${eqFontPx}px "JetBrains Mono", monospace`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.lineWidth = 1.5;
+          ctx.lineWidth = 1.5 * overlayScale;
 
           for (let i = stationBoxes.length - 1; i >= 0; i--) {
             const { x, y, w, h, item } = stationBoxes[i];
@@ -2776,7 +2804,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.strokeStyle = '#0B0D12';
             ctx.beginPath();
             if (typeof ctx.roundRect === 'function') {
-              ctx.roundRect(rx, ry, w, h, 3);
+              ctx.roundRect(rx, ry, w, h, 3 * overlayScale);
             } else {
               ctx.rect(rx, ry, w, h);
             }
@@ -2784,7 +2812,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             ctx.stroke();
 
             ctx.fillStyle = item.badgeText;
-            ctx.fillText(item.st.scaleLabel, x, y + 0.5);
+            ctx.fillText(item.st.scaleLabel, x, y + 0.5 * overlayScale);
           }
 
           setDs(canvas, 'renderedEqStationCount', String(stationBoxes.length));
@@ -2844,38 +2872,41 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             const p0y = p0.normY * worldScale - originY;
 
             // Center cross (`✕`)
+            const tyCrossArm = 7 * overlayScale;
             ctx.save();
             ctx.lineCap = 'square';
             ctx.beginPath();
-            ctx.moveTo(p0x - 7, p0y - 7);
-            ctx.lineTo(p0x + 7, p0y + 7);
-            ctx.moveTo(p0x + 7, p0y - 7);
-            ctx.lineTo(p0x - 7, p0y + 7);
+            ctx.moveTo(p0x - tyCrossArm, p0y - tyCrossArm);
+            ctx.lineTo(p0x + tyCrossArm, p0y + tyCrossArm);
+            ctx.moveTo(p0x + tyCrossArm, p0y - tyCrossArm);
+            ctx.lineTo(p0x - tyCrossArm, p0y + tyCrossArm);
             ctx.strokeStyle = '#0B0D12';
-            ctx.lineWidth = 5.5;
+            ctx.lineWidth = 5.5 * overlayScale;
             ctx.stroke();
             ctx.strokeStyle = '#D1D5DB';
-            ctx.lineWidth = 3.0;
+            ctx.lineWidth = 3.0 * overlayScale;
             ctx.stroke();
             ctx.restore();
 
             // Center badge
-            const bx = p0x - badgeW / 2;
-            const by = p0y + 13;
+            const scaledBadgeW = badgeW * overlayScale;
+            const scaledBadgeH = badgeH * overlayScale;
+            const bx = p0x - scaledBadgeW / 2;
+            const by = p0y + 13 * overlayScale;
+            const tyFontPx = Math.round(11 * overlayScale);
             ctx.save();
             ctx.fillStyle = 'rgba(17, 19, 24, 0.95)';
             ctx.strokeStyle = '#9CA3AF';
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.5 * overlayScale;
             ctx.beginPath();
-            ctx.rect(bx, by, badgeW, badgeH);
+            ctx.rect(bx, by, scaledBadgeW, scaledBadgeH);
             ctx.fill();
             ctx.stroke();
-            ctx.font =
-              '800 11px "JetBrains Mono", "Noto Sans JP", sans-serif';
+            ctx.font = `800 ${tyFontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillStyle = '#E5E7EB';
-            ctx.fillText(centerLabel, p0x, by + badgeH / 2 + 0.5);
+            ctx.fillText(centerLabel, p0x, by + scaledBadgeH / 2 + 0.5 * overlayScale);
             ctx.restore();
             continue;
           }
@@ -3033,10 +3064,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           }
 
           // 5. Forecast Point Dots & Time Badges (idx >= 1)
-          const boxW = 68;
-          const boxH = 20;
+          const boxW = 68 * overlayScale;
+          const boxH = 20 * overlayScale;
+          const tyFontPx = Math.round(11 * overlayScale);
           ctx.save();
-          ctx.font = '800 11px "JetBrains Mono", "Noto Sans JP", sans-serif';
+          ctx.font = `800 ${tyFontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           for (let idx = 1; idx < ptsNorm.length; idx++) {
@@ -3045,19 +3077,21 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             const py = pn.normY * worldScale - originY;
 
             ctx.beginPath();
-            ctx.arc(px, py, 4.5, 0, Math.PI * 2);
+            ctx.arc(px, py, 4.5 * overlayScale, 0, Math.PI * 2);
             ctx.fillStyle = '#FFFFFF';
             ctx.fill();
             ctx.strokeStyle = '#0F172A';
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.5 * overlayScale;
             ctx.stroke();
 
             if (pn.labelOffset) {
-              const lx = px + pn.labelOffset.dx - boxW / 2;
-              const ly = py + pn.labelOffset.dy - boxH / 2;
+              const dx = pn.labelOffset.dx * overlayScale;
+              const dy = pn.labelOffset.dy * overlayScale;
+              const lx = px + dx - boxW / 2;
+              const ly = py + dy - boxH / 2;
               ctx.fillStyle = 'rgba(17, 19, 24, 0.92)';
               ctx.strokeStyle = '#94A3B8';
-              ctx.lineWidth = 1.0;
+              ctx.lineWidth = 1.0 * overlayScale;
               ctx.beginPath();
               ctx.rect(lx, ly, boxW, boxH);
               ctx.fill();
@@ -3065,44 +3099,47 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               ctx.fillStyle = '#38BDF8';
               ctx.fillText(
                 pn.compactTime,
-                px + pn.labelOffset.dx,
-                py + pn.labelOffset.dy + 0.5
+                px + dx,
+                py + dy + 0.5 * overlayScale
               );
             }
           }
           ctx.restore();
 
           // 6. Current Analysis Center Cross (`✕`) & Center Badge (idx === 0)
+          const tyCrossArm = 7 * overlayScale;
           ctx.save();
           ctx.lineCap = 'square';
           ctx.beginPath();
-          ctx.moveTo(p0x - 7, p0y - 7);
-          ctx.lineTo(p0x + 7, p0y + 7);
-          ctx.moveTo(p0x + 7, p0y - 7);
-          ctx.lineTo(p0x - 7, p0y + 7);
+          ctx.moveTo(p0x - tyCrossArm, p0y - tyCrossArm);
+          ctx.lineTo(p0x + tyCrossArm, p0y + tyCrossArm);
+          ctx.moveTo(p0x + tyCrossArm, p0y - tyCrossArm);
+          ctx.lineTo(p0x - tyCrossArm, p0y + tyCrossArm);
           ctx.strokeStyle = '#0B0D12';
-          ctx.lineWidth = 5.5;
+          ctx.lineWidth = 5.5 * overlayScale;
           ctx.stroke();
           ctx.strokeStyle = '#FFFFFF';
-          ctx.lineWidth = 3.0;
+          ctx.lineWidth = 3.0 * overlayScale;
           ctx.stroke();
           ctx.restore();
 
-          const bx = p0x - badgeW / 2;
-          const by = p0y + 13;
+          const scaledBadgeW = badgeW * overlayScale;
+          const scaledBadgeH = badgeH * overlayScale;
+          const bx = p0x - scaledBadgeW / 2;
+          const by = p0y + 13 * overlayScale;
           ctx.save();
           ctx.fillStyle = 'rgba(17, 19, 24, 0.95)';
           ctx.strokeStyle = '#EF4444';
-          ctx.lineWidth = 1.5;
+          ctx.lineWidth = 1.5 * overlayScale;
           ctx.beginPath();
-          ctx.rect(bx, by, badgeW, badgeH);
+          ctx.rect(bx, by, scaledBadgeW, scaledBadgeH);
           ctx.fill();
           ctx.stroke();
-          ctx.font = '800 11px "JetBrains Mono", "Noto Sans JP", sans-serif';
+          ctx.font = `800 ${tyFontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillStyle = '#FFFFFF';
-          ctx.fillText(centerLabel, p0x, by + badgeH / 2 + 0.5);
+          ctx.fillText(centerLabel, p0x, by + scaledBadgeH / 2 + 0.5 * overlayScale);
           ctx.restore();
         }
       }
@@ -3131,6 +3168,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     amedasMetric,
     activeWarningDivision?.divisionCode,
     compiledVersion,
+    overlayScale,
+    isMobilePortrait,
+    isRightPanelHidden,
   ]);
 
   // Real-time RAF canvas animation for EEW wave front propagation (P-wave & S-wave expansion)
@@ -3794,13 +3834,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       viewportSizeRef.current?.height ||
       (isMobilePortrait ? 320 : 720);
 
-    // Safe margins inside the map canvas so the landmass never touches edges or floating controls:
-    // On mobile portrait, the top-left zoom toolbar is ~28px tall (sitting over the Sea of Japan while Hokkaido is on the right).
-    // On desktop, the right detail panel is 244px wide on the right and bottom bars are ~54px tall.
-    const leftPad = isMobilePortrait ? 10 : 20;
-    const rightPad = isMobilePortrait ? 10 : isRightPanelHidden ? 20 : 256;
-    const topPad = isMobilePortrait ? 32 : 44;
-    const bottomPad = isMobilePortrait ? 10 : 54;
+    // Safe margins inside the map canvas so the landmass never touches edges or floating controls,
+    // aligned with the responsive desktop panel sizes and mobile portrait toolbar.
+    const {
+      left: leftPad,
+      right: rightPad,
+      top: topPad,
+      bottom: bottomPad,
+    } = getSafeViewportPadding({
+      isMobilePortrait,
+      isRightPanelHidden,
+      uiScale: overlayScale,
+    });
 
     const availW = Math.max(80, vpW - leftPad - rightPad);
     const availH = Math.max(80, vpH - topPad - bottomPad);
@@ -3815,7 +3860,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     const zoomY = Math.log2(availH / (spanNormY * 256));
 
     // Floor to 0.05 zoom increments so the bounding box is strictly contained with zero clipping
-    const rawZoom = Math.min(maxZoom, zoomX, zoomY);
+    const effectiveMaxZoom = getScaledMaxZoom(
+      maxZoom,
+      overlayScale,
+      isMobilePortrait
+    );
+    const rawZoom = Math.min(effectiveMaxZoom, zoomX, zoomY);
     const targetZoom = Math.max(minZoom, Math.floor(rawZoom * 20) / 20);
 
     // Shift camera center so the bounding box midpoint lands at the exact center of the unobstructed safe box
@@ -3948,7 +3998,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     if (effectiveScene === 'volcano') {
       return {
         center: [activeVolcano.lat, activeVolcano.lon],
-        zoom: isMobilePortrait ? 8.2 : 9,
+        zoom: isMobilePortrait
+          ? 8.2
+          : getScaledMaxZoom(9, overlayScale, false),
       };
     }
     if (effectiveScene === 'tsunami') {
@@ -4156,7 +4208,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     if (activeRegionConfig.id === 'world') {
       return {
         center: activeRegionConfig.center,
-        zoom: activeRegionConfig.zoom,
+        zoom: getScaledMaxZoom(
+          activeRegionConfig.zoom,
+          overlayScale,
+          isMobilePortrait
+        ),
       };
     }
     if (activeRegionConfig.id === 'national') {
@@ -4171,7 +4227,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       center: activeRegionConfig.center,
       zoom: isMobilePortrait
         ? Math.max(3.8, activeRegionConfig.zoom - 0.5)
-        : activeRegionConfig.zoom,
+        : getScaledMaxZoom(activeRegionConfig.zoom, overlayScale, false),
     };
   };
 
@@ -4181,6 +4237,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
+
+    const scaleKey = `${isMobilePortrait}|${overlayScale}`;
+    const onlyScaleChanged = prevScaleKeyRef.current !== scaleKey;
+    prevScaleKeyRef.current = scaleKey;
 
     const { center: targetCenter, zoom: targetZoom } = getSceneCameraTarget();
 
@@ -4195,8 +4255,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     if (
       Math.abs(curCenter.lat - targetCenter[0]) < 0.005 &&
       Math.abs(curCenter.lng - targetCenter[1]) < 0.005 &&
-      curZoom === targetZoom
+      Math.abs(curZoom - targetZoom) < 0.005
     ) {
+      return;
+    }
+
+    if (onlyScaleChanged) {
+      map.invalidateSize({ animate: false, pan: false });
+      map.setView(targetCenter, targetZoom, { animate: false });
       return;
     }
 
@@ -4233,6 +4299,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     tsunamiGeoJsonData,
     isMobilePortrait,
     isRightPanelHidden,
+    overlayScale,
   ]);
 
   // Invalidate Leaflet container size when switching between desktop and mobile portrait layouts
@@ -4356,40 +4423,56 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         bottomCellText = `${fc.dayAfterTempMin ?? fc.tempMin}`;
       }
 
+      const displayCityName =
+        fc.cityName === '小笠原諸島' ? '小笠原諸島' : fc.cityName;
+
+      const cardW = Math.round(92 * overlayScale);
+      const cardH = Math.round(49 * overlayScale);
+      const iconW = Math.round(46 * overlayScale);
+      const iconH = Math.round(32 * overlayScale);
+      const headerH = Math.round(16 * overlayScale);
+      const headerFontPx = Math.round(
+        (displayCityName.length >= 5 ? 10 : 11) * overlayScale
+      );
+      const topFontPx = Math.round(
+        (forecastViewMode === 'today_3h' ? 11 : 12) * overlayScale
+      );
+      const botFontPx = Math.round(
+        (forecastViewMode === 'today_3h' ? 10 : 12) * overlayScale
+      );
+      const radiusPx = Math.round(4 * overlayScale);
+
       const weatherSvgHtml = getCachedBroadcastWeatherSvg(
         cardWeatherCode,
         cardWeatherText,
-        46,
-        32
+        iconW,
+        iconH
       );
-
-      const displayCityName =
-        fc.cityName === '小笠原諸島' ? '小笠原諸島' : fc.cityName;
 
       return L.divIcon({
         className: 'custom-forecast-callout',
         html: `
-            <div data-testid="forecast-city-label" style="width:92px;background:rgba(15,20,28,0.95);border:1px solid #334155;border-radius:4px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.75);font-family:'JetBrains Mono','Inter',sans-serif;user-select:none;">
-              <div style="background:#1E293B;color:#F1F5F9;font-size:${displayCityName.length >= 5 ? '10px' : '11px'};font-weight:700;text-align:center;line-height:16px;height:16px;letter-spacing:0.04em;border-bottom:1px solid #334155;white-space:nowrap;overflow:hidden;">
+            <div data-testid="forecast-city-label" style="width:${cardW}px;background:rgba(15,20,28,0.95);border:1px solid #334155;border-radius:${radiusPx}px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.75);font-family:'JetBrains Mono','Inter',sans-serif;user-select:none;">
+              <div style="background:#1E293B;color:#F1F5F9;font-size:${headerFontPx}px;font-weight:700;text-align:center;line-height:${headerH}px;height:${headerH}px;letter-spacing:0.04em;border-bottom:1px solid #334155;white-space:nowrap;overflow:hidden;">
                 ${displayCityName}
               </div>
-              <div style="display:flex;align-items:stretch;height:32px;background:#0B0F17;">
-                <div style="width:46px;height:32px;flex-shrink:0;position:relative;overflow:hidden;">
+              <div style="display:flex;align-items:stretch;height:${iconH}px;background:#0B0F17;">
+                <div style="width:${iconW}px;height:${iconH}px;flex-shrink:0;position:relative;overflow:hidden;">
                   ${weatherSvgHtml}
                 </div>
                 <div style="flex:1;display:flex;flex-direction:column;border-left:1px solid #334155;font-family:'JetBrains Mono',monospace;">
-                  <div style="flex:1;background:rgba(239,68,68,0.14);color:#F87171;font-size:${forecastViewMode === 'today_3h' ? '11px' : '12px'};font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;border-bottom:1px solid #334155;">
+                  <div style="flex:1;background:rgba(239,68,68,0.14);color:#F87171;font-size:${topFontPx}px;font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;border-bottom:1px solid #334155;">
                     ${topCellText}
                   </div>
-                  <div style="flex:1;background:rgba(56,189,248,0.14);color:#38BDF8;font-size:${forecastViewMode === 'today_3h' ? '10px' : '12px'};font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;">
+                  <div style="flex:1;background:rgba(56,189,248,0.14);color:#38BDF8;font-size:${botFontPx}px;font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;">
                     ${bottomCellText}
                   </div>
                 </div>
               </div>
             </div>
           `,
-        iconSize: [92, 49],
-        iconAnchor: [46, 24],
+        iconSize: [cardW, cardH],
+        iconAnchor: [Math.round(cardW / 2), Math.round(cardH / 2)],
       });
     };
 
@@ -4397,6 +4480,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       effectiveScene === 'forecast' &&
       forecastOverlayCacheRef.current &&
       forecastOverlayCacheRef.current.forecasts === data.forecasts &&
+      forecastOverlayCacheRef.current.scale === overlayScale &&
       group.getLayers().length > 0
     ) {
       for (const item of forecastOverlayCacheRef.current.markers) {
@@ -4455,13 +4539,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         ];
 
         const pt = map.latLngToLayerPoint([targetPos[0], targetPos[1]]);
-        // Card dimensions: width 92px, height 49px (anchor center: 46, 24)
-        // Add 3px safety margin on all sides so cards never touch or overlap
+        // Card dimensions scaled by overlayScale + 3px safety margin on all sides so cards never touch or overlap
+        const halfW = (92 * overlayScale) / 2 + 3 * overlayScale;
+        const halfH = (49 * overlayScale) / 2 + 3 * overlayScale;
         const box: CardBox = {
-          x1: pt.x - 49,
-          x2: pt.x + 49,
-          y1: pt.y - 27,
-          y2: pt.y + 27,
+          x1: pt.x - halfW,
+          x2: pt.x + halfW,
+          y1: pt.y - halfH,
+          y2: pt.y + halfH,
         };
 
         const isColliding = placedBoxes.some((b) => {
@@ -4530,6 +4615,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
       forecastOverlayCacheRef.current = {
         forecasts: data.forecasts,
+        scale: overlayScale,
         markers: cachedMarkers,
       };
     } else if (effectiveScene === 'volcano') {
@@ -4538,24 +4624,26 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         renderer: overlayRenderer,
         radius: 2500,
         color: '#EF4444',
-        weight: 2,
+        weight: 2 * overlayScale,
         dashArray: '6 4',
         fillColor: '#EF4444',
         fillOpacity: 0.22,
         interactive: false,
       }).addTo(group);
 
+      const vW = Math.round(220 * overlayScale);
+      const vH = Math.round(32 * overlayScale);
       const icon = L.divIcon({
         className: 'custom-volcano-focus',
         html: `
-          <div style="display:inline-flex;align-items:center;gap:6px;background:rgba(18,18,22,0.95);border:2px solid #EF4444;padding:4px 10px;white-space:nowrap;">
-            <span style="color:#EF4444;font-size:14px;font-weight:900;">▲</span>
-            <span style="color:#FFFFFF;font-size:13px;font-weight:800;">${activeVolcano.name}</span>
-            <span style="background:#EF4444;color:#FFFFFF;font-size:11px;font-weight:800;padding:1px 6px;font-family:'JetBrains Mono',monospace;">Lv.${activeVolcano.alertLevel}</span>
+          <div style="display:inline-flex;align-items:center;gap:${Math.round(6 * overlayScale)}px;background:rgba(18,18,22,0.95);border:2px solid #EF4444;padding:${Math.round(4 * overlayScale)}px ${Math.round(10 * overlayScale)}px;white-space:nowrap;">
+            <span style="color:#EF4444;font-size:${Math.round(14 * overlayScale)}px;font-weight:900;">▲</span>
+            <span style="color:#FFFFFF;font-size:${Math.round(13 * overlayScale)}px;font-weight:800;">${activeVolcano.name}</span>
+            <span style="background:#EF4444;color:#FFFFFF;font-size:${Math.round(11 * overlayScale)}px;font-weight:800;padding:${Math.round(1 * overlayScale)}px ${Math.round(6 * overlayScale)}px;font-family:'JetBrains Mono',monospace;">Lv.${activeVolcano.alertLevel}</span>
           </div>
         `,
-        iconSize: [220, 32],
-        iconAnchor: [110, -10],
+        iconSize: [vW, vH],
+        iconAnchor: [Math.round(vW / 2), -Math.round(10 * overlayScale)],
       });
       L.marker([activeVolcano.lat, activeVolcano.lon], { icon }).addTo(group);
     } else if (effectiveScene === 'tsunami') {
@@ -4588,22 +4676,24 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       );
 
       if (hypoLat !== null && hypoLon !== null && !isCanvasDrawingEewEpicenter) {
+        const svgSz = Math.round(34 * overlayScale);
+        const epiH = Math.round(52 * overlayScale);
         const epiIcon = L.divIcon({
           className: 'tsunami-epicenter-marker',
           html: `
             <div style="position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;transform:translate(-50%, -50%);">
-              <svg width="34" height="34" viewBox="0 0 32 32" fill="none" style="filter: drop-shadow(0 2px 5px rgba(0,0,0,0.95));">
+              <svg width="${svgSz}" height="${svgSz}" viewBox="0 0 32 32" fill="none" style="filter: drop-shadow(0 2px 5px rgba(0,0,0,0.95));">
                 <path d="M6 6L26 26M26 6L6 26" stroke="#050810" stroke-width="8" stroke-linecap="round"/>
                 <path d="M6 6L26 26M26 6L6 26" stroke="#EF4444" stroke-width="4.8" stroke-linecap="round"/>
                 <path d="M6 6L26 26M26 6L6 26" stroke="#FCA5A5" stroke-width="1.5" stroke-linecap="round"/>
               </svg>
-              <div style="margin-top:2px;white-space:nowrap;background:rgba(15,23,42,0.94);border:1px solid #DC2626;border-radius:2px;padding:1px 6px;font-family:'JetBrains Mono',sans-serif;font-size:11px;font-weight:bold;color:#FCA5A5;box-shadow:0 2px 6px rgba(0,0,0,0.85);">
+              <div style="margin-top:${Math.round(2 * overlayScale)}px;white-space:nowrap;background:rgba(15,23,42,0.94);border:1px solid #DC2626;border-radius:2px;padding:${Math.round(1 * overlayScale)}px ${Math.round(6 * overlayScale)}px;font-family:'JetBrains Mono',sans-serif;font-size:${Math.round(11 * overlayScale)}px;font-weight:bold;color:#FCA5A5;box-shadow:0 2px 6px rgba(0,0,0,0.85);">
                 ✕ 震央
               </div>
             </div>
           `,
-          iconSize: [34, 52],
-          iconAnchor: [17, 17],
+          iconSize: [svgSz, epiH],
+          iconAnchor: [Math.round(svgSz / 2), Math.round(svgSz / 2)],
         });
         L.marker([hypoLat, hypoLon], {
           icon: epiIcon,
@@ -4623,6 +4713,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     activeVolcano,
     activeTsunamiForecast,
     activeEew,
+    overlayScale,
   ]);
 
   const currentNowcastEntry =
@@ -4685,7 +4776,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               });
             }}
             aria-label="地図を拡大"
-            className="px-2 py-0.5 text-[11px] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
+            className="px-2 py-0.5 text-[0.6875rem] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
           >
             +拡大
           </button>
@@ -4701,7 +4792,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               });
             }}
             aria-label="地図を縮小"
-            className="px-2 py-0.5 text-[11px] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
+            className="px-2 py-0.5 text-[0.6875rem] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
           >
             -縮小
           </button>
@@ -4719,7 +4810,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               });
             }}
             aria-label="日本全体を表示"
-            className="px-2 py-0.5 text-[11px] font-mono text-neutral-300 hover:bg-neutral-800 transition-colors cursor-pointer"
+            className="px-2 py-0.5 text-[0.6875rem] font-mono text-neutral-300 hover:bg-neutral-800 transition-colors cursor-pointer"
           >
             日本全体
           </button>
@@ -4729,14 +4820,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             onClick={() => {
               const map = mapInstanceRef.current;
               if (!map) return;
-              map.flyTo([30.0, 140.0], 3, {
-                animate: true,
-                duration: 1.4,
-                easeLinearity: 0.1,
-              });
+              map.flyTo(
+                [30.0, 140.0],
+                getScaledMaxZoom(3, overlayScale, isMobilePortrait),
+                {
+                  animate: true,
+                  duration: 1.4,
+                  easeLinearity: 0.1,
+                }
+              );
             }}
             aria-label="世界全体を表示"
-            className="px-2 py-0.5 text-[11px] font-mono text-cyan-300 hover:bg-neutral-800 transition-colors cursor-pointer"
+            className="px-2 py-0.5 text-[0.6875rem] font-mono text-cyan-300 hover:bg-neutral-800 transition-colors cursor-pointer"
           >
             世界全体
           </button>
@@ -4755,19 +4850,19 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               ? 'shrink-0 w-full border-t border-red-500/80 overflow-x-auto whitespace-nowrap'
               : `absolute bottom-3 left-64 w-fit flex-wrap border border-red-500/80 rounded-xs shadow-xl ${
                   isRightPanelHidden
-                    ? 'max-w-[calc(100%-268px)]'
-                    : 'max-w-[calc(100%-532px)]'
+                    ? 'max-w-[calc(100%-16.75rem)]'
+                    : 'max-w-[calc(100%-33.25rem)]'
                 }`
           }`}
         >
-          <span className="text-[11px] font-mono text-neutral-200 font-bold whitespace-nowrap">
+          <span className="text-[0.6875rem] font-mono text-neutral-200 font-bold whitespace-nowrap">
             緊急地震速報:
           </span>
           <button
             type="button"
             data-testid="eew-mode-btn-intensity"
             onClick={() => onChangeEewDisplayMode?.('intensity')}
-            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border whitespace-nowrap ${
+            className={`px-2 py-0.5 text-[0.6875rem] font-bold rounded-xs transition-colors cursor-pointer border whitespace-nowrap ${
               eewDisplayMode === 'intensity'
                 ? 'bg-red-600 border-red-300 text-white shadow-sm'
                 : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
@@ -4779,7 +4874,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             type="button"
             data-testid="eew-mode-btn-lpgm"
             onClick={() => onChangeEewDisplayMode?.('lpgm')}
-            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border whitespace-nowrap ${
+            className={`px-2 py-0.5 text-[0.6875rem] font-bold rounded-xs transition-colors cursor-pointer border whitespace-nowrap ${
               eewDisplayMode === 'lpgm'
                 ? 'bg-amber-600 border-amber-300 text-white shadow-sm'
                 : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
@@ -4787,14 +4882,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           >
             長周期地震動（階級1〜4）
           </button>
-          <span className="text-[10px] text-amber-300 font-mono ml-1 flex items-center gap-1 whitespace-nowrap">
+          <span className="text-[0.625rem] text-amber-300 font-mono ml-1 flex items-center gap-1 whitespace-nowrap">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
             定期切替中
           </span>
 
           {/* Inline mini-legend for LPGM */}
           {eewDisplayMode === 'lpgm' && (
-            <div className="flex items-center gap-1 pl-2 border-l border-neutral-700 text-[10px] font-mono whitespace-nowrap">
+            <div className="flex items-center gap-1 pl-2 border-l border-neutral-700 text-[0.625rem] font-mono whitespace-nowrap">
               <span className="px-1.5 py-0.2 rounded-xs bg-[#10B981] text-white font-bold">階級1</span>
               <span className="px-1.5 py-0.2 rounded-xs bg-[#F59E0B] text-slate-950 font-bold">階級2</span>
               <span className="px-1.5 py-0.2 rounded-xs bg-[#F97316] text-white font-bold">階級3</span>
@@ -4818,7 +4913,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             type="button"
             data-testid="radar-pass-toggle-btn"
             onClick={() => setRadarPass((p) => (p === 0 ? 1 : 0))}
-            className={`px-2 py-0.5 text-[10px] font-mono font-bold border transition-colors cursor-pointer shrink-0 ${
+            className={`px-2 py-0.5 text-[0.625rem] font-mono font-bold border transition-colors cursor-pointer shrink-0 ${
               radarPass === 1
                 ? 'bg-yellow-500/25 border-yellow-400 text-yellow-200'
                 : 'bg-cyan-500/20 border-cyan-500/70 text-cyan-200'
@@ -4828,7 +4923,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           </button>
           <span
             data-testid="radar-current-frame-label"
-            className="text-[11px] font-mono text-cyan-300 font-bold mr-1 shrink-0"
+            className="text-[0.6875rem] font-mono text-cyan-300 font-bold mr-1 shrink-0"
           >
             {currentNowcastEntry ? currentNowcastEntry.label : '現在 (実況)'}{' '}
             ({radarFrameIndex + 1}/{data.nowcastTimes.length})
@@ -4839,7 +4934,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               type="button"
               onClick={() => setRadarFrameIndex(idx)}
               aria-label={`レーダー時刻 ${entry.label}`}
-              className={`px-1.5 py-0.5 text-[10px] font-mono transition-colors border cursor-pointer shrink-0 ${
+              className={`px-1.5 py-0.5 text-[0.625rem] font-mono transition-colors border cursor-pointer shrink-0 ${
                 idx === radarFrameIndex
                   ? 'bg-cyan-500/25 border-cyan-400 text-white font-bold'
                   : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-neutral-200'
@@ -4861,7 +4956,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               : 'absolute bottom-3 left-64 border border-neutral-700/80'
           }`}
         >
-          <span className="text-[11px] font-mono text-neutral-300 font-bold mr-1 shrink-0">
+          <span className="text-[0.6875rem] font-mono text-neutral-300 font-bold mr-1 shrink-0">
             表示要素:
           </span>
           {(
@@ -4877,7 +4972,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               type="button"
               data-testid={`amedas-metric-btn-${m.id}`}
               onClick={() => onChangeAmedasMetric(m.id)}
-              className={`px-2 py-0.5 text-[11px] font-mono font-bold transition-colors border cursor-pointer shrink-0 ${
+              className={`px-2 py-0.5 text-[0.6875rem] font-mono font-bold transition-colors border cursor-pointer shrink-0 ${
                 amedasMetric === m.id
                   ? 'bg-amber-500/25 border-amber-400 text-white'
                   : 'bg-neutral-900 border-neutral-700 text-neutral-400 hover:text-neutral-200'
@@ -4887,7 +4982,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             </button>
           ))}
           {!isMobilePortrait && (
-            <span className="text-[10px] font-mono text-neutral-400 ml-1">
+            <span className="text-[0.625rem] font-mono text-neutral-400 ml-1">
               (ズーム連動・重なり防止高密度表示)
             </span>
           )}
@@ -4916,7 +5011,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                     : 'bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit'
                 }`}
               >
-                <span className="text-[11px] font-bold text-amber-300 mr-1">
+                <span className="text-[0.6875rem] font-bold text-amber-300 mr-1">
                   3時間ごと ({todayDateLabel}):
                 </span>
                 {sample3hSlots.map((slot, idx) => (
@@ -4925,7 +5020,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                     type="button"
                     data-testid={`forecast-3h-btn-${slot.hour}`}
                     onClick={() => onChangeForecast3hIndex?.(idx)}
-                    className={`px-2 py-0.5 text-[11px] font-mono font-bold transition-colors border rounded-xs cursor-pointer ${
+                    className={`px-2 py-0.5 text-[0.6875rem] font-mono font-bold transition-colors border rounded-xs cursor-pointer ${
                       idx === forecast3hIndex
                         ? 'bg-amber-500 border-amber-200 text-slate-950 shadow-sm'
                         : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
@@ -4945,7 +5040,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                   : 'bg-[#111318]/94 border border-neutral-700/80 px-2.5 py-1 rounded-xs shadow-md w-fit'
               }`}
             >
-              <span className="text-[11px] font-mono text-neutral-300 font-bold mr-0.5">
+              <span className="text-[0.6875rem] font-mono text-neutral-300 font-bold mr-0.5">
                 予報期間:
               </span>
               {(
@@ -4963,7 +5058,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                   type="button"
                   data-testid={`forecast-mode-btn-${m.id}`}
                   onClick={() => onChangeForecastViewMode?.(m.id)}
-                  className={`px-2.5 py-0.5 text-[11px] font-bold transition-colors border rounded-xs cursor-pointer ${
+                  className={`px-2.5 py-0.5 text-[0.6875rem] font-bold transition-colors border rounded-xs cursor-pointer ${
                     forecastViewMode === m.id
                       ? 'bg-sky-600 border-sky-300 text-white shadow-sm'
                       : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
@@ -4982,12 +5077,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               className={`absolute z-[400] bg-[#0F141C]/95 border border-slate-700/80 rounded-xs px-2.5 py-1 flex items-center gap-2.5 shadow-lg text-slate-200 text-xs font-bold transition-all duration-500 ease-in-out ${
                 isRightPanelHidden
                   ? 'bottom-3 right-4'
-                  : 'bottom-3 right-[272px]'
+                  : 'bottom-3 right-[17rem]'
               }`}
             >
               {/* [ |> のち ] */}
               <div className="flex items-center gap-1.5 text-slate-300">
-                <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                <svg viewBox="0 0 26 18" className="w-[1.5rem] h-[1rem] shrink-0">
                   <rect
                     x="0.75"
                     y="0.75"
@@ -5005,12 +5100,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                     strokeWidth="1.5"
                   />
                 </svg>
-                <span className="text-[11px]">のち</span>
+                <span className="text-[0.6875rem]">のち</span>
               </div>
 
               {/* [ ┏ 時々 ] */}
               <div className="flex items-center gap-1.5 text-slate-300">
-                <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                <svg viewBox="0 0 26 18" className="w-[1.5rem] h-[1rem] shrink-0">
                   <rect
                     x="0.75"
                     y="0.75"
@@ -5028,12 +5123,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                     strokeWidth="1.5"
                   />
                 </svg>
-                <span className="text-[11px]">時々</span>
+                <span className="text-[0.6875rem]">時々</span>
               </div>
 
               {/* [ 最高気温 / 最低気温 ] or [ 予想気温 / 降水確率 ] */}
               <div className="flex items-center gap-1.5">
-                <svg width="24" height="16" viewBox="0 0 26 18" className="shrink-0">
+                <svg viewBox="0 0 26 18" className="w-[1.5rem] h-[1rem] shrink-0">
                   <rect
                     x="0.75"
                     y="0.75"
@@ -5061,7 +5156,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                     strokeWidth="1.5"
                   />
                 </svg>
-                <div className="flex flex-col leading-none text-[10px] font-mono">
+                <div className="flex flex-col leading-none text-[0.625rem] font-mono">
                   <span className="text-red-400 font-bold">
                     {forecastViewMode === 'today_3h' ? '予想気温' : '最高気温'}
                   </span>

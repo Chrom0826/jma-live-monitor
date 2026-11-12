@@ -242,7 +242,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                 <div className="text-xs font-bold text-white mb-1">
                   緊急割り込みシミュレーション発報（テスト確認用）
                 </div>
-                <p className="text-[11px] text-neutral-400 mb-3">
+                <p className="text-[0.6875rem] text-neutral-400 mb-3">
                   ボタンを押すと即座にポップアップを閉じ、該当の割り込みズームを表示します。
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
@@ -329,7 +329,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                   通常ループに含める表示画面 ({enabledScenes.length}/
                   {normalLoopScenes.length} 有効)
                 </div>
-                <p className="text-[11px] text-neutral-400 mb-3">
+                <p className="text-[0.6875rem] text-neutral-400 mb-3">
                   ※気象解説情報は画面下部の全文FEEDおよび左タイムラインで常時表示されます。地震・火山・津波は発生・変化時に自動割り込みします。
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
@@ -354,7 +354,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                           <div className="text-xs font-bold text-white">
                             {sc.index}. {sc.title}
                           </div>
-                          <div className="text-[11px] text-neutral-400 mt-0.5">
+                          <div className="text-[0.6875rem] text-neutral-400 mt-0.5">
                             {sc.subtitle}
                           </div>
                         </div>
@@ -374,7 +374,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                 {activeEntry ? (
                   <div>
                     <div className="flex items-center justify-between gap-2">
-                      <span className="px-2 py-0.5 text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      <span className="px-2 py-0.5 text-[0.6875rem] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
                         {activeEntry.feedType}.xml 電文詳細
                       </span>
                       <span className="text-xs font-mono text-neutral-400">
@@ -409,7 +409,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                   </div>
                 )}
 
-                <div className="mt-4 pt-3 border-t border-[#2B303C] text-[11px] text-neutral-400">
+                <div className="mt-4 pt-3 border-t border-[#2B303C] text-[0.6875rem] text-neutral-400">
                   左側のタイムラインをクリックすると、いつでも該当電文の全文をこのポップアップで確認できます。
                 </div>
               </div>
@@ -422,7 +422,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                       key={ft}
                       type="button"
                       onClick={() => setFeedFilter(ft)}
-                      className={`px-2 py-1 text-[10px] font-mono transition-colors cursor-pointer ${
+                      className={`px-2 py-1 text-[0.625rem] font-mono transition-colors cursor-pointer ${
                         feedFilter === ft
                           ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/50 font-bold'
                           : 'text-neutral-400 hover:text-neutral-200'
@@ -450,14 +450,14 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                           : 'hover:bg-[#181C24]'
                       }`}
                     >
-                      <div className="flex items-center justify-between text-[10px] font-mono text-neutral-400">
+                      <div className="flex items-center justify-between text-[0.625rem] font-mono text-neutral-400">
                         <span className="text-amber-300">{entry.feedType}.xml</span>
                         <span>{entry.author}</span>
                       </div>
                       <div className="text-xs font-bold text-white mt-0.5">
                         {entry.title}
                       </div>
-                      <div className="text-[11px] text-neutral-300 mt-1 line-clamp-2">
+                      <div className="text-[0.6875rem] text-neutral-300 mt-1 line-clamp-2">
                         {entry.content}
                       </div>
                     </button>

@@ -1,7 +1,19 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { MonitorMap } from './components/MonitorMap';
 import { SceneDetailPanel } from './components/SceneDetailPanel';
 import { ModalTabMode, XmlInspectorModal } from './components/XmlInspectorModal';
+import {
+  computeDesktopUiScale,
+  getRootFontSizePx,
+} from './utils/responsiveLayout';
 import {
   INITIAL_AMEDAS_STATIONS,
   INITIAL_EARTHQUAKES,
@@ -198,12 +210,12 @@ const LiveClockBox = memo(function LiveClockBox({
 
   return (
     <div className="border-b border-[#5A606D] px-4 py-3 text-center bg-[#111318] shrink-0">
-      <div className="text-[20px] font-bold tracking-wider text-white leading-snug whitespace-nowrap">
+      <div className="text-[1.25rem] font-bold tracking-wider text-white leading-snug whitespace-nowrap">
         {dateHeaderText}
       </div>
       <div
         data-testid="live-digital-clock"
-        className="text-[42px] font-mono font-bold tracking-wider text-white leading-none mt-1 whitespace-nowrap"
+        className="text-[2.625rem] font-mono font-bold tracking-wider text-white leading-none mt-1 whitespace-nowrap"
       >
         {timeHeaderText}
       </div>
@@ -275,20 +287,20 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
         {/* Top Row: Left has Time + Region (Hypocenter), Right has Big Max Intensity Box */}
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-[11px] font-mono text-neutral-400">
+            <div className="flex items-center gap-1.5 text-[0.6875rem] font-mono text-neutral-400">
               <span className="whitespace-nowrap">{eq.occurrenceTime.replace(' 頃発生', '')}</span>
               {isPinned && (
-                <span className="text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded-xs whitespace-nowrap shrink-0">
+                <span className="text-[0.5625rem] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded-xs whitespace-nowrap shrink-0">
                   固定中
                 </span>
               )}
               {eq.isConfirmed === false && (
-                <span className="text-[9px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.2 rounded-xs shrink-0 whitespace-nowrap">
+                <span className="text-[0.5625rem] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.2 rounded-xs shrink-0 whitespace-nowrap">
                   続報待機
                 </span>
               )}
             </div>
-            <div className="text-[15px] font-black text-white mt-0.5 leading-snug truncate">
+            <div className="text-[0.9375rem] font-black text-white mt-0.5 leading-snug truncate">
               {eq.hypocenterName ||
                 (eq.hypocenterUnknown ? '震源精査中' : '震源情報')}
             </div>
@@ -296,12 +308,12 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
 
           {/* Big Max Intensity Box on Right */}
           <div
-            className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
+            className={`shrink-0 flex flex-col items-center justify-center w-[3.375rem] h-[3rem] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
           >
-            <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80 whitespace-nowrap">
+            <span className="text-[0.5625rem] font-bold leading-none tracking-tighter opacity-80 whitespace-nowrap">
               最大震度
             </span>
-            <span className="text-[23px] font-black leading-none mt-0.5 tracking-tight font-mono whitespace-nowrap">
+            <span className="text-[1.4375rem] font-black leading-none mt-0.5 tracking-tight font-mono whitespace-nowrap">
               {eq.maxScaleCode >= 10 ? eq.maxScaleLabel : '-'}
             </span>
           </div>
@@ -310,7 +322,7 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
         {/* Middle Row: Magnitude and Depth */}
         <div className="mt-1 flex items-center justify-between text-xs font-mono text-neutral-300">
           {eq.hypocenterUnknown ? (
-            <span className="text-amber-300 text-[11px] whitespace-nowrap">
+            <span className="text-amber-300 text-[0.6875rem] whitespace-nowrap">
               {eq.issueTypeLabel || '震度速報'}（震源精査中）
             </span>
           ) : (
@@ -326,7 +338,7 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
         </div>
 
         {/* Bottom Row: Tsunami status ("その下に津波心配なしみたいな") */}
-        <div className="mt-1 pt-1 border-t border-neutral-800/80 flex items-center justify-between text-[11px] truncate">
+        <div className="mt-1 pt-1 border-t border-neutral-800/80 flex items-center justify-between text-[0.6875rem] truncate">
           {formatTsunamiStatusBadge(eq.domesticTsunami)}
         </div>
       </button>
@@ -426,12 +438,12 @@ const XmlTimelineList = memo(function XmlTimelineList({
               <span className="text-xs font-mono text-neutral-400 shrink-0">
                 {formatTimeHm(entry.updated)}
               </span>
-              <span className="text-[13px] font-bold text-white leading-snug">
+              <span className="text-[0.8125rem] font-bold text-white leading-snug">
                 {entry.title}
               </span>
             </div>
             <div
-              className={`text-[11px] text-neutral-300 leading-relaxed break-words ${
+              className={`text-[0.6875rem] text-neutral-300 leading-relaxed break-words ${
                 variant === 'mobile' ? 'mt-0.5' : 'mt-1'
               }`}
             >
@@ -524,11 +536,13 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
     if (isFlipFeedActive) return;
     const track = tickerTrackRef.current;
     const copy = tickerFirstCopyRef.current;
-    const speedPxPerSec = 72;
     const applyTickerGeometry = () => {
       if (!track || !copy) return;
       const w = copy.offsetWidth;
       if (w <= 0) return;
+      const rootFontPx =
+        parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      const speedPxPerSec = 72 * (rootFontPx / 16);
       track.style.setProperty('--ticker-shift', `${w}px`);
       track.style.setProperty(
         '--ticker-duration',
@@ -673,7 +687,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
   return (
     <footer
       aria-label="気象防災ライブフィード"
-      className="h-[84px] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
+      className="h-[5.25rem] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
     >
       <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
         <div className="flex items-center gap-2 min-w-0">
@@ -681,16 +695,16 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
             className="w-1.5 h-4 rounded-xs shrink-0"
             style={{ backgroundColor: accentColor }}
           />
-          <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
+          <span className="text-sm md:text-[0.9375rem] font-black text-neutral-100 tracking-wider truncate">
             {headerTitle}
           </span>
           <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300 whitespace-nowrap">
             <span className="whitespace-nowrap">{headerTime}</span>
-            <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold whitespace-nowrap">
+            <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[0.6875rem] font-sans font-bold whitespace-nowrap">
               気象庁発表
             </span>
             {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
-              <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[11px] font-mono font-bold whitespace-nowrap">
+              <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[0.6875rem] font-mono font-bold whitespace-nowrap">
                 {safeFlipIndex + 1}/{flipFeed.cards.length}
               </span>
             )}
@@ -705,12 +719,12 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
           >
             <div className="flex items-center gap-3 w-full min-w-0">
               <span
-                className={`px-2.5 py-0.5 text-xs md:text-[13px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
+                className={`px-2.5 py-0.5 text-xs md:text-[0.8125rem] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
               >
                 {currentFlipCard.badge}
               </span>
               <div className="min-w-0 flex-1 flex items-baseline gap-3 truncate">
-                <span className="text-[19px] md:text-[23px] font-black text-white tracking-wide truncate">
+                <span className="text-[1.1875rem] md:text-[1.4375rem] font-black text-white tracking-wide truncate">
                   {currentFlipCard.mainText}
                 </span>
                 {currentFlipCard.subText && (
@@ -729,7 +743,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
             <div ref={tickerTrackRef} className="ticker-track">
               <div
                 ref={tickerFirstCopyRef}
-                className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
+                className="inline-flex items-center gap-12 pr-12 text-[1.3125rem] md:text-[1.4375rem] font-bold text-white tracking-wide leading-none"
               >
                 {sceneFeed.items.map((item, idx) => (
                   <span
@@ -756,7 +770,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
               </div>
               <div
                 aria-hidden="true"
-                className="inline-flex items-center gap-12 pr-12 text-[21px] md:text-[23px] font-bold text-white tracking-wide leading-none"
+                className="inline-flex items-center gap-12 pr-12 text-[1.3125rem] md:text-[1.4375rem] font-bold text-white tracking-wide leading-none"
               >
                 {sceneFeed.items.map((item, idx) => (
                   <span
@@ -863,6 +877,13 @@ export default function App() {
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
   // Smartphone Portrait Layout detection & bottom dock controls
+  const [viewportSize, setViewportSize] = useState<{
+    width: number;
+    height: number;
+  }>(() => {
+    if (typeof window === 'undefined') return { width: 1280, height: 720 };
+    return { width: window.innerWidth, height: window.innerHeight };
+  });
   const [isMobilePortrait, setIsMobilePortrait] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     return (
@@ -881,10 +902,13 @@ export default function App() {
 
   useEffect(() => {
     const checkViewport = () => {
-      const isNarrowOrPortrait =
-        window.innerWidth < 768 ||
-        (window.innerWidth < 920 && window.innerHeight > window.innerWidth);
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const isNarrowOrPortrait = w < 768 || (w < 920 && h > w);
       setIsMobilePortrait(isNarrowOrPortrait);
+      setViewportSize((prev) =>
+        prev.width === w && prev.height === h ? prev : { width: w, height: h }
+      );
     };
     checkViewport();
     window.addEventListener('resize', checkViewport);
@@ -897,6 +921,25 @@ export default function App() {
       : mobileLayoutOverride === 'desktop'
         ? false
         : isMobilePortrait;
+
+  const uiScale = useMemo(
+    () =>
+      computeDesktopUiScale(
+        viewportSize.width,
+        viewportSize.height,
+        effectiveMobilePortrait
+      ),
+    [viewportSize.width, viewportSize.height, effectiveMobilePortrait]
+  );
+
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    const fontSizePx = getRootFontSizePx(uiScale, effectiveMobilePortrait);
+    root.style.fontSize = `${fontSizePx}px`;
+    return () => {
+      root.style.fontSize = '';
+    };
+  }, [uiScale, effectiveMobilePortrait]);
 
   const { fullUpdateDateText, compactUpdateDateText } = useMemo(() => {
     const now = new Date();
@@ -2874,7 +2917,7 @@ export default function App() {
           {/* ==================== LEFT COLUMN (Clock + Dynamic XML Timeline OR Earthquake History + Compact Settings) ==================== */}
           <aside
             aria-label="時計および履歴タイムライン"
-            className="w-[264px] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden animate-startup-left z-20"
+            className="w-[16.5rem] shrink-0 border-r border-[#5A606D] bg-[#111318] flex flex-col overflow-hidden animate-startup-left z-20"
           >
             {/* Top Clock Box (Isolated memoized component so 1s ticks never re-render the map or panels) */}
             <LiveClockBox />
@@ -2894,7 +2937,7 @@ export default function App() {
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span className="truncate">地震履歴（震源・震度一覧）</span>
                     {pinnedEarthquakeId && isLoopPaused && (
-                      <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded shrink-0">
+                      <span className="text-[0.625rem] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded shrink-0">
                         固定表示中
                       </span>
                     )}
@@ -2903,13 +2946,13 @@ export default function App() {
                     <button
                       type="button"
                       onClick={handleResumePatrol}
-                      className="font-mono text-[10px] font-bold bg-red-800/90 hover:bg-red-700 text-white px-2 py-0.5 rounded cursor-pointer transition-colors shadow-xs shrink-0"
+                      className="font-mono text-[0.625rem] font-bold bg-red-800/90 hover:bg-red-700 text-white px-2 py-0.5 rounded cursor-pointer transition-colors shadow-xs shrink-0"
                       title="自動巡回を再開して最新の地震に戻す"
                     >
                       巡回再開 ▶
                     </button>
                   ) : (
-                    <span className="font-mono text-[11px] text-amber-300 shrink-0 whitespace-nowrap">
+                    <span className="font-mono text-[0.6875rem] text-amber-300 shrink-0 whitespace-nowrap">
                       {data.earthquakes.length}件取得
                     </span>
                   )}
@@ -2917,7 +2960,7 @@ export default function App() {
               ) : (
                 <>
                   <span className="truncate">気象庁防災XML 受信タイムライン</span>
-                  <span className="font-mono text-[11px] text-cyan-300 shrink-0 whitespace-nowrap">
+                  <span className="font-mono text-[0.6875rem] text-cyan-300 shrink-0 whitespace-nowrap">
                     {data.xmlEntries.length}件
                   </span>
                 </>
@@ -2945,7 +2988,7 @@ export default function App() {
             )}
 
             {/* Compact Bottom-Left Control Bar (Pause/Resume, Next Scene, Mobile Preview, and Settings Popup Button) */}
-            <div className="border-t border-[#5A606D] bg-[#0D0F13] px-1.5 py-1.5 shrink-0 grid grid-cols-4 gap-1 text-[11px]">
+            <div className="border-t border-[#5A606D] bg-[#0D0F13] px-1.5 py-1.5 shrink-0 grid grid-cols-4 gap-1 text-[0.6875rem]">
               <button
                 type="button"
                 onClick={() => {
@@ -3023,6 +3066,7 @@ export default function App() {
                 isLoopPaused={isLoopPaused}
                 isRightPanelHidden={isRightPanelHidden}
                 isMobilePortrait={false}
+                uiScale={uiScale}
                 eewDisplayMode={eewDisplayMode}
                 onChangeEewDisplayMode={setEewDisplayMode}
                 onSceneComplete={advanceSceneStable}
@@ -3032,7 +3076,11 @@ export default function App() {
               <div
                 data-testid="scene-header-box"
                 data-hazard-level={headerHazard.kind}
-                className={`absolute top-3 left-3 z-[400] max-w-[calc(100%-276px)] pointer-events-auto animate-startup-top overflow-hidden ${headerHazard.boxClass}`}
+                className={`absolute top-3 left-3 z-[400] ${
+                  isRightPanelHidden
+                    ? 'max-w-[calc(100%-1.5rem)]'
+                    : 'max-w-[calc(100%-17.25rem)]'
+                } pointer-events-auto animate-startup-top overflow-hidden ${headerHazard.boxClass}`}
               >
                 {headerHazard.stripeBg && (
                   <div
@@ -3040,8 +3088,8 @@ export default function App() {
                     aria-hidden="true"
                     className={
                       headerHazard.hasBottomStripe
-                        ? 'h-[10px] w-full'
-                        : 'h-[7px] w-full'
+                        ? 'h-[0.625rem] w-full'
+                        : 'h-[0.4375rem] w-full'
                     }
                     style={{ backgroundImage: headerHazard.stripeBg }}
                   />
@@ -3049,7 +3097,7 @@ export default function App() {
                 {!headerHazard.stripeBg && headerHazard.topAccentHex && (
                   <div
                     aria-hidden="true"
-                    className="h-[4px] w-full"
+                    className="h-[0.25rem] w-full"
                     style={{ backgroundColor: headerHazard.topAccentHex }}
                   />
                 )}
@@ -3057,7 +3105,7 @@ export default function App() {
                   <div className="flex items-center gap-2.5 flex-wrap">
                     <h1
                       key={effectiveSceneTitle}
-                      className={`text-[28px] font-extrabold tracking-tight leading-none whitespace-nowrap animate-title-swap ${headerHazard.titleClass}`}
+                      className={`text-[1.75rem] font-extrabold tracking-tight leading-none whitespace-nowrap animate-title-swap ${headerHazard.titleClass}`}
                     >
                       {effectiveSceneTitle}
                     </h1>
@@ -3098,7 +3146,7 @@ export default function App() {
                             key={sc.id}
                             type="button"
                             onClick={() => handleSelectSceneManual(sc.id)}
-                            className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer whitespace-nowrap shrink-0 ${
+                            className={`px-2 py-0.5 text-[0.6875rem] font-bold transition-colors border cursor-pointer whitespace-nowrap shrink-0 ${
                               isCurrent
                                 ? 'bg-white text-black border-white'
                                 : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
@@ -3115,7 +3163,7 @@ export default function App() {
                   <div
                     data-testid="scene-header-hazard-stripe-bottom"
                     aria-hidden="true"
-                    className="h-[6px] w-full"
+                    className="h-[0.375rem] w-full"
                     style={{ backgroundImage: headerHazard.stripeBg }}
                   />
                 )}
@@ -3125,7 +3173,7 @@ export default function App() {
               <div
                 className={`absolute top-3 right-3 bottom-3 z-[400] transition-all duration-500 ease-in-out ${
                   isRightPanelHidden
-                    ? 'translate-x-[calc(100%+24px)] opacity-0 pointer-events-none'
+                    ? 'translate-x-[calc(100%+1.5rem)] opacity-0 pointer-events-none'
                     : 'translate-x-0 opacity-100 pointer-events-none'
                 }`}
               >
