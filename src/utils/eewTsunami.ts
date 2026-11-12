@@ -460,6 +460,15 @@ export function isEewWarning(eew: EewReport | null | undefined): boolean {
   return Boolean(eew) && eew!.isWarning !== false;
 }
 
+/** 特別警報に該当するか（気象庁基準: 警報かつ 予想最大震度6弱以上(55+) または 長周期地震動階級4） */
+export function isEewSpecialWarning(eew: EewReport | null | undefined): boolean {
+  return Boolean(
+    eew &&
+      eew.isWarning !== false &&
+      (eew.maxScaleCode >= 55 || (eew.maxLpgmClass ?? 0) >= 4)
+  );
+}
+
 /** 最終報か（Wolfx は isFinal、それ以外は従来どおり第5報以降を最終報扱い） */
 export function isEewFinal(eew: EewReport | null | undefined): boolean {
   if (!eew) return false;

@@ -22,6 +22,7 @@ import {
   TEST_EEW_FORECAST_REPORT,
   TEST_EEW_REPORTS,
   TEST_INTERRUPT_EARTHQUAKE,
+  TEST_NOTO_EARTHQUAKE_DEMO,
   TEST_TSUNAMI_ANOMALY_STATION,
   TEST_TSUNAMI_FORECAST_DEMO,
   TEST_VOLCANO_LEVEL_CHANGE,
@@ -45,6 +46,7 @@ import {
   MonitorDataBundle,
   RegionId,
   SceneId,
+  TsunamiForecastReport,
   TsunamiStationItem,
   TyphoonReport,
   VolcanoStatusItem,
@@ -63,9 +65,14 @@ import {
 } from './utils/jmaParser';
 import {
   EEW_DISPLAY_HOLD_MS,
+  formatJstHms,
   getTsunamiAlertSeverity,
+  getTsunamiHighestGrade,
   hasActualEewLpgm,
+  isEewSpecialWarning,
   isEewStillActive,
+  isEewWarning,
+  isTsunamiForecastActive,
   parseJstDateTimeMs,
   parseP2PEew,
   parseP2PEewDetection,
@@ -186,12 +193,12 @@ const LiveClockBox = memo(function LiveClockBox({
 
   return (
     <div className="border-b border-[#5A606D] px-4 py-3 text-center bg-[#111318] shrink-0">
-      <div className="text-[20px] font-bold tracking-wider text-white leading-snug">
+      <div className="text-[20px] font-bold tracking-wider text-white leading-snug whitespace-nowrap">
         {dateHeaderText}
       </div>
       <div
         data-testid="live-digital-clock"
-        className="text-[42px] font-mono font-bold tracking-wider text-white leading-none mt-1"
+        className="text-[42px] font-mono font-bold tracking-wider text-white leading-none mt-1 whitespace-nowrap"
       >
         {timeHeaderText}
       </div>
@@ -264,14 +271,14 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 text-[11px] font-mono text-neutral-400">
-              <span>{eq.occurrenceTime.replace(' 頃発生', '')}</span>
+              <span className="whitespace-nowrap">{eq.occurrenceTime.replace(' 頃発生', '')}</span>
               {isPinned && (
-                <span className="text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded-xs">
+                <span className="text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 px-1 py-0.2 rounded-xs whitespace-nowrap shrink-0">
                   固定中
                 </span>
               )}
               {eq.isConfirmed === false && (
-                <span className="text-[9px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.2 rounded-xs shrink-0">
+                <span className="text-[9px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/60 px-1 py-0.2 rounded-xs shrink-0 whitespace-nowrap">
                   続報待機
                 </span>
               )}
@@ -286,10 +293,10 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
           <div
             className={`shrink-0 flex flex-col items-center justify-center w-[54px] h-[48px] rounded-xs shadow-md border border-black/30 ${scaleStyle.bg} ${scaleStyle.text}`}
           >
-            <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80">
+            <span className="text-[9px] font-bold leading-none tracking-tighter opacity-80 whitespace-nowrap">
               最大震度
             </span>
-            <span className="text-[23px] font-black leading-none mt-0.5 tracking-tight font-mono">
+            <span className="text-[23px] font-black leading-none mt-0.5 tracking-tight font-mono whitespace-nowrap">
               {eq.maxScaleCode >= 10 ? eq.maxScaleLabel : '-'}
             </span>
           </div>
@@ -298,15 +305,15 @@ const EarthquakeHistoryItem = memo(function EarthquakeHistoryItem({
         {/* Middle Row: Magnitude and Depth */}
         <div className="mt-1 flex items-center justify-between text-xs font-mono text-neutral-300">
           {eq.hypocenterUnknown ? (
-            <span className="text-amber-300 text-[11px]">
+            <span className="text-amber-300 text-[11px] whitespace-nowrap">
               {eq.issueTypeLabel || '震度速報'}（震源精査中）
             </span>
           ) : (
             <>
-              <span className="font-bold text-white">
+              <span className="font-bold text-white whitespace-nowrap">
                 {eq.magnitude >= 0 ? `M${eq.magnitude.toFixed(1)}` : 'M不明'}
               </span>
-              <span className="text-neutral-400">
+              <span className="text-neutral-400 whitespace-nowrap">
                 {eq.depthKm >= 0 ? `深さ約${eq.depthKm}km` : '深さ不明'}
               </span>
             </>
@@ -558,13 +565,13 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
             <span className="text-[11px] font-black text-neutral-100 tracking-wider truncate">
               {headerTitle}
             </span>
-            <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[10px] text-neutral-300">
-              <span>{headerTime}</span>
-              <span className="px-1 py-0.2 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[10px] font-sans font-bold">
+            <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[10px] text-neutral-300 whitespace-nowrap">
+              <span className="whitespace-nowrap">{headerTime}</span>
+              <span className="px-1 py-0.2 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[10px] font-sans font-bold whitespace-nowrap">
                 気象庁発表
               </span>
               {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
-                <span className="px-1 py-0.2 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[10px] font-mono font-bold">
+                <span className="px-1 py-0.2 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[10px] font-mono font-bold whitespace-nowrap">
                   {safeFlipIndex + 1}/{flipFeed.cards.length}
                 </span>
               )}
@@ -579,7 +586,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
             >
               <div className="flex items-center gap-2 w-full min-w-0">
                 <span
-                  className={`px-1.5 py-0.5 text-[10px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
+                  className={`px-1.5 py-0.5 text-[10px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
                 >
                   {currentFlipCard.badge}
                 </span>
@@ -672,13 +679,13 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
           <span className="text-sm md:text-[15px] font-black text-neutral-100 tracking-wider truncate">
             {headerTitle}
           </span>
-          <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300">
-            <span>{headerTime}</span>
-            <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold">
+          <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300 whitespace-nowrap">
+            <span className="whitespace-nowrap">{headerTime}</span>
+            <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[11px] font-sans font-bold whitespace-nowrap">
               気象庁発表
             </span>
             {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
-              <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[11px] font-mono font-bold">
+              <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[11px] font-mono font-bold whitespace-nowrap">
                 {safeFlipIndex + 1}/{flipFeed.cards.length}
               </span>
             )}
@@ -693,7 +700,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
           >
             <div className="flex items-center gap-3 w-full min-w-0">
               <span
-                className={`px-2.5 py-0.5 text-xs md:text-[13px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs ${currentFlipCard.badgeBg}`}
+                className={`px-2.5 py-0.5 text-xs md:text-[13px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
               >
                 {currentFlipCard.badge}
               </span>
@@ -886,7 +893,7 @@ export default function App() {
         ? false
         : isMobilePortrait;
 
-  const fullUpdateDateText = useMemo(() => {
+  const { fullUpdateDateText, compactUpdateDateText } = useMemo(() => {
     const now = new Date();
     const yyyy = now.getFullYear();
     const month = now.getMonth() + 1;
@@ -894,7 +901,10 @@ export default function App() {
     const hm = data.lastXmlFetchTime
       ? data.lastXmlFetchTime.slice(0, 5)
       : `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    return `${yyyy}年${month}月${day}日 ${hm} 更新`;
+    return {
+      fullUpdateDateText: `${yyyy}年${month}月${day}日 ${hm} 更新`,
+      compactUpdateDateText: `${month}/${day} ${hm}更新`,
+    };
   }, [data.lastXmlFetchTime]);
 
   const eqTrackerRef = useRef<EarthquakeTrackerState>(
@@ -1534,8 +1544,26 @@ export default function App() {
     advanceSceneRef.current();
   }, []);
 
+  const isTsunamiDemoRef = useRef<boolean>(isTsunamiDemo);
+  isTsunamiDemoRef.current = isTsunamiDemo;
+
+  const clearEewDemoTimers = useCallback(() => {
+    eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
+    eewDemoTimerRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearEewDemoTimers();
+    };
+  }, [clearEewDemoTimers]);
+
   const handleSelectSceneManual = useCallback(
     (sceneId: SceneId) => {
+      clearEewDemoTimers();
+      if (activeEewRef.current?.isDemo) {
+        setActiveEew(null);
+      }
       eqLockUntilConfirmedRef.current = false;
       eqUnconfirmedTimedOutRef.current = false;
       if (eqConfirmedHoldTimerRef.current) {
@@ -1563,7 +1591,7 @@ export default function App() {
       }
       setActiveScene(sceneId);
     },
-    [regionScope]
+    [clearEewDemoTimers, regionScope]
   );
 
   const handleChangeForecastViewMode = useCallback((mode: ForecastViewMode) => {
@@ -1573,8 +1601,22 @@ export default function App() {
     }
   }, []);
 
+  const clearDemoTsunamiIfActive = useCallback(() => {
+    if (isTsunamiDemoRef.current) {
+      setIsTsunamiDemo(false);
+      setData((d) =>
+        d.tsunamiForecast?.source === 'demo'
+          ? { ...d, tsunamiForecast: INITIAL_TSUNAMI_FORECAST }
+          : d
+      );
+    }
+  }, []);
+
   // Test Interrupt 1: Earthquake (returns cleanly after 2 loops of the bottom info bar)
   const handleTriggerTestEarthquake = useCallback(() => {
+    clearEewDemoTimers();
+    setActiveEew(null);
+    clearDemoTsunamiIfActive();
     eqLockUntilConfirmedRef.current = false;
     eqUnconfirmedTimedOutRef.current = false;
     if (eqConfirmedHoldTimerRef.current) {
@@ -1586,7 +1628,7 @@ export default function App() {
     setSelectedEarthquake(TEST_INTERRUPT_EARTHQUAKE);
     setInterruptKind('earthquake');
     setFlipSessionNonce((n) => n + 1);
-  }, [updatePinnedEarthquakeId]);
+  }, [clearDemoTsunamiIfActive, clearEewDemoTimers, updatePinnedEarthquakeId]);
 
   const formatJstStamp = useCallback((ms: number): string => {
     const d = new Date(ms + 9 * 3600 * 1000);
@@ -1621,15 +1663,62 @@ export default function App() {
     [formatJstStamp]
   );
 
+  const stampDemoTsunamiTimestamps = useCallback(
+    (
+      base: TsunamiForecastReport,
+      liveOriginMs: number,
+      nowMs: number
+    ): TsunamiForecastReport => {
+      const origMs = parseJstDateTimeMs(base.occurrenceTime || base.issueTime);
+      return {
+        ...base,
+        occurrenceTime: formatJstStamp(liveOriginMs),
+        issueTime: formatJstStamp(nowMs),
+        validUntil: formatJstStamp(nowMs + 12 * 3600 * 1000),
+        areas: base.areas.map((a) => {
+          if (!a.arrivalTime || Number.isNaN(origMs)) return a;
+          const arrMs = parseJstDateTimeMs(a.arrivalTime);
+          if (Number.isNaN(arrMs)) return a;
+          const nextArrival = formatJstStamp(liveOriginMs + (arrMs - origMs));
+          const nextFirstHeightText = a.firstHeightText.includes('到達予想')
+            ? `${formatJstHms(nextArrival).slice(0, 5)} 到達予想`
+            : a.firstHeightText;
+          return {
+            ...a,
+            arrivalTime: nextArrival,
+            firstHeightText: nextFirstHeightText,
+          };
+        }),
+      };
+    },
+    [formatJstStamp]
+  );
+
+  const stampDemoEarthquakeTimestamps = useCallback(
+    (
+      base: EarthquakeReport,
+      liveOriginMs: number,
+      nowMs: number
+    ): EarthquakeReport => ({
+      ...base,
+      occurrenceTime: `${formatJstStamp(liveOriginMs)} 頃発生`,
+      issueTime: `${formatJstStamp(nowMs)} 発表`,
+    }),
+    [formatJstStamp]
+  );
+
   // Test Interrupt 1-b: EEW 警報デモ (第1報: 長周期なし -> 第3報: 階級3 -> 最終報: 階級4)
   const handleTriggerEewDemo = useCallback(() => {
-    eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
-    eewDemoTimerRef.current = [];
+    clearEewDemoTimers();
+    clearDemoTsunamiIfActive();
     eqLockUntilConfirmedRef.current = false;
     eqUnconfirmedTimedOutRef.current = false;
     if (eqConfirmedHoldTimerRef.current) {
       clearTimeout(eqConfirmedHoldTimerRef.current);
       eqConfirmedHoldTimerRef.current = null;
+    }
+    if (selectedEarthquakeRef.current?.isTest && sortedEarthquakesRef.current.length > 0) {
+      setSelectedEarthquake(sortedEarthquakesRef.current[0]);
     }
 
     const baseOriginMs = Date.now() - 2000;
@@ -1653,12 +1742,12 @@ export default function App() {
       setActiveEew(r3);
     }, 8000);
     eewDemoTimerRef.current.push(t2);
-  }, [stampDemoEewTimestamps]);
+  }, [clearDemoTsunamiIfActive, clearEewDemoTimers, stampDemoEewTimestamps]);
 
   // Test Interrupt 1-c: EEW 予報デモ (長周期地震動なし・警報地域なし・深さ50km P/S波)
   const handleTriggerEewForecastDemo = useCallback(() => {
-    eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
-    eewDemoTimerRef.current = [];
+    clearEewDemoTimers();
+    clearDemoTsunamiIfActive();
     eqLockUntilConfirmedRef.current = false;
     eqUnconfirmedTimedOutRef.current = false;
     if (eqConfirmedHoldTimerRef.current) {
@@ -1675,33 +1764,129 @@ export default function App() {
     setActiveEew(rForecast);
     setInterruptKind('eew');
     setFlipSessionNonce((n) => n + 1);
-  }, [stampDemoEewTimestamps]);
+  }, [clearDemoTsunamiIfActive, clearEewDemoTimers, stampDemoEewTimestamps]);
+
+  // Test Interrupt 1-d: EEW → 津波連動デモ (0s警報 → 4s特別警報 → 8s最終報+震度観測同期 → 12s大津波警報)
+  const handleTriggerEewToTsunamiDemo = useCallback(() => {
+    clearEewDemoTimers();
+    clearDemoTsunamiIfActive();
+    eqLockUntilConfirmedRef.current = false;
+    eqUnconfirmedTimedOutRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
+    updatePinnedEarthquakeId(null);
+    setIsLoopPaused(false);
+    if (selectedEarthquakeRef.current?.isTest && sortedEarthquakesRef.current.length > 0) {
+      setSelectedEarthquake(sortedEarthquakesRef.current[0]);
+    }
+
+    const baseOriginMs = Date.now() - 2000;
+
+    // t = 0s: 緊急地震速報（警報）第1報 (M5.9 震度5強以上 — 赤黒斜線)
+    const r1 = stampDemoEewTimestamps(TEST_EEW_REPORTS[0], baseOriginMs, Date.now());
+    setEewDisplayMode('intensity');
+    setActiveEew(r1);
+    setInterruptKind('eew');
+    setFlipSessionNonce((n) => n + 1);
+
+    // t = 4s: 緊急地震速報（特別警報）第3報 (M6.8 震度6強・長周期階級3 — 紫黒斜線)
+    const t1 = setTimeout(() => {
+      const r2 = stampDemoEewTimestamps(TEST_EEW_REPORTS[1], baseOriginMs, Date.now());
+      setActiveEew(r2);
+    }, 4000);
+    eewDemoTimerRef.current.push(t1);
+
+    // t = 8s: 緊急地震速報（特別警報）最終報 (M7.6 震度7・階級4) + 各地の震度/震源確定同期
+    const t2 = setTimeout(() => {
+      const nowMs = Date.now();
+      const r3 = stampDemoEewTimestamps(TEST_EEW_REPORTS[2], baseOriginMs, nowMs);
+      const syncedQuake = stampDemoEarthquakeTimestamps(
+        TEST_NOTO_EARTHQUAKE_DEMO,
+        baseOriginMs,
+        nowMs
+      );
+      setActiveEew(r3);
+      setSelectedEarthquake(syncedQuake);
+    }, 8000);
+    eewDemoTimerRef.current.push(t2);
+
+    // t = 12s: 大津波警報発表！ EEWを終了し津波警報シーンへ自動遷移（紫＋黄強調斜線）
+    const t3 = setTimeout(() => {
+      const nowMs = Date.now();
+      const liveTsunami = stampDemoTsunamiTimestamps(
+        TEST_TSUNAMI_FORECAST_DEMO,
+        baseOriginMs,
+        nowMs
+      );
+      eqLockUntilConfirmedRef.current = false;
+      eqUnconfirmedTimedOutRef.current = false;
+      setActiveEew(null);
+      setIsTsunamiDemo(true);
+      setData((d) => ({
+        ...d,
+        tsunamiForecast: liveTsunami,
+      }));
+      setInterruptKind('none');
+      setActiveScene('tsunami');
+      setFlipSessionNonce((n) => n + 1);
+    }, 12000);
+    eewDemoTimerRef.current.push(t3);
+  }, [
+    clearDemoTsunamiIfActive,
+    clearEewDemoTimers,
+    stampDemoEarthquakeTimestamps,
+    stampDemoEewTimestamps,
+    stampDemoTsunamiTimestamps,
+    updatePinnedEarthquakeId,
+  ]);
 
   // Test Interrupt 2: Volcano Alert Level Change (zooms directly to volcano)
   const handleTriggerTestVolcano = useCallback(() => {
+    clearEewDemoTimers();
+    setActiveEew(null);
+    clearDemoTsunamiIfActive();
     setActiveVolcano(TEST_VOLCANO_LEVEL_CHANGE);
     setInterruptKind('volcano');
-  }, []);
+  }, [clearDemoTsunamiIfActive, clearEewDemoTimers]);
 
   // Tsunami Full-scale Demo Toggle (大津波警報・津波警報・注意報シミュレーション)
   const handleToggleTsunamiDemo = useCallback(() => {
-    setIsTsunamiDemo((prev) => {
-      const next = !prev;
-      if (next) {
-        setData((d) => ({
-          ...d,
-          tsunamiForecast: TEST_TSUNAMI_FORECAST_DEMO,
-        }));
-        setActiveScene('tsunami');
-      } else {
-        setData((d) => ({
-          ...d,
-          tsunamiForecast: INITIAL_TSUNAMI_FORECAST,
-        }));
-      }
-      return next;
-    });
-  }, []);
+    clearEewDemoTimers();
+    eqLockUntilConfirmedRef.current = false;
+    eqUnconfirmedTimedOutRef.current = false;
+    if (eqConfirmedHoldTimerRef.current) {
+      clearTimeout(eqConfirmedHoldTimerRef.current);
+      eqConfirmedHoldTimerRef.current = null;
+    }
+
+    const next = !isTsunamiDemoRef.current;
+    setIsTsunamiDemo(next);
+    if (next) {
+      const nowMs = Date.now();
+      const liveTsunami = stampDemoTsunamiTimestamps(
+        TEST_TSUNAMI_FORECAST_DEMO,
+        nowMs - 5 * 60 * 1000,
+        nowMs
+      );
+      setActiveEew(null);
+      setInterruptKind('none');
+      setData((d) => ({
+        ...d,
+        tsunamiForecast: liveTsunami,
+      }));
+      setActiveScene('tsunami');
+      setFlipSessionNonce((n) => n + 1);
+    } else {
+      setData((d) => ({
+        ...d,
+        tsunamiForecast: INITIAL_TSUNAMI_FORECAST,
+      }));
+      setInterruptKind('none');
+      setActiveScene('radar');
+    }
+  }, [clearEewDemoTimers, stampDemoTsunamiTimestamps]);
 
   const handleToggleSceneEnabled = useCallback((sceneId: SceneId) => {
     setEnabledScenes((prev) => {
@@ -1750,6 +1935,7 @@ export default function App() {
 
   // 巡回再開: 固定解除・割り込み解除し、最新の地震に戻して自動巡回を再開する
   const handleResumePatrol = useCallback(() => {
+    clearEewDemoTimers();
     setIsLoopPaused(false);
     updatePinnedEarthquakeId(null);
     eqLockUntilConfirmedRef.current = false;
@@ -1758,16 +1944,22 @@ export default function App() {
       clearTimeout(eqConfirmedHoldTimerRef.current);
       eqConfirmedHoldTimerRef.current = null;
     }
+    if (activeEewRef.current?.isDemo) {
+      setActiveEew(null);
+    }
+    clearDemoTsunamiIfActive();
     if (
+      interruptKindRef.current === 'eew' ||
       interruptKindRef.current === 'earthquake' ||
-      interruptKindRef.current === 'volcano'
+      interruptKindRef.current === 'volcano' ||
+      interruptKindRef.current === 'tsunami'
     ) {
       setInterruptKind('none');
     }
     if (sortedEarthquakesRef.current.length > 0) {
       setSelectedEarthquake(sortedEarthquakesRef.current[0]);
     }
-  }, [updatePinnedEarthquakeId]);
+  }, [clearDemoTsunamiIfActive, clearEewDemoTimers, updatePinnedEarthquakeId]);
 
   const handleSelectTyphoonFromPanel = useCallback((ty: TyphoonReport) => {
     const idx = typhoonsRef.current.findIndex((t) => t.id === ty.id);
@@ -1882,14 +2074,32 @@ export default function App() {
   const sceneMeta =
     SCENE_LIST.find((s) => s.id === effectiveScene) || SCENE_LIST[0];
 
+  const activeTsunamiForecast = data.tsunamiForecast;
+  const isActiveTsunami = Boolean(
+    effectiveScene === 'tsunami' && isTsunamiForecastActive(activeTsunamiForecast)
+  );
+  const highestTsunamiGrade =
+    isActiveTsunami && activeTsunamiForecast
+      ? getTsunamiHighestGrade(activeTsunamiForecast)
+      : null;
+
   const effectiveSceneTitle = useMemo(() => {
     if (effectiveScene === 'earthquake') {
       if (activeEew && isEewStillActive(activeEew)) {
-        return activeEew.isWarning
+        if (isEewSpecialWarning(activeEew)) {
+          return '緊急地震速報（特別警報）';
+        }
+        return isEewWarning(activeEew)
           ? '緊急地震速報（警報）'
           : '緊急地震速報（予報）';
       }
       return selectedEarthquake.issueTypeLabel || '地震情報（震源・震度に関する情報）';
+    }
+    if (effectiveScene === 'tsunami' && highestTsunamiGrade) {
+      if (highestTsunamiGrade === 'MajorWarning') return '大津波警報 発表中';
+      if (highestTsunamiGrade === 'Warning') return '津波警報 発表中';
+      if (highestTsunamiGrade === 'Watch') return '津波注意報 発表中';
+      if (highestTsunamiGrade === 'Forecast') return '津波予報（若干の海面変動）';
     }
     if (effectiveScene === 'amedas') {
       if (amedasMetric === 'precip') return '全国アメダス気象実況（降水量）';
@@ -1927,6 +2137,7 @@ export default function App() {
     return sceneMeta.title;
   }, [
     effectiveScene,
+    highestTsunamiGrade,
     amedasMetric,
     forecastViewMode,
     forecast3hIndex,
@@ -1939,6 +2150,148 @@ export default function App() {
     eewDisplayMode,
     selectedEarthquake,
   ]);
+
+  const headerHazard = useMemo<{
+    kind:
+      | 'normal'
+      | 'eew_forecast'
+      | 'eew_warning'
+      | 'eew_special'
+      | 'tsunami_forecast'
+      | 'tsunami_watch'
+      | 'tsunami_warning'
+      | 'tsunami_major';
+    stripeBg: string | null;
+    hasBottomStripe: boolean;
+    topAccentHex: string | null;
+    boxClass: string;
+    mobileBoxClass: string;
+    titleClass: string;
+    badgeText: string | null;
+    badgeClass: string;
+  }>(() => {
+    if (effectiveScene === 'tsunami' && highestTsunamiGrade) {
+      if (highestTsunamiGrade === 'MajorWarning') {
+        return {
+          kind: 'tsunami_major',
+          stripeBg:
+            'repeating-linear-gradient(-45deg, #9333EA 0px, #9333EA 11px, #FACC15 11px, #FACC15 22px)',
+          hasBottomStripe: true,
+          topAccentHex: null,
+          boxClass:
+            'bg-[#1D0A30]/96 border-2 border-[#FACC15] shadow-[0_0_26px_rgba(147,51,234,0.7),0_0_14px_rgba(250,204,21,0.5)]',
+          mobileBoxClass:
+            'bg-[#1D0A30] border-b-2 border-[#FACC15] shadow-[0_0_18px_rgba(147,51,234,0.6)]',
+          titleClass:
+            'text-[#FEF08A] drop-shadow-[0_0_10px_rgba(250,204,21,0.65)]',
+          badgeText: '直ちに高台へ避難',
+          badgeClass:
+            'bg-[#FACC15] text-[#111827] border border-yellow-200 font-black',
+        };
+      }
+      if (highestTsunamiGrade === 'Warning') {
+        return {
+          kind: 'tsunami_warning',
+          stripeBg:
+            'repeating-linear-gradient(-45deg, #DC2626 0px, #DC2626 11px, #FACC15 11px, #FACC15 22px)',
+          hasBottomStripe: true,
+          topAccentHex: null,
+          boxClass:
+            'bg-[#260B0F]/96 border-2 border-[#FACC15] shadow-[0_0_24px_rgba(220,38,38,0.7),0_0_12px_rgba(250,204,21,0.45)]',
+          mobileBoxClass:
+            'bg-[#260B0F] border-b-2 border-[#FACC15] shadow-[0_0_16px_rgba(220,38,38,0.55)]',
+          titleClass:
+            'text-[#FEF08A] drop-shadow-[0_0_8px_rgba(250,204,21,0.55)]',
+          badgeText: '直ちに避難',
+          badgeClass:
+            'bg-[#FACC15] text-[#111827] border border-yellow-200 font-black',
+        };
+      }
+      if (highestTsunamiGrade === 'Watch') {
+        return {
+          kind: 'tsunami_watch',
+          stripeBg: null,
+          hasBottomStripe: false,
+          topAccentHex: '#FACC15',
+          boxClass: 'bg-[#181409]/95 border-2 border-amber-400',
+          mobileBoxClass: 'bg-[#181409]',
+          titleClass: 'text-amber-200',
+          badgeText: '海岸から離れて',
+          badgeClass: 'bg-amber-400 text-slate-950 font-black',
+        };
+      }
+      return {
+        kind: 'tsunami_forecast',
+        stripeBg: null,
+        hasBottomStripe: false,
+        topAccentHex: '#38BDF8',
+        boxClass: 'bg-[#0E1621]/95 border border-sky-400/70',
+        mobileBoxClass: 'bg-[#0E1621]',
+        titleClass: 'text-sky-100',
+        badgeText: null,
+        badgeClass: '',
+      };
+    }
+
+    if (effectiveScene === 'earthquake' && activeEew && isEewStillActive(activeEew)) {
+      if (isEewSpecialWarning(activeEew)) {
+        return {
+          kind: 'eew_special',
+          stripeBg:
+            'repeating-linear-gradient(-45deg, #9333EA 0px, #9333EA 9px, #0B0D12 9px, #0B0D12 18px)',
+          hasBottomStripe: false,
+          topAccentHex: null,
+          boxClass:
+            'bg-[#150E1E]/95 border-2 border-[#9333EA] shadow-[0_0_16px_rgba(147,51,234,0.45)]',
+          mobileBoxClass: 'bg-[#150E1E]',
+          titleClass:
+            'text-white drop-shadow-[0_0_8px_rgba(168,85,247,0.45)]',
+          badgeText: `第${activeEew.serial}報${activeEew.isFinal ? '・最終' : ''}`,
+          badgeClass:
+            'bg-[#9333EA] text-white border border-purple-300/70 font-black',
+        };
+      }
+      if (isEewWarning(activeEew)) {
+        return {
+          kind: 'eew_warning',
+          stripeBg:
+            'repeating-linear-gradient(-45deg, #DC2626 0px, #DC2626 9px, #0B0D12 9px, #0B0D12 18px)',
+          hasBottomStripe: false,
+          topAccentHex: null,
+          boxClass:
+            'bg-[#1A0D10]/95 border-2 border-[#DC2626] shadow-[0_0_14px_rgba(220,38,38,0.4)]',
+          mobileBoxClass: 'bg-[#1A0D10]',
+          titleClass: 'text-white',
+          badgeText: `第${activeEew.serial}報${activeEew.isFinal ? '・最終' : ''}`,
+          badgeClass:
+            'bg-[#DC2626] text-white border border-red-300/70 font-black',
+        };
+      }
+      return {
+        kind: 'eew_forecast',
+        stripeBg: null,
+        hasBottomStripe: false,
+        topAccentHex: '#F59E0B',
+        boxClass: 'bg-[#17130B]/95 border border-amber-500/80',
+        mobileBoxClass: 'bg-[#17130B]',
+        titleClass: 'text-amber-100',
+        badgeText: `第${activeEew.serial}報${activeEew.isFinal ? '・最終' : ''}`,
+        badgeClass: 'bg-amber-500 text-slate-950 font-black',
+      };
+    }
+
+    return {
+      kind: 'normal',
+      stripeBg: null,
+      hasBottomStripe: false,
+      topAccentHex: null,
+      boxClass: 'bg-[#111318]/94 border border-[#686E7A]',
+      mobileBoxClass: 'bg-[#14171F]',
+      titleClass: 'text-white',
+      badgeText: null,
+      badgeClass: '',
+    };
+  }, [effectiveScene, highestTsunamiGrade, activeEew]);
 
   // Real-time scene-aware broadcast feed (Pattern B: 画面の現在情報に完全に合致するリアルタイムテロップ)
   const sceneFeed = useMemo(
@@ -2154,44 +2507,82 @@ export default function App() {
             </div>
 
             {/* Row 1B: Active Scene Title + Horizontal Scrollable Scene Tabs */}
-            <div className="px-2.5 py-1.5 bg-[#14171F] flex flex-col gap-1.5">
-              <div className="flex items-baseline justify-between gap-2 min-w-0">
-                <h1
-                  key={effectiveSceneTitle}
-                  className="text-[17px] font-extrabold tracking-tight text-white leading-snug truncate animate-title-swap"
-                >
-                  {effectiveSceneTitle}
-                </h1>
-                <span className="text-[10px] font-mono text-neutral-300 shrink-0 whitespace-nowrap">
-                  {fullUpdateDateText}
-                </span>
-              </div>
-
-              <nav
-                aria-label="表示シーン切替"
-                className="flex items-center gap-1 overflow-x-auto no-scrollbar pb-0.5"
-              >
-                {SCENE_LIST.filter(
-                  (s) => !s.isInterruptOnly || s.id === effectiveScene
-                ).map((sc) => {
-                  const isCurrent = effectiveScene === sc.id;
-                  return (
-                    <button
-                      key={sc.id}
-                      type="button"
-                      data-testid={`scene-tab-${sc.id}`}
-                      onClick={() => handleSelectSceneManual(sc.id)}
-                      className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer shrink-0 whitespace-nowrap ${
-                        isCurrent
-                          ? 'bg-white text-black border-white shadow-xs'
-                          : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
-                      }`}
+            <div
+              data-testid="mobile-scene-header-box"
+              data-hazard-level={headerHazard.kind}
+              className={`flex flex-col ${headerHazard.mobileBoxClass}`}
+            >
+              {headerHazard.stripeBg && (
+                <div
+                  aria-hidden="true"
+                  className={
+                    headerHazard.hasBottomStripe ? 'h-[7px] w-full' : 'h-[5px] w-full'
+                  }
+                  style={{ backgroundImage: headerHazard.stripeBg }}
+                />
+              )}
+              {!headerHazard.stripeBg && headerHazard.topAccentHex && (
+                <div
+                  aria-hidden="true"
+                  className="h-[4px] w-full"
+                  style={{ backgroundColor: headerHazard.topAccentHex }}
+                />
+              )}
+              <div className="px-2.5 py-1.5 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between gap-1.5 min-w-0">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <h1
+                      key={effectiveSceneTitle}
+                      className={`text-[15px] font-extrabold tracking-tight leading-snug truncate animate-title-swap ${headerHazard.titleClass}`}
                     >
-                      {sc.shortLabel}
-                    </button>
-                  );
-                })}
-              </nav>
+                      {effectiveSceneTitle}
+                    </h1>
+                    {headerHazard.badgeText && (
+                      <span
+                        className={`px-1.5 py-0.5 text-[10px] rounded-xs shrink-0 whitespace-nowrap leading-none ${headerHazard.badgeClass}`}
+                      >
+                        {headerHazard.badgeText}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[10px] font-mono text-neutral-300 shrink-0 whitespace-nowrap">
+                    {compactUpdateDateText}
+                  </span>
+                </div>
+
+                <nav
+                  aria-label="表示シーン切替"
+                  className="flex items-center gap-1 overflow-x-auto no-scrollbar pb-0.5"
+                >
+                  {SCENE_LIST.filter(
+                    (s) => !s.isInterruptOnly || s.id === effectiveScene
+                  ).map((sc) => {
+                    const isCurrent = effectiveScene === sc.id;
+                    return (
+                      <button
+                        key={sc.id}
+                        type="button"
+                        data-testid={`scene-tab-${sc.id}`}
+                        onClick={() => handleSelectSceneManual(sc.id)}
+                        className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer shrink-0 whitespace-nowrap ${
+                          isCurrent
+                            ? 'bg-white text-black border-white shadow-xs'
+                            : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
+                        }`}
+                      >
+                        {sc.shortLabel}
+                      </button>
+                    );
+                  })}
+                </nav>
+              </div>
+              {headerHazard.stripeBg && headerHazard.hasBottomStripe && (
+                <div
+                  aria-hidden="true"
+                  className="h-[4px] w-full"
+                  style={{ backgroundImage: headerHazard.stripeBg }}
+                />
+              )}
             </div>
           </header>
 
@@ -2409,15 +2800,15 @@ export default function App() {
                       巡回再開 ▶
                     </button>
                   ) : (
-                    <span className="font-mono text-[11px] text-amber-300 shrink-0">
+                    <span className="font-mono text-[11px] text-amber-300 shrink-0 whitespace-nowrap">
                       {data.earthquakes.length}件取得
                     </span>
                   )}
                 </>
               ) : (
                 <>
-                  <span>気象庁防災XML 受信タイムライン</span>
-                  <span className="font-mono text-[11px] text-cyan-300">
+                  <span className="truncate">気象庁防災XML 受信タイムライン</span>
+                  <span className="font-mono text-[11px] text-cyan-300 shrink-0 whitespace-nowrap">
                     {data.xmlEntries.length}件
                   </span>
                 </>
@@ -2529,46 +2920,88 @@ export default function App() {
               />
 
               {/* Floating Top-Left Scene Title Box (Matches NERV防災ライブ `全国の気象警報・注意報`) */}
-              <div className="absolute top-3 left-3 z-[400] bg-[#111318]/94 border border-[#686E7A] px-4 py-2.5 pointer-events-auto animate-startup-top">
-                <h1
-                  key={effectiveSceneTitle}
-                  className="text-[28px] font-extrabold tracking-tight text-white leading-none animate-title-swap"
-                >
-                  {effectiveSceneTitle}
-                </h1>
-                <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-neutral-200">
-                  <span className="font-mono font-semibold text-neutral-100">
-                    {fullUpdateDateText}
-                  </span>
-                  <span aria-hidden="true" className="text-neutral-600">
-                    |
-                  </span>
-                  {/* Quick Scene Switch Tabs (Includes earthquake in normal loop) */}
-                  <nav
-                    aria-label="表示シーン切替"
-                    className="flex items-center gap-1"
-                  >
-                    {SCENE_LIST.filter(
-                      (s) => !s.isInterruptOnly || s.id === effectiveScene
-                    ).map((sc) => {
-                      const isCurrent = effectiveScene === sc.id;
-                      return (
-                        <button
-                          key={sc.id}
-                          type="button"
-                          onClick={() => handleSelectSceneManual(sc.id)}
-                          className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer ${
-                            isCurrent
-                              ? 'bg-white text-black border-white'
-                              : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
-                          }`}
-                        >
-                          {sc.shortLabel}
-                        </button>
-                      );
-                    })}
-                  </nav>
+              <div
+                data-testid="scene-header-box"
+                data-hazard-level={headerHazard.kind}
+                className={`absolute top-3 left-3 z-[400] max-w-[calc(100%-276px)] pointer-events-auto animate-startup-top overflow-hidden ${headerHazard.boxClass}`}
+              >
+                {headerHazard.stripeBg && (
+                  <div
+                    data-testid="scene-header-hazard-stripe-top"
+                    aria-hidden="true"
+                    className={
+                      headerHazard.hasBottomStripe
+                        ? 'h-[10px] w-full'
+                        : 'h-[7px] w-full'
+                    }
+                    style={{ backgroundImage: headerHazard.stripeBg }}
+                  />
+                )}
+                {!headerHazard.stripeBg && headerHazard.topAccentHex && (
+                  <div
+                    aria-hidden="true"
+                    className="h-[4px] w-full"
+                    style={{ backgroundColor: headerHazard.topAccentHex }}
+                  />
+                )}
+                <div className="px-4 py-2.5">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <h1
+                      key={effectiveSceneTitle}
+                      className={`text-[28px] font-extrabold tracking-tight leading-none whitespace-nowrap animate-title-swap ${headerHazard.titleClass}`}
+                    >
+                      {effectiveSceneTitle}
+                    </h1>
+                    {headerHazard.badgeText && (
+                      <span
+                        className={`px-2 py-0.5 text-xs rounded-xs shrink-0 whitespace-nowrap leading-tight ${headerHazard.badgeClass}`}
+                      >
+                        {headerHazard.badgeText}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-neutral-200">
+                    <span className="font-mono font-semibold text-neutral-100 whitespace-nowrap">
+                      {fullUpdateDateText}
+                    </span>
+                    <span aria-hidden="true" className="text-neutral-600">
+                      |
+                    </span>
+                    {/* Quick Scene Switch Tabs (Includes earthquake in normal loop) */}
+                    <nav
+                      aria-label="表示シーン切替"
+                      className="flex items-center gap-1 flex-wrap"
+                    >
+                      {SCENE_LIST.filter(
+                        (s) => !s.isInterruptOnly || s.id === effectiveScene
+                      ).map((sc) => {
+                        const isCurrent = effectiveScene === sc.id;
+                        return (
+                          <button
+                            key={sc.id}
+                            type="button"
+                            onClick={() => handleSelectSceneManual(sc.id)}
+                            className={`px-2 py-0.5 text-[11px] font-bold transition-colors border cursor-pointer whitespace-nowrap shrink-0 ${
+                              isCurrent
+                                ? 'bg-white text-black border-white'
+                                : 'bg-[#1A1D24] text-neutral-300 border-neutral-700 hover:text-white'
+                            }`}
+                          >
+                            {sc.shortLabel}
+                          </button>
+                        );
+                      })}
+                    </nav>
+                  </div>
                 </div>
+                {headerHazard.stripeBg && headerHazard.hasBottomStripe && (
+                  <div
+                    data-testid="scene-header-hazard-stripe-bottom"
+                    aria-hidden="true"
+                    className="h-[6px] w-full"
+                    style={{ backgroundImage: headerHazard.stripeBg }}
+                  />
+                )}
               </div>
 
               {/* Floating Right-Side Slim Regional Strip (Slides smoothly off-screen for 'forecast' and 'radar' scenes) */}
@@ -2646,6 +3079,7 @@ export default function App() {
           onTriggerTestEarthquake={handleTriggerTestEarthquake}
           onTriggerTestEew={handleTriggerEewDemo}
           onTriggerTestEewForecast={handleTriggerEewForecastDemo}
+          onTriggerTestEewToTsunami={handleTriggerEewToTsunamiDemo}
           onTriggerTestVolcano={handleTriggerTestVolcano}
           onToggleTsunamiDemo={handleToggleTsunamiDemo}
           isTsunamiDemo={isTsunamiDemo}

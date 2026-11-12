@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { INITIAL_FORECASTS } from '../data/fallbackData';
+import {
+  INITIAL_FORECASTS,
+  TEST_EEW_FORECAST_REPORT,
+  TEST_EEW_REPORTS,
+  TEST_NOTO_EARTHQUAKE_DEMO,
+} from '../data/fallbackData';
 import {
   computeEewAreaLpgmClasses,
   computeEewWaveRadiiKm,
@@ -11,6 +16,7 @@ import {
   getSeismicScaleBadgeStyle,
   getTsunamiAlertSeverity,
   hasActualEewLpgm,
+  isEewSpecialWarning,
   isEewStillActive,
   parseJmaTsunamiDetail,
   isEewFinal,
@@ -2060,4 +2066,56 @@ test('doesEarthquakeMatchEew rejects stale previous earthquake during active EEW
     stations: [],
   };
   assert.equal(doesEarthquakeMatchEew(matchingShizuokaQuake, shizuokaEew), true);
+});
+
+test('isEewSpecialWarning follows JMA criteria (警報かつ 予想最大震度6弱以上(55+) または 長周期地震動階級4)', () => {
+  assert.equal(isEewSpecialWarning(null), false);
+  assert.equal(isEewSpecialWarning(undefined), false);
+
+  // 予報 (isWarning: false) は震度6弱以上や階級4でも特別警報にならない
+  assert.equal(
+    isEewSpecialWarning({
+      ...TEST_EEW_FORECAST_REPORT,
+      maxScaleCode: 60,
+      maxLpgmClass: 4,
+    }),
+    false
+  );
+
+  // 警報 (震度5強・階級3) -> 通常警報 (false)
+  assert.equal(
+    isEewSpecialWarning({
+      ...TEST_EEW_REPORTS[0],
+      isWarning: true,
+      maxScaleCode: 50,
+      maxLpgmClass: 3,
+    }),
+    false
+  );
+
+  // 警報 + 予想最大震度6弱 (55) -> 特別警報 (true)
+  assert.equal(
+    isEewSpecialWarning({
+      ...TEST_EEW_REPORTS[0],
+      maxScaleCode: 55,
+      maxLpgmClass: 0,
+    }),
+    true
+  );
+
+  // 警報 + 予想最大震度4 (40) + 長周期地震動階級4 -> 特別警報 (true)
+  assert.equal(
+    isEewSpecialWarning({
+      ...TEST_EEW_REPORTS[0],
+      maxScaleCode: 40,
+      maxLpgmClass: 4,
+    }),
+    true
+  );
+
+  // デモシーケンス第1報(警報) -> 第3報(特別警報) -> 最終報(特別警報) と Noto 地震同期確認
+  assert.equal(isEewSpecialWarning(TEST_EEW_REPORTS[0]), false);
+  assert.equal(isEewSpecialWarning(TEST_EEW_REPORTS[1]), true);
+  assert.equal(isEewSpecialWarning(TEST_EEW_REPORTS[2]), true);
+  assert.equal(doesEarthquakeMatchEew(TEST_NOTO_EARTHQUAKE_DEMO, TEST_EEW_REPORTS[2]), true);
 });

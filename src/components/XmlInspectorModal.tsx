@@ -22,6 +22,7 @@ interface XmlInspectorModalProps {
   onTriggerTestEarthquake: () => void;
   onTriggerTestEew?: () => void;
   onTriggerTestEewForecast?: () => void;
+  onTriggerTestEewToTsunami?: () => void;
   onTriggerTestVolcano: () => void;
   onTriggerTestTsunami?: () => void;
   onToggleTsunamiDemo?: () => void;
@@ -49,6 +50,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
   onTriggerTestEarthquake,
   onTriggerTestEew,
   onTriggerTestEewForecast,
+  onTriggerTestEewToTsunami,
   onTriggerTestVolcano,
   onTriggerTestTsunami,
   onToggleTsunamiDemo,
@@ -247,6 +249,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                   {onTriggerTestEew && (
                     <button
                       type="button"
+                      data-testid="demo-eew-warning-btn"
                       onClick={() => {
                         onTriggerTestEew();
                         onClose();
@@ -259,6 +262,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                   {onTriggerTestEewForecast && (
                     <button
                       type="button"
+                      data-testid="demo-eew-forecast-btn"
                       onClick={() => {
                         onTriggerTestEewForecast();
                         onClose();
@@ -268,9 +272,23 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                       ⚠️ EEW予報デモ (P/S波・長周期なし)
                     </button>
                   )}
+                  {onTriggerTestEewToTsunami && (
+                    <button
+                      type="button"
+                      data-testid="demo-eew-tsunami-btn"
+                      onClick={() => {
+                        onTriggerTestEewToTsunami();
+                        onClose();
+                      }}
+                      className="px-3 py-2.5 text-xs font-black bg-gradient-to-r from-rose-950 via-purple-950 to-indigo-950 hover:from-rose-900 hover:via-purple-900 hover:to-indigo-900 border-2 border-yellow-400 text-yellow-100 transition-colors text-center cursor-pointer shadow-md shadow-purple-950/80"
+                    >
+                      🌊🚨 EEW→津波連動デモ (警報→特別警報→大津波警報)
+                    </button>
+                  )}
                   {onToggleTsunamiDemo && (
                     <button
                       type="button"
+                      data-testid="demo-tsunami-toggle-btn"
                       onClick={() => {
                         onToggleTsunamiDemo();
                         onClose();
@@ -282,6 +300,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                   )}
                   <button
                     type="button"
+                    data-testid="demo-earthquake-btn"
                     onClick={() => {
                       onTriggerTestEarthquake();
                       onClose();
@@ -292,6 +311,7 @@ export const XmlInspectorModal: React.FC<XmlInspectorModalProps> = ({
                   </button>
                   <button
                     type="button"
+                    data-testid="demo-volcano-btn"
                     onClick={() => {
                       onTriggerTestVolcano();
                       onClose();
