@@ -616,10 +616,35 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
     const tf = data.tsunamiForecast;
 
     if (isAct && tf && tf.areas && tf.areas.length > 0) {
-      const accentColor = '#EF4444';
-      const badgeLabel = '津波警報・注意報';
-      const badgeSub = '直ちに避難';
-      const title = '津波警報・注意報 発表中（直ちに高台へ避難してください）';
+      const highestGrade = getTsunamiHighestGrade(tf);
+      const accentColor =
+        highestGrade === 'MajorWarning'
+          ? '#C026D3'
+          : highestGrade === 'Warning'
+            ? '#EF4444'
+            : highestGrade === 'Watch'
+              ? '#F59E0B'
+              : '#38BDF8';
+      const badgeLabel =
+        highestGrade === 'MajorWarning'
+          ? '大津波警報'
+          : highestGrade === 'Warning'
+            ? '津波警報'
+            : highestGrade === 'Watch'
+              ? '津波注意報'
+              : '津波予報';
+      const badgeSub =
+        highestGrade === 'MajorWarning'
+          ? '直ちに高台へ避難'
+          : highestGrade === 'Warning'
+            ? '直ちに避難'
+            : '海岸から離れて';
+      const title =
+        highestGrade === 'MajorWarning'
+          ? '大津波警報 発表中（ただちに高台へ避難してください）'
+          : highestGrade === 'Warning'
+            ? '津波警報 発表中（直ちに高台へ避難してください）'
+            : '津波警報・注意報 発表中（海岸から離れてください）';
       const timeLabel = tf.issueTime || defaultTimeLabel;
 
       const items: SceneFeedItem[] = [
@@ -638,6 +663,18 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
         },
       ];
 
+      if (activeEew && isEewStillActive(activeEew)) {
+        const kindLabel = isEewSpecialWarning(activeEew)
+          ? '特別警報'
+          : isEewWarning(activeEew)
+            ? '警報'
+            : '予報';
+        items.push({
+          prefix: `【緊急地震速報（${kindLabel}）】`,
+          text: `第${activeEew.serial}報 震源: ${activeEew.hypocenterName} 最大予測震度: ${activeEew.maxScaleLabel} M${activeEew.magnitude > 0 ? activeEew.magnitude.toFixed(1) : '不明'}。P波・S波の到達と強い揺れにも警戒してください。`,
+        });
+      }
+
       return {
         sceneId: 'tsunami',
         badgeLabel,
@@ -646,7 +683,7 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
         timeLabel,
         accentColor,
         items,
-        textKey: `tsunami-${tf.id}-${tf.areas.length}`,
+        textKey: `tsunami-${tf.id}-${tf.areas.length}-${activeEew?.serial || 0}`,
       };
     }
 
@@ -929,15 +966,66 @@ export function buildBottomFlipFeed(
       });
     }
 
+    // Integrated active EEW cards (Tsunami remains Priority 1 above, followed by active EEW)
+    let eewHeaderSuffix = '';
+    if (isEewActive && activeEew) {
+      const isSpecial = isEewSpecialWarning(activeEew);
+      const isWarn = isEewWarning(activeEew);
+      const isFin = isEewFinal(activeEew);
+      const eewAccent = isSpecial ? '#9333EA' : isWarn ? '#EF4444' : '#F59E0B';
+      const kindLabel = isSpecial ? '特別警報' : isWarn ? '警報' : '予報';
+      const magStr =
+        activeEew.magnitude > 0 ? `M${activeEew.magnitude.toFixed(1)}` : 'M不明';
+      const depthStr =
+        activeEew.depthKm >= 0 ? `深さ約${activeEew.depthKm}km` : '深さ不明';
+
+      eewHeaderSuffix = `｜緊急地震速報（${kindLabel}） 第${activeEew.serial}報`;
+
+      cards.push({
+        id: `tsunami-eew-alert-${activeEew.serial}`,
+        badge: `緊急地震速報（${kindLabel}）`,
+        badgeBg: isSpecial
+          ? 'bg-purple-600 text-white animate-pulse'
+          : isWarn
+            ? 'bg-red-600 text-white animate-pulse'
+            : 'bg-amber-500 text-slate-950 font-bold',
+        mainText: `緊急地震速報(${kindLabel}) 強い揺れに警戒`,
+        subText: `第${activeEew.serial}報${isFin ? ' (最終報)' : ''} P波・S波表示中｜倒れやすい家具から離れ 身の安全を確保`,
+        accentColor: eewAccent,
+      });
+
+      cards.push({
+        id: `tsunami-eew-scale-${activeEew.serial}`,
+        badge: '予想震度・規模',
+        badgeBg: 'bg-white text-slate-950 font-black',
+        mainText: `予想最大震度${activeEew.maxScaleLabel || '不明'} ${magStr}`,
+        subText: `震源: ${activeEew.hypocenterName || '調査中'}　${depthStr}`,
+        accentColor: eewAccent,
+      });
+
+      if (activeEew.maxLpgmClass && activeEew.maxLpgmClass >= 1) {
+        cards.push({
+          id: `tsunami-eew-lpgm-${activeEew.serial}`,
+          badge: '長周期地震動',
+          badgeBg: 'bg-orange-600 text-white font-bold',
+          mainText: `長周期地震動 最大予測 ${activeEew.maxLpgmLabel || `階級${activeEew.maxLpgmClass}`}`,
+          subText: '高層ビル等での大きな揺れにも警戒してください',
+          accentColor: '#EA580C',
+        });
+      }
+    }
+
+    const baseTsunamiHeaderTitle =
+      highestGrade === 'MajorWarning'
+        ? '大津波警報 発表中'
+        : highestGrade === 'Warning'
+          ? '津波警報 発表中'
+          : '津波注意報 発表中';
+
     return {
       isFlipMode: true,
       cards,
-      headerTitle:
-        highestGrade === 'MajorWarning'
-          ? '大津波警報 発表中'
-          : highestGrade === 'Warning'
-            ? '津波警報 発表中'
-            : '津波注意報 発表中',
+      headerTitle: `${baseTsunamiHeaderTitle}${eewHeaderSuffix}`,
       headerTime: timeLabel,
       accentColor:
         highestGrade === 'MajorWarning'

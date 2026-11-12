@@ -9,6 +9,10 @@ import {
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
   isEarthquakeAwaitingDetail,
+  resolveEffectiveScene,
+  resolveInterruptKindOnEew,
+  resolveInterruptKindOnTsunami,
+  resolveInterruptKindOnTsunamiChange,
   shouldBlockNormalPatrolAdvance,
 } from './quakeInterrupt';
 
@@ -486,5 +490,51 @@ test('shouldBlockNormalPatrolAdvance does not freeze normal patrol when interrup
       isEewActive: false,
     }),
     true
+  );
+});
+
+test('resolveEffectiveScene and interrupt priority keep tsunami prioritized while preserving EEW updates', () => {
+  assert.equal(resolveEffectiveScene('radar', 'tsunami'), 'tsunami');
+  assert.equal(resolveEffectiveScene('earthquake', 'tsunami'), 'tsunami');
+  assert.equal(resolveEffectiveScene('radar', 'eew'), 'earthquake');
+  assert.equal(resolveEffectiveScene('radar', 'earthquake'), 'earthquake');
+  assert.equal(resolveEffectiveScene('radar', 'volcano'), 'volcano');
+  assert.equal(resolveEffectiveScene('amedas', 'none'), 'amedas');
+
+  // When tsunami warning arrives during active EEW or earthquake, interruptKind transitions to 'tsunami'
+  assert.equal(resolveInterruptKindOnTsunami('eew', 'warning_or_above'), 'tsunami');
+  assert.equal(resolveInterruptKindOnTsunami('earthquake', 'warning_or_above'), 'tsunami');
+  assert.equal(resolveInterruptKindOnTsunami('none', 'warning_or_above'), 'none');
+  assert.equal(resolveInterruptKindOnTsunami('none', 'warning_or_above', true), 'tsunami');
+  assert.equal(resolveInterruptKindOnTsunami('eew', 'forecast'), 'eew');
+  assert.equal(resolveInterruptKindOnTsunami('eew', 'none'), 'eew');
+
+  // Follow-up EEW serial arriving while tsunami warning is active must preserve 'tsunami' priority
+  assert.equal(resolveInterruptKindOnEew('tsunami', 'warning_or_above'), 'tsunami');
+  assert.equal(resolveInterruptKindOnEew('none', 'warning_or_above'), 'tsunami');
+  assert.equal(resolveInterruptKindOnEew('tsunami', 'none'), 'tsunami');
+  assert.equal(resolveInterruptKindOnEew('none', 'none'), 'eew');
+  assert.equal(resolveInterruptKindOnEew('earthquake', 'forecast'), 'eew');
+
+  // When tsunami warning is cancelled ('warning_or_above' -> 'none'/'forecast'), release 'tsunami' lock cleanly
+  assert.equal(
+    resolveInterruptKindOnTsunamiChange('tsunami', 'warning_or_above', 'none', true),
+    'eew'
+  );
+  assert.equal(
+    resolveInterruptKindOnTsunamiChange('tsunami', 'warning_or_above', 'none', false),
+    'none'
+  );
+  assert.equal(
+    resolveInterruptKindOnTsunamiChange('tsunami', 'warning_or_above', 'forecast', false),
+    'none'
+  );
+  assert.equal(
+    resolveInterruptKindOnTsunamiChange('eew', 'none', 'warning_or_above', true),
+    'tsunami'
+  );
+  assert.equal(
+    resolveInterruptKindOnTsunamiChange('earthquake', 'none', 'none', false),
+    'earthquake'
   );
 });

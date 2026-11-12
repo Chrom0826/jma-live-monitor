@@ -333,3 +333,91 @@ test('buildSceneFeed & buildBottomFlipFeed: render purple 緊急地震速報（�
   assert.ok(flipFeed!.cards[0].badgeBg.includes('bg-purple-600'));
   assert.ok(flipFeed!.cards[0].mainText.includes('緊急地震速報(特別警報) 強い揺れに警戒'));
 });
+
+test('buildSceneFeed & buildBottomFlipFeed: integrate active EEW under Tsunami priority when both are active', () => {
+  const specialEew = {
+    id: 'eew-noto-7',
+    eventId: 'ev-noto-1',
+    serial: 7,
+    issueTime: '20:00:52',
+    originTime: '20:00:03',
+    hypocenterName: '石川県能登地方',
+    lat: 37.49,
+    lon: 137.26,
+    depthKm: 16,
+    magnitude: 7.6,
+    isCancelled: false,
+    isTest: false,
+    isAssumedHypocenter: false,
+    maxScaleCode: 70,
+    maxScaleLabel: '7',
+    maxLpgmClass: 4 as const,
+    maxLpgmLabel: '階級4',
+    areas: [
+      { pref: '石川県', name: '石川県能登', scaleFrom: 70, scaleTo: 70, kindCode: '11', arrivalTime: '20:00:18', lpgmClass: 4 as const },
+    ],
+    receivedAtMs: Date.now(),
+    isWarning: true,
+    isFinal: true,
+  };
+
+  const tsunamiBundle = {
+    ...mockBundle,
+    tsunamiForecast: {
+      id: 'ts-noto-major',
+      issueTime: '20:05:00',
+      cancelled: false,
+      source: 'demo' as const,
+      areas: [
+        {
+          code: '360',
+          name: '石川県能登',
+          grade: 'MajorWarning' as const,
+          immediate: true,
+          firstHeightText: '津波到達中と推測',
+          maxHeightText: '５ｍ',
+          maxHeightValue: 5,
+        },
+        {
+          code: '350',
+          name: '富山県',
+          grade: 'Warning' as const,
+          immediate: true,
+          firstHeightText: '20:15 到達予想',
+          maxHeightText: '３ｍ',
+          maxHeightValue: 3,
+        },
+      ],
+    },
+  };
+
+  const sceneFeed = buildSceneFeed({
+    effectiveScene: 'tsunami',
+    data: tsunamiBundle,
+    activeEew: specialEew,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: INITIAL_TYPHOONS[0],
+    activeVolcano: null,
+    amedasMetric: 'temp',
+  });
+  assert.equal(sceneFeed.sceneId, 'tsunami');
+  assert.equal(sceneFeed.badgeLabel, '大津波警報');
+  assert.equal(sceneFeed.accentColor, '#C026D3');
+  assert.ok(sceneFeed.items.some((i) => i.prefix?.includes('緊急地震速報（特別警報）')));
+
+  const flipFeed = buildBottomFlipFeed({
+    effectiveScene: 'tsunami',
+    data: tsunamiBundle,
+    activeEew: specialEew,
+  });
+  assert.ok(flipFeed);
+  assert.equal(flipFeed!.accentColor, '#C026D3');
+  assert.ok(flipFeed!.headerTitle.startsWith('大津波警報 発表中'));
+  assert.ok(flipFeed!.headerTitle.includes('緊急地震速報（特別警報）'));
+  assert.equal(flipFeed!.cards[0].badge, '大津波警報');
+  assert.ok(flipFeed!.cards.some((c) => c.id.startsWith('tsunami-eew-alert-')));
+  assert.ok(flipFeed!.cards.some((c) => c.id.startsWith('tsunami-eew-scale-')));
+  assert.ok(flipFeed!.cards.some((c) => c.id.startsWith('tsunami-eew-lpgm-')));
+});

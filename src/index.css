@@ -209,7 +209,7 @@
   );
 }
 
-/* Tsunami Warning (津波警報): Bold Red + High-visibility Yellow + Dark accent stripes */
+/* Tsunami Warning (津波警報): Bold Red + Crisp White + Dark accent stripes */
 .hazard-stripe-tsunami-warning {
   background-image: repeating-linear-gradient(
     -45deg,
@@ -217,14 +217,14 @@
     #dc2626 9px,
     #0b0d12 9px,
     #0b0d12 11px,
-    #facc15 11px,
-    #facc15 20px,
+    #ffffff 11px,
+    #ffffff 20px,
     #0b0d12 20px,
     #0b0d12 22px
   );
 }
 
-/* Tsunami Major Warning (大津波警報): Bold Purple + High-visibility Yellow + Dark accent stripes */
+/* Tsunami Major Warning (大津波警報): Bold Purple + Crisp White + Dark accent stripes */
 .hazard-stripe-tsunami-major {
   background-image: repeating-linear-gradient(
     -45deg,
@@ -232,8 +232,8 @@
     #9333ea 9px,
     #0b0d12 9px,
     #0b0d12 11px,
-    #facc15 11px,
-    #facc15 20px,
+    #ffffff 11px,
+    #ffffff 20px,
     #0b0d12 20px,
     #0b0d12 22px
   );

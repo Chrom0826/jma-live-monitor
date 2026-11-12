@@ -69,6 +69,7 @@ import {
   getTsunamiAlertSeverity,
   getTsunamiHighestGrade,
   hasActualEewLpgm,
+  isEewFinal,
   isEewSpecialWarning,
   isEewStillActive,
   isEewWarning,
@@ -94,6 +95,10 @@ import {
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
   isEarthquakeAwaitingDetail,
+  resolveEffectiveScene,
+  resolveInterruptKindOnEew,
+  resolveInterruptKindOnTsunami,
+  resolveInterruptKindOnTsunamiChange,
   shouldBlockNormalPatrolAdvance,
 } from './utils/quakeInterrupt';
 
@@ -932,6 +937,9 @@ export default function App() {
   const tsunamiSeverityRef = useRef<'none' | 'forecast' | 'warning_or_above'>(
     'none'
   );
+  const prevTsunamiSeverityRef = useRef<'none' | 'forecast' | 'warning_or_above'>(
+    'none'
+  );
 
   // Unified handler for incoming EEW (緊急地震速報 予報・警報・発表検出)
   const handleIncomingEew = useCallback((eew: EewReport) => {
@@ -949,7 +957,12 @@ export default function App() {
         eqConfirmedHoldTimerRef.current = null;
       }
       setEewDisplayMode('intensity');
-      setInterruptKind('eew');
+      if (tsunamiSeverityRef.current === 'warning_or_above') {
+        setActiveScene('tsunami');
+      }
+      setInterruptKind((prev) =>
+        resolveInterruptKindOnEew(prev, tsunamiSeverityRef.current)
+      );
     }
   }, []);
 
@@ -1031,9 +1044,11 @@ export default function App() {
         }, 5 * 60 * 1000);
 
         setInterruptKind((prev) =>
-          prev === 'eew' && isEewStillActive(activeEewRef.current)
-            ? 'eew'
-            : 'earthquake'
+          prev === 'tsunami' && tsunamiSeverityRef.current === 'warning_or_above'
+            ? 'tsunami'
+            : prev === 'eew' && isEewStillActive(activeEewRef.current)
+              ? 'eew'
+              : 'earthquake'
         );
         if (action.resetFlipLoop) {
           setFlipSessionNonce((n) => n + 1);
@@ -1047,9 +1062,11 @@ export default function App() {
           eqConfirmedHoldTimerRef.current = null;
         }
         setInterruptKind((prev) =>
-          prev === 'eew' && isEewStillActive(activeEewRef.current)
-            ? 'eew'
-            : 'earthquake'
+          prev === 'tsunami' && tsunamiSeverityRef.current === 'warning_or_above'
+            ? 'tsunami'
+            : prev === 'eew' && isEewStillActive(activeEewRef.current)
+              ? 'eew'
+              : 'earthquake'
         );
         if (action.resetFlipLoop) {
           setFlipSessionNonce((n) => n + 1);
@@ -1149,6 +1166,9 @@ export default function App() {
         return {
           ...bundle,
           earthquakes: nextEq,
+          ...(isTsunamiDemoRef.current && prev.tsunamiForecast?.source === 'demo'
+            ? { tsunamiForecast: prev.tsunamiForecast }
+            : {}),
         };
       });
 
@@ -1238,7 +1258,9 @@ export default function App() {
                 handleIncomingEew(det);
               } else {
                 eqLockUntilConfirmedRef.current = true;
-                setInterruptKind('eew');
+                setInterruptKind((prev) =>
+                  resolveInterruptKindOnEew(prev, tsunamiSeverityRef.current)
+                );
               }
               pollFastEarthquakeAndEew();
             }
@@ -1253,6 +1275,9 @@ export default function App() {
                 const sev = getTsunamiAlertSeverity(tsunami);
                 if (sev === 'warning_or_above') {
                   setActiveScene('tsunami');
+                  setInterruptKind((prev) =>
+                    resolveInterruptKindOnTsunami(prev, sev, true)
+                  );
                 }
               }
             }
@@ -1373,13 +1398,6 @@ export default function App() {
   );
   tsunamiSeverityRef.current = tsunamiSeverity;
 
-  // If a Tsunami Warning or Major Warning or Advisory is active, continuously lock onto the tsunami scene until cancelled!
-  useEffect(() => {
-    if (tsunamiSeverity === 'warning_or_above') {
-      setActiveScene('tsunami');
-    }
-  }, [tsunamiSeverity]);
-
   // When Tsunami Forecast ('forecast' / 若干の海面変動) is active, dynamically include 'tsunami' in the normal loop.
   // Order: ... -> forecast -> earthquake -> tsunami -> radar -> ...
   // When 'warning_or_above' is active, scenes are restricted so it continuously locks onto 'tsunami'.
@@ -1404,6 +1422,45 @@ export default function App() {
     // 'none': do not include tsunami in normal automatic loop unless explicitly forced
     return enabledScenes.filter((s) => s !== 'tsunami');
   }, [enabledScenes, tsunamiSeverity]);
+
+  // If a Tsunami Warning or Major Warning or Advisory is active, continuously lock onto the tsunami scene until cancelled!
+  // If an EEW or earthquake interrupt is currently active, switch to 'tsunami' priority while preserving activeEew (P/S waves).
+  // When tsunami warning is cancelled, release 'tsunami' interrupt back to active EEW (if still active) or normal patrol.
+  useEffect(() => {
+    const prevSeverity = prevTsunamiSeverityRef.current;
+    prevTsunamiSeverityRef.current = tsunamiSeverity;
+    const isEewLiveNow = Boolean(
+      activeEewRef.current && isEewStillActive(activeEewRef.current)
+    );
+
+    if (tsunamiSeverity === 'warning_or_above') {
+      setActiveScene('tsunami');
+      setInterruptKind((prev) =>
+        resolveInterruptKindOnTsunamiChange(
+          prev,
+          prevSeverity,
+          tsunamiSeverity,
+          isEewLiveNow
+        )
+      );
+    } else if (prevSeverity === 'warning_or_above') {
+      setInterruptKind((prev) =>
+        resolveInterruptKindOnTsunamiChange(
+          prev,
+          prevSeverity,
+          tsunamiSeverity,
+          isEewLiveNow
+        )
+      );
+      if (tsunamiSeverity === 'none') {
+        setActiveScene((prev) =>
+          prev === 'tsunami'
+            ? getNextSceneId('tsunami', effectiveEnabledScenes)
+            : prev
+        );
+      }
+    }
+  }, [tsunamiSeverity, effectiveEnabledScenes]);
 
   // Step to next scene in the normal loop:
   // 1. In `'warnings'` (`regionScope === 'national' || 'auto'`), start at 全国表示, then zoom ONLY into divisions with 警報/特別警報 (`severeWarningDivisions`), return to 全国表示, then advance to next scene.
@@ -1812,7 +1869,7 @@ export default function App() {
     }, 8000);
     eewDemoTimerRef.current.push(t2);
 
-    // t = 12s: 大津波警報発表！ EEWを終了し津波警報シーンへ自動遷移（紫＋黄強調斜線）
+    // t = 12s: 大津波警報発表！ P波/S波とEEW情報を保持したまま津波優先で統合表示へ自動遷移（紫＋白強調斜線）
     const t3 = setTimeout(() => {
       const nowMs = Date.now();
       const liveTsunami = stampDemoTsunamiTimestamps(
@@ -1822,13 +1879,12 @@ export default function App() {
       );
       eqLockUntilConfirmedRef.current = false;
       eqUnconfirmedTimedOutRef.current = false;
-      setActiveEew(null);
       setIsTsunamiDemo(true);
       setData((d) => ({
         ...d,
         tsunamiForecast: liveTsunami,
       }));
-      setInterruptKind('none');
+      setInterruptKind('tsunami');
       setActiveScene('tsunami');
       setFlipSessionNonce((n) => n + 1);
     }, 12000);
@@ -2002,14 +2058,7 @@ export default function App() {
     );
   }, [regionScope, patrolRegionId]);
 
-  const effectiveScene: SceneId =
-    interruptKind === 'earthquake' || interruptKind === 'eew'
-      ? 'earthquake'
-      : interruptKind === 'volcano'
-        ? 'volcano'
-        : interruptKind === 'tsunami'
-           ? 'tsunami'
-           : activeScene;
+  const effectiveScene: SceneId = resolveEffectiveScene(activeScene, interruptKind);
 
   // The right detail panel is hidden for 'forecast' (全国天気予報) and 'radar' (雨雲レーダー) scenes,
   // sliding smoothly out to the right.
@@ -2169,42 +2218,71 @@ export default function App() {
     titleClass: string;
     badgeText: string | null;
     badgeClass: string;
+    secondaryBadgeText: string | null;
+    secondaryBadgeShortText: string | null;
+    secondaryBadgeClass: string;
   }>(() => {
+    const isEewLive = Boolean(activeEew && isEewStillActive(activeEew));
+    const integratedEewBadge =
+      isEewLive && activeEew
+        ? (() => {
+            const isSpecial = isEewSpecialWarning(activeEew);
+            const isWarn = isEewWarning(activeEew);
+            const fin = isEewFinal(activeEew) ? '・最終' : '';
+            const kindText = isSpecial ? '特別警報' : isWarn ? '警報' : '予報';
+            return {
+              secondaryBadgeText: `緊急地震速報(${kindText}) 第${activeEew.serial}報${fin}・P/S波`,
+              secondaryBadgeShortText: `EEW(${kindText}) P/S波`,
+              secondaryBadgeClass: isSpecial
+                ? 'bg-purple-700 text-white border border-purple-300/80 font-black'
+                : isWarn
+                  ? 'bg-red-600 text-white border border-red-300/80 font-black'
+                  : 'bg-amber-500 text-slate-950 border border-amber-200 font-black',
+            };
+          })()
+        : {
+            secondaryBadgeText: null,
+            secondaryBadgeShortText: null,
+            secondaryBadgeClass: '',
+          };
+
     if (effectiveScene === 'tsunami' && highestTsunamiGrade) {
       if (highestTsunamiGrade === 'MajorWarning') {
         return {
           kind: 'tsunami_major',
           stripeBg:
-            'repeating-linear-gradient(-45deg, #9333EA 0px, #9333EA 11px, #FACC15 11px, #FACC15 22px)',
+            'repeating-linear-gradient(-45deg, #9333EA 0px, #9333EA 11px, #FFFFFF 11px, #FFFFFF 22px)',
           hasBottomStripe: true,
           topAccentHex: null,
           boxClass:
-            'bg-[#1D0A30]/96 border-2 border-[#FACC15] shadow-[0_0_26px_rgba(147,51,234,0.7),0_0_14px_rgba(250,204,21,0.5)]',
+            'bg-[#1D0A30]/96 border-2 border-white shadow-[0_0_26px_rgba(147,51,234,0.7),0_0_14px_rgba(255,255,255,0.42)]',
           mobileBoxClass:
-            'bg-[#1D0A30] border-b-2 border-[#FACC15] shadow-[0_0_18px_rgba(147,51,234,0.6)]',
+            'bg-[#1D0A30] border-b-2 border-white shadow-[0_0_18px_rgba(147,51,234,0.6)]',
           titleClass:
-            'text-[#FEF08A] drop-shadow-[0_0_10px_rgba(250,204,21,0.65)]',
+            'text-white drop-shadow-[0_0_10px_rgba(255,255,255,0.45)]',
           badgeText: '直ちに高台へ避難',
           badgeClass:
-            'bg-[#FACC15] text-[#111827] border border-yellow-200 font-black',
+            'bg-white text-[#111827] border border-white font-black',
+          ...integratedEewBadge,
         };
       }
       if (highestTsunamiGrade === 'Warning') {
         return {
           kind: 'tsunami_warning',
           stripeBg:
-            'repeating-linear-gradient(-45deg, #DC2626 0px, #DC2626 11px, #FACC15 11px, #FACC15 22px)',
+            'repeating-linear-gradient(-45deg, #DC2626 0px, #DC2626 11px, #FFFFFF 11px, #FFFFFF 22px)',
           hasBottomStripe: true,
           topAccentHex: null,
           boxClass:
-            'bg-[#260B0F]/96 border-2 border-[#FACC15] shadow-[0_0_24px_rgba(220,38,38,0.7),0_0_12px_rgba(250,204,21,0.45)]',
+            'bg-[#260B0F]/96 border-2 border-white shadow-[0_0_24px_rgba(220,38,38,0.7),0_0_12px_rgba(255,255,255,0.38)]',
           mobileBoxClass:
-            'bg-[#260B0F] border-b-2 border-[#FACC15] shadow-[0_0_16px_rgba(220,38,38,0.55)]',
+            'bg-[#260B0F] border-b-2 border-white shadow-[0_0_16px_rgba(220,38,38,0.55)]',
           titleClass:
-            'text-[#FEF08A] drop-shadow-[0_0_8px_rgba(250,204,21,0.55)]',
+            'text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.4)]',
           badgeText: '直ちに避難',
           badgeClass:
-            'bg-[#FACC15] text-[#111827] border border-yellow-200 font-black',
+            'bg-white text-[#111827] border border-white font-black',
+          ...integratedEewBadge,
         };
       }
       if (highestTsunamiGrade === 'Watch') {
@@ -2218,6 +2296,7 @@ export default function App() {
           titleClass: 'text-amber-200',
           badgeText: '海岸から離れて',
           badgeClass: 'bg-amber-400 text-slate-950 font-black',
+          ...integratedEewBadge,
         };
       }
       return {
@@ -2230,10 +2309,11 @@ export default function App() {
         titleClass: 'text-sky-100',
         badgeText: null,
         badgeClass: '',
+        ...integratedEewBadge,
       };
     }
 
-    if (effectiveScene === 'earthquake' && activeEew && isEewStillActive(activeEew)) {
+    if (effectiveScene === 'earthquake' && isEewLive && activeEew) {
       if (isEewSpecialWarning(activeEew)) {
         return {
           kind: 'eew_special',
@@ -2249,6 +2329,9 @@ export default function App() {
           badgeText: `第${activeEew.serial}報${activeEew.isFinal ? '・最終' : ''}`,
           badgeClass:
             'bg-[#9333EA] text-white border border-purple-300/70 font-black',
+          secondaryBadgeText: null,
+          secondaryBadgeShortText: null,
+          secondaryBadgeClass: '',
         };
       }
       if (isEewWarning(activeEew)) {
@@ -2265,6 +2348,9 @@ export default function App() {
           badgeText: `第${activeEew.serial}報${activeEew.isFinal ? '・最終' : ''}`,
           badgeClass:
             'bg-[#DC2626] text-white border border-red-300/70 font-black',
+          secondaryBadgeText: null,
+          secondaryBadgeShortText: null,
+          secondaryBadgeClass: '',
         };
       }
       return {
@@ -2277,6 +2363,9 @@ export default function App() {
         titleClass: 'text-amber-100',
         badgeText: `第${activeEew.serial}報${activeEew.isFinal ? '・最終' : ''}`,
         badgeClass: 'bg-amber-500 text-slate-950 font-black',
+        secondaryBadgeText: null,
+        secondaryBadgeShortText: null,
+        secondaryBadgeClass: '',
       };
     }
 
@@ -2290,6 +2379,9 @@ export default function App() {
       titleClass: 'text-white',
       badgeText: null,
       badgeClass: '',
+      secondaryBadgeText: null,
+      secondaryBadgeShortText: null,
+      secondaryBadgeClass: '',
     };
   }, [effectiveScene, highestTsunamiGrade, activeEew]);
 
@@ -2537,7 +2629,7 @@ export default function App() {
                     >
                       {effectiveSceneTitle}
                     </h1>
-                    {headerHazard.badgeText && (
+                    {headerHazard.badgeText && !headerHazard.secondaryBadgeShortText && (
                       <span
                         className={`px-1.5 py-0.5 text-[10px] rounded-xs shrink-0 whitespace-nowrap leading-none ${headerHazard.badgeClass}`}
                       >
@@ -2549,6 +2641,23 @@ export default function App() {
                     {compactUpdateDateText}
                   </span>
                 </div>
+                {headerHazard.secondaryBadgeShortText && (
+                  <div className="flex flex-wrap items-center gap-1">
+                    {headerHazard.badgeText && (
+                      <span
+                        className={`px-1.5 py-0.5 text-[10px] rounded-xs shrink-0 whitespace-nowrap leading-none ${headerHazard.badgeClass}`}
+                      >
+                        {headerHazard.badgeText}
+                      </span>
+                    )}
+                    <span
+                      data-testid="mobile-integrated-eew-badge"
+                      className={`px-1.5 py-0.5 text-[10px] rounded-xs shrink-0 whitespace-nowrap leading-none ${headerHazard.secondaryBadgeClass}`}
+                    >
+                      {headerHazard.secondaryBadgeText || headerHazard.secondaryBadgeShortText}
+                    </span>
+                  </div>
+                )}
 
                 <nav
                   aria-label="表示シーン切替"
@@ -2957,6 +3066,14 @@ export default function App() {
                         className={`px-2 py-0.5 text-xs rounded-xs shrink-0 whitespace-nowrap leading-tight ${headerHazard.badgeClass}`}
                       >
                         {headerHazard.badgeText}
+                      </span>
+                    )}
+                    {headerHazard.secondaryBadgeText && (
+                      <span
+                        data-testid="desktop-integrated-eew-badge"
+                        className={`px-2 py-0.5 text-xs rounded-xs shrink-0 whitespace-nowrap leading-tight ${headerHazard.secondaryBadgeClass}`}
+                      >
+                        {headerHazard.secondaryBadgeText}
                       </span>
                     )}
                   </div>

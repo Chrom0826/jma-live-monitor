@@ -72,6 +72,7 @@ import {
   type TopoShape,
   type TopoViewport,
 } from '../utils/jmaTopology';
+import { resolveEffectiveScene } from '../utils/quakeInterrupt';
 
 let cachedJmaTopology: JmaTopology | null = null;
 let cachedClass20GeoJson: any = null;
@@ -827,16 +828,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     }>;
   } | null>(null);
 
-  const effectiveScene: SceneId =
-    interruptKind === 'earthquake' || interruptKind === 'eew'
-      ? 'earthquake'
-      : interruptKind === 'volcano'
-        ? 'volcano'
-        : interruptKind === 'tsunami'
-          ? 'tsunami'
-          : interruptKind === 'typhoon'
-            ? 'typhoon'
-            : activeScene;
+  const effectiveScene: SceneId = resolveEffectiveScene(activeScene, interruptKind);
 
   const isSingleTyphoonMode = useMemo(() => {
     const total = data.typhoons.length > 0 ? data.typhoons.length : 1;
@@ -1270,7 +1262,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   // Pre-compile active EEW forecast intensity choropleth polygons, epicenter projection, & major city labels
   // Matches JMA 188 subdivision areas (earthquake.json) exactly like the TV broadcast EEW map
   const preCompiledEew = useMemo(() => {
-    if (effectiveScene !== 'earthquake' || !activeEew || !isEewStillActive(activeEew)) {
+    if (
+      (effectiveScene !== 'earthquake' && effectiveScene !== 'tsunami') ||
+      !activeEew ||
+      !isEewStillActive(activeEew)
+    ) {
       return {
         areaBuckets: [] as Array<{ scale: number; hex: string; shapes: CompiledGeoShape[] }>,
         cityLabels: [] as Array<{ name: string; normX: number; normY: number }>,
@@ -1615,9 +1611,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       const viewMinNormY = (originY - padPx) / worldScale;
       const viewMaxNormY = (originY + height + padPx) / worldScale;
 
-      const hasActiveEew =
-        effectiveScene === 'earthquake' &&
-        Boolean(activeEew && isEewStillActive(activeEew));
+      const isEewLive = Boolean(activeEew && isEewStillActive(activeEew));
+      const hasActiveEew = effectiveScene === 'earthquake' && isEewLive;
+      const hasTsunamiWithEew = effectiveScene === 'tsunami' && isEewLive;
 
       // ==================== A. RENDER 60FPS HIGH-DPI BASE MAP (`baseMapCanvasRef`) ====================
       if (baseCanvas) {
@@ -1635,7 +1631,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             : effectiveScene === 'earthquake'
               ? `earthquake|${hasActiveEew ? `eew:${activeEew?.id || ''}:${activeEew?.serial || 0}:${eewDisplayMode}` : `obs:${selectedEarthquake.id}`}|${selectedEarthquake.issueTypeLabel || ''}|${selectedEarthquake.isConfirmed === false ? 0 : 1}`
               : effectiveScene === 'tsunami'
-                ? 'tsunami'
+                ? `tsunami|${hasTsunamiWithEew ? `eew:${activeEew?.id || ''}:${activeEew?.serial || 0}:${eewDisplayMode}` : 'plain'}`
                 : 'blank';
         const baseSig = `${targetW}x${targetH}@${dpr}|${center.lat.toFixed(6)},${center.lng.toFixed(6)},${currentZoom.toFixed(5)}|${moving ? 1 : 0}|${compiledVersion}|${baseSceneKey}`;
         const baseDataMatches =
@@ -1644,7 +1640,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             : effectiveScene === 'earthquake'
               ? baseMapDataRef.current.eq === preCompiledEarthquake &&
                 baseMapDataRef.current.eew === preCompiledEew
-              : true;
+              : effectiveScene === 'tsunami'
+                ? baseMapDataRef.current.eew === preCompiledEew
+                : true;
 
         const bCtx =
           sizeChanged ||
@@ -1659,7 +1657,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           baseMapDataRef.current.eq =
             effectiveScene === 'earthquake' ? preCompiledEarthquake : null;
           baseMapDataRef.current.eew =
-            effectiveScene === 'earthquake' ? preCompiledEew : null;
+            effectiveScene === 'earthquake' || effectiveScene === 'tsunami'
+              ? preCompiledEew
+              : null;
           bCtx.save();
           bCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
           bCtx.fillStyle = '#0E1014';
@@ -1954,9 +1954,31 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             } else {
               const isTsunami = effectiveScene === 'tsunami';
               fillLand(isTsunami ? '#28303D' : '#232731');
+              if (hasTsunamiWithEew && preCompiledEew.areaBuckets.length > 0) {
+                for (let b = 0; b < preCompiledEew.areaBuckets.length; b++) {
+                  const bucket = preCompiledEew.areaBuckets[b];
+                  bCtx.beginPath();
+                  let anyInBucket = false;
+                  for (let i = 0; i < bucket.shapes.length; i++) {
+                    const sh = bucket.shapes[i];
+                    if (!isShapeVisible(sh)) continue;
+                    traceShapePath(bCtx, sh);
+                    anyInBucket = true;
+                  }
+                  if (anyInBucket) {
+                    bCtx.fillStyle = bucket.hex;
+                    bCtx.globalAlpha = 0.45;
+                    bCtx.fill();
+                    bCtx.globalAlpha = 1.0;
+                    bCtx.strokeStyle = bucket.hex;
+                    bCtx.lineWidth = 1.2;
+                    bCtx.stroke();
+                  }
+                }
+              }
               strokeArcKinds(
                 ['coast', 'pref', 'division'],
-                isTsunami ? '#151922' : '#4B5563',
+                isTsunami ? (hasTsunamiWithEew ? '#4B5563' : '#151922') : '#4B5563',
                 currentZoom >= 7 ? 1.3 : 1.0
               );
               delete baseCanvas.dataset.focusedDivisionCode;
@@ -2149,7 +2171,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               // Crisp Blank Map (`白地図`) for `radar`, `amedas`, `typhoon`, `forecast`, `earthquake`, `volcano`, `tsunami`
               const isTsunami = effectiveScene === 'tsunami';
               const fillCol = isTsunami ? '#28303D' : '#232731';
-              const borderCol = isTsunami ? '#151922' : '#4B5563';
+              const borderCol = isTsunami ? (hasTsunamiWithEew ? '#4B5563' : '#151922') : '#4B5563';
               const borderW = currentZoom >= 7 ? 1.3 : 1.0;
 
               bCtx.beginPath();
@@ -2160,6 +2182,36 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               }
               bCtx.fillStyle = fillCol;
               bCtx.fill();
+
+              if (hasTsunamiWithEew && preCompiledEew.areaBuckets.length > 0) {
+                for (let b = 0; b < preCompiledEew.areaBuckets.length; b++) {
+                  const bucket = preCompiledEew.areaBuckets[b];
+                  bCtx.beginPath();
+                  let anyInBucket = false;
+                  for (let i = 0; i < bucket.shapes.length; i++) {
+                    const sh = bucket.shapes[i];
+                    if (!isShapeVisible(sh)) continue;
+                    traceShapePath(bCtx, sh);
+                    anyInBucket = true;
+                  }
+                  if (anyInBucket) {
+                    bCtx.fillStyle = bucket.hex;
+                    bCtx.globalAlpha = 0.45;
+                    bCtx.fill();
+                    bCtx.globalAlpha = 1.0;
+                    bCtx.strokeStyle = bucket.hex;
+                    bCtx.lineWidth = 1.2;
+                    bCtx.stroke();
+                  }
+                }
+              }
+
+              bCtx.beginPath();
+              for (let i = 0; i < divShapes.length; i++) {
+                const sh = divShapes[i];
+                if (!isShapeVisible(sh)) continue;
+                traceShapePath(bCtx, sh);
+              }
               bCtx.strokeStyle = borderCol;
               bCtx.lineWidth = borderW;
               bCtx.stroke();
@@ -2501,110 +2553,136 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         delete canvas.dataset.renderedWarningLabelsSample;
       }
 
-      // 3. Earthquake 60fps Canvas Epicenter, EEW P/S Wave Circles & Non-Overlapping Station Badges:
+      // 3. Earthquake / Tsunami-with-EEW 60fps Canvas Epicenter, EEW P/S Wave Circles & Non-Overlapping Station Badges:
       //    Replaces heavy DOM `L.divIcon` markers and SVG circle churn so zooming & EEW wave expansion are 60fps with zero lag!
-      if (effectiveScene === 'earthquake') {
-        if (hasActiveEew && activeEew) {
-          // 3a-eew. P-wave & S-wave concentric circles rendered directly on 60fps canvas (zero DOM/SVG churn)
-          if (preCompiledEew.epiNorm) {
-            const epiX =
-              preCompiledEew.epiNorm.normX * worldScale - originX;
-            const epiY =
-              preCompiledEew.epiNorm.normY * worldScale - originY;
-            const { pKm, sKm } = computeEewWaveRadiiKm(
-              activeEew.originTime,
-              preCompiledEew.eewDepth,
-              Date.now()
-            );
-            const kmToPx = preCompiledEew.kmToNormFactor * worldScale;
+      const drawActiveEewWavesAndLabels = (eewReport: EewReport) => {
+        if (preCompiledEew.epiNorm) {
+          const epiX =
+            preCompiledEew.epiNorm.normX * worldScale - originX;
+          const epiY =
+            preCompiledEew.epiNorm.normY * worldScale - originY;
+          const { pKm, sKm } = computeEewWaveRadiiKm(
+            eewReport.originTime,
+            preCompiledEew.eewDepth,
+            Date.now()
+          );
+          const kmToPx = preCompiledEew.kmToNormFactor * worldScale;
 
-            if (sKm > 0) {
-              const sRadiusPx = sKm * kmToPx;
-              ctx.save();
-              ctx.beginPath();
-              ctx.arc(epiX, epiY, sRadiusPx, 0, Math.PI * 2);
-              ctx.fillStyle = 'rgba(239, 68, 68, 0.16)';
-              ctx.fill();
-              ctx.strokeStyle = '#EF4444';
-              ctx.globalAlpha = 0.95;
-              ctx.lineWidth = 2.8;
-              ctx.stroke();
-              ctx.restore();
-            }
-
-            if (pKm > 0) {
-              const pRadiusPx = pKm * kmToPx;
-              ctx.save();
-              ctx.setLineDash([6, 6]);
-              ctx.beginPath();
-              ctx.arc(epiX, epiY, pRadiusPx, 0, Math.PI * 2);
-              ctx.strokeStyle = '#38BDF8';
-              ctx.globalAlpha = 0.85;
-              ctx.lineWidth = 2;
-              ctx.stroke();
-              ctx.restore();
-            }
-
-            // EEW Epicenter Cross (`✕`) drawn on top of wave circles
-            if (
-              epiX >= -32 &&
-              epiX <= width + 32 &&
-              epiY >= -32 &&
-              epiY <= height + 32
-            ) {
-              ctx.save();
-              ctx.lineCap = 'square';
-              ctx.beginPath();
-              ctx.moveTo(epiX - 11, epiY - 11);
-              ctx.lineTo(epiX + 11, epiY + 11);
-              ctx.moveTo(epiX + 11, epiY - 11);
-              ctx.lineTo(epiX - 11, epiY + 11);
-
-              ctx.strokeStyle = '#050810';
-              ctx.lineWidth = 8;
-              ctx.stroke();
-
-              ctx.strokeStyle = '#EF4444';
-              ctx.lineWidth = 5;
-              ctx.stroke();
-
-              ctx.strokeStyle = '#FFFFFF';
-              ctx.lineWidth = 1.8;
-              ctx.stroke();
-              ctx.restore();
-            }
-          }
-
-          // EEW発令中: 画像1のように余計な観測点ピンは非表示にし、主要都市名（「熊本市」「福岡市」等）をクリーンに描画
-          const cities = preCompiledEew.cityLabels;
-          if (cities.length > 0) {
+          if (sKm > 0) {
+            const sRadiusPx = sKm * kmToPx;
             ctx.save();
-            ctx.font = '800 11px "Noto Sans JP", sans-serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.lineJoin = 'round';
-            ctx.miterLimit = 2;
-            ctx.strokeStyle = '#05070A';
-            ctx.lineWidth = 3.2;
-            ctx.fillStyle = '#FFFFFF';
-
-            for (let i = 0; i < cities.length; i++) {
-              const c = cities[i];
-              const cx = c.normX * worldScale - originX;
-              const cy = c.normY * worldScale - originY;
-              if (
-                cx < -40 ||
-                cx > width + 40 ||
-                cy < -20 ||
-                cy > height + 20
-              ) {
-                continue;
-              }
-              ctx.strokeText(c.name, cx, cy);
-              ctx.fillText(c.name, cx, cy);
-            }
+            ctx.beginPath();
+            ctx.arc(epiX, epiY, sRadiusPx, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.16)';
+            ctx.fill();
+            ctx.strokeStyle = '#EF4444';
+            ctx.globalAlpha = 0.95;
+            ctx.lineWidth = 2.8;
+            ctx.stroke();
             ctx.restore();
           }
+
+          if (pKm > 0) {
+            const pRadiusPx = pKm * kmToPx;
+            ctx.save();
+            ctx.setLineDash([6, 6]);
+            ctx.beginPath();
+            ctx.arc(epiX, epiY, pRadiusPx, 0, Math.PI * 2);
+            ctx.strokeStyle = '#38BDF8';
+            ctx.globalAlpha = 0.85;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // EEW Epicenter Cross (`✕`) drawn on top of wave circles
+          if (
+            epiX >= -32 &&
+            epiX <= width + 32 &&
+            epiY >= -32 &&
+            epiY <= height + 32
+          ) {
+            ctx.save();
+            ctx.lineCap = 'square';
+            ctx.beginPath();
+            ctx.moveTo(epiX - 11, epiY - 11);
+            ctx.lineTo(epiX + 11, epiY + 11);
+            ctx.moveTo(epiX + 11, epiY - 11);
+            ctx.lineTo(epiX - 11, epiY + 11);
+
+            ctx.strokeStyle = '#050810';
+            ctx.lineWidth = 8;
+            ctx.stroke();
+
+            ctx.strokeStyle = '#EF4444';
+            ctx.lineWidth = 5;
+            ctx.stroke();
+
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
+
+        const cities = preCompiledEew.cityLabels;
+        if (cities.length > 0) {
+          ctx.save();
+          ctx.font = '800 11px "Noto Sans JP", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineJoin = 'round';
+          ctx.miterLimit = 2;
+          ctx.strokeStyle = '#05070A';
+          ctx.lineWidth = 3.2;
+          ctx.fillStyle = '#FFFFFF';
+
+          const placedCityBoxes: Array<{ x: number; y: number; w: number; h: number }> = [];
+          const labelH = 14;
+          for (let i = 0; i < cities.length; i++) {
+            const c = cities[i];
+            const cx = c.normX * worldScale - originX;
+            const cy = c.normY * worldScale - originY;
+            if (
+              cx < -40 ||
+              cx > width + 40 ||
+              cy < -20 ||
+              cy > height + 20
+            ) {
+              continue;
+            }
+            const labelW = Math.max(24, ctx.measureText(c.name).width + 6);
+            let overlaps = false;
+            for (let j = 0; j < placedCityBoxes.length; j++) {
+              const b = placedCityBoxes[j];
+              if (
+                Math.abs(cx - b.x) < (labelW + b.w) / 2 + 2 &&
+                Math.abs(cy - b.y) < (labelH + b.h) / 2 + 2
+              ) {
+                overlaps = true;
+                break;
+              }
+            }
+            if (overlaps) continue;
+            placedCityBoxes.push({ x: cx, y: cy, w: labelW, h: labelH });
+            ctx.strokeText(c.name, cx, cy);
+            ctx.fillText(c.name, cx, cy);
+          }
+          ctx.restore();
+        }
+      };
+
+      if (hasTsunamiWithEew && activeEew) {
+        drawActiveEewWavesAndLabels(activeEew);
+        setDs(canvas, 'eewWavesRendered', 'true');
+      } else if (!hasActiveEew) {
+        delete canvas.dataset.eewWavesRendered;
+      }
+
+      if (effectiveScene === 'earthquake') {
+        if (hasActiveEew && activeEew) {
+          drawActiveEewWavesAndLabels(activeEew);
+          setDs(canvas, 'eewWavesRendered', 'true');
           delete canvas.dataset.renderedEqStationCount;
         } else {
           // 3a. Draw Epicenter Cross (`✕`) when hypocenter is known
@@ -3056,10 +3134,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   ]);
 
   // Real-time RAF canvas animation for EEW wave front propagation (P-wave & S-wave expansion)
-  // Zero React re-renders, zero DOM/SVG teardown, and baseMapCanvasRef is skipped when stationary!
+  // Runs in both 'earthquake' AND 'tsunami' scenes so P/S waves keep animating alongside tsunami coastlines.
   useEffect(() => {
     if (
-      effectiveScene !== 'earthquake' ||
+      (effectiveScene !== 'earthquake' && effectiveScene !== 'tsunami') ||
       !activeEew ||
       !isEewStillActive(activeEew)
     ) {
@@ -3884,16 +3962,31 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.2, 3.0);
       }
 
+      const eewLat =
+        activeEew &&
+        isEewStillActive(activeEew) &&
+        typeof activeEew.lat === 'number' &&
+        Number.isFinite(activeEew.lat)
+          ? activeEew.lat
+          : null;
+      const eewLon =
+        activeEew &&
+        isEewStillActive(activeEew) &&
+        typeof activeEew.lon === 'number' &&
+        Number.isFinite(activeEew.lon)
+          ? activeEew.lon
+          : null;
+
       const hypoLat =
         typeof activeTsunamiForecast?.lat === 'number' &&
         !Number.isNaN(activeTsunamiForecast.lat)
           ? activeTsunamiForecast.lat
-          : null;
+          : eewLat;
       const hypoLon =
         typeof activeTsunamiForecast?.lon === 'number' &&
         !Number.isNaN(activeTsunamiForecast.lon)
           ? activeTsunamiForecast.lon
-          : null;
+          : eewLon;
 
       const areaForecasts = activeTsunamiForecast?.areas || [];
       const activeAreaCodes = new Set<string>();
@@ -4131,6 +4224,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     activeVolcano.lon,
     activeEew?.id,
     activeEew?.serial,
+    activeEew?.lat,
+    activeEew?.lon,
     activeTsunamiForecast?.id,
     activeTsunamiForecast?.lat,
     activeTsunamiForecast?.lon,
@@ -4483,7 +4578,16 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           ? activeTsunamiForecast.lon
           : null;
 
-      if (hypoLat !== null && hypoLon !== null) {
+      const isCanvasDrawingEewEpicenter = Boolean(
+        activeEew &&
+          isEewStillActive(activeEew) &&
+          typeof activeEew.lat === 'number' &&
+          Number.isFinite(activeEew.lat) &&
+          typeof activeEew.lon === 'number' &&
+          Number.isFinite(activeEew.lon)
+      );
+
+      if (hypoLat !== null && hypoLon !== null && !isCanvasDrawingEewEpicenter) {
         const epiIcon = L.divIcon({
           className: 'tsunami-epicenter-marker',
           html: `
@@ -4518,6 +4622,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     forecast3hIndex,
     activeVolcano,
     activeTsunamiForecast,
+    activeEew,
   ]);
 
   const currentNowcastEntry =
@@ -4639,26 +4744,30 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       </div>
 
       {/* EEW Mode Indicator / Switcher Bar & LPGM Legend (長周期地震動が実際に予測されているときだけ表示) */}
-      {effectiveScene === 'earthquake' &&
+      {(effectiveScene === 'earthquake' || effectiveScene === 'tsunami') &&
         activeEew &&
         isEewStillActive(activeEew) &&
         hasActualEewLpgm(activeEew) && (
         <div
           data-testid="eew-mode-switcher-bar"
-          className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-2 ${
+          className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-x-2 gap-y-1 ${
             isMobilePortrait
               ? 'shrink-0 w-full border-t border-red-500/80 overflow-x-auto whitespace-nowrap'
-              : 'absolute bottom-3 left-64 border border-red-500/80 rounded-xs shadow-xl'
+              : `absolute bottom-3 left-64 w-fit flex-wrap border border-red-500/80 rounded-xs shadow-xl ${
+                  isRightPanelHidden
+                    ? 'max-w-[calc(100%-268px)]'
+                    : 'max-w-[calc(100%-532px)]'
+                }`
           }`}
         >
-          <span className="text-[11px] font-mono text-neutral-200 font-bold">
+          <span className="text-[11px] font-mono text-neutral-200 font-bold whitespace-nowrap">
             緊急地震速報:
           </span>
           <button
             type="button"
             data-testid="eew-mode-btn-intensity"
             onClick={() => onChangeEewDisplayMode?.('intensity')}
-            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border ${
+            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border whitespace-nowrap ${
               eewDisplayMode === 'intensity'
                 ? 'bg-red-600 border-red-300 text-white shadow-sm'
                 : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
@@ -4670,7 +4779,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             type="button"
             data-testid="eew-mode-btn-lpgm"
             onClick={() => onChangeEewDisplayMode?.('lpgm')}
-            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border ${
+            className={`px-2 py-0.5 text-[11px] font-bold rounded-xs transition-colors cursor-pointer border whitespace-nowrap ${
               eewDisplayMode === 'lpgm'
                 ? 'bg-amber-600 border-amber-300 text-white shadow-sm'
                 : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
@@ -4678,14 +4787,14 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           >
             長周期地震動（階級1〜4）
           </button>
-          <span className="text-[10px] text-amber-300 font-mono ml-1 flex items-center gap-1">
+          <span className="text-[10px] text-amber-300 font-mono ml-1 flex items-center gap-1 whitespace-nowrap">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
             定期切替中
           </span>
 
           {/* Inline mini-legend for LPGM */}
           {eewDisplayMode === 'lpgm' && (
-            <div className="flex items-center gap-1 ml-2 pl-2 border-l border-neutral-700 text-[10px] font-mono">
+            <div className="flex items-center gap-1 pl-2 border-l border-neutral-700 text-[10px] font-mono whitespace-nowrap">
               <span className="px-1.5 py-0.2 rounded-xs bg-[#10B981] text-white font-bold">階級1</span>
               <span className="px-1.5 py-0.2 rounded-xs bg-[#F59E0B] text-slate-950 font-bold">階級2</span>
               <span className="px-1.5 py-0.2 rounded-xs bg-[#F97316] text-white font-bold">階級3</span>

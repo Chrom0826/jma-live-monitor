@@ -382,3 +382,71 @@ export function areEarthquakeListsEquivalent(
   }
   return true;
 }
+
+/**
+ * Resolves the effective scene with Tsunami taking priority over EEW / Earthquake / Volcano interrupts.
+ */
+export function resolveEffectiveScene(
+  activeScene: SceneId,
+  interruptKind: InterruptKind
+): SceneId {
+  if (interruptKind === 'tsunami') return 'tsunami';
+  if (interruptKind === 'earthquake' || interruptKind === 'eew') {
+    return 'earthquake';
+  }
+  if (interruptKind === 'volcano') return 'volcano';
+  if (interruptKind === 'typhoon') return 'typhoon';
+  return activeScene;
+}
+
+/**
+ * Resolves the next `interruptKind` when an incoming EEW arrives:
+ * keeps `'tsunami'` priority if a Tsunami Warning/Advisory is active or already interrupting,
+ * otherwise switches to `'eew'`.
+ */
+export function resolveInterruptKindOnEew(
+  prev: InterruptKind,
+  tsunamiSeverity: 'none' | 'forecast' | 'warning_or_above'
+): InterruptKind {
+  if (tsunamiSeverity === 'warning_or_above' || prev === 'tsunami') {
+    return 'tsunami';
+  }
+  return 'eew';
+}
+
+/**
+ * Resolves the next `interruptKind` when a Tsunami report arrives or becomes active:
+ * transitions `'eew'` / `'earthquake'` (or explicit push) to `'tsunami'` when severity is `'warning_or_above'`.
+ */
+export function resolveInterruptKindOnTsunami(
+  prev: InterruptKind,
+  tsunamiSeverity: 'none' | 'forecast' | 'warning_or_above',
+  forceInterrupt: boolean = false
+): InterruptKind {
+  if (tsunamiSeverity !== 'warning_or_above') return prev;
+  if (forceInterrupt || prev === 'eew' || prev === 'earthquake') {
+    return 'tsunami';
+  }
+  return prev;
+}
+
+/**
+ * Resolves `interruptKind` when `tsunamiSeverity` transitions (including cancellation):
+ * - On escalation to `'warning_or_above'`, transitions `'eew'` / `'earthquake'` to `'tsunami'`.
+ * - On cancellation (`'warning_or_above'` -> non-warning), releases `'tsunami'` interrupt back
+ *   to `'eew'` if an EEW is still active, or `'none'` so normal patrol resumes.
+ */
+export function resolveInterruptKindOnTsunamiChange(
+  prev: InterruptKind,
+  prevSeverity: 'none' | 'forecast' | 'warning_or_above',
+  nextSeverity: 'none' | 'forecast' | 'warning_or_above',
+  isEewActive: boolean
+): InterruptKind {
+  if (nextSeverity === 'warning_or_above') {
+    return resolveInterruptKindOnTsunami(prev, nextSeverity);
+  }
+  if (prevSeverity === 'warning_or_above' && prev === 'tsunami') {
+    return isEewActive ? 'eew' : 'none';
+  }
+  return prev;
+}
