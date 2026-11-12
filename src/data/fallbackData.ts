@@ -3229,6 +3229,104 @@ export const TEST_EEW_FORECAST_REPORT: EewReport = {
 };
 
 /**
+ * EEW→津波連動デモ用 震源・震度確定地震データ（能登半島 M7.6 最大震度7）
+ * TEST_EEW_REPORTS[2]（最終報）と hypocenterName が一致するため doesEarthquakeMatchEew が true になる。
+ */
+export const TEST_NOTO_EARTHQUAKE_DEMO: EarthquakeReport = {
+  id: 'eq-demo-noto-20261106',
+  issueTime: '2026/11/06 20:01:00 発表',
+  occurrenceTime: '2026/11/06 20:00:03 頃発生',
+  hypocenterName: '石川県能登地方',
+  regionId: 'chubu',
+  lat: 37.49,
+  lon: 137.26,
+  depthKm: 16,
+  magnitude: 7.6,
+  maxScaleCode: 70,
+  maxScaleLabel: '7',
+  domesticTsunami: '大津波警報・津波警報等 発表見込み（直ちに高台へ避難）',
+  foreignTsunami: '調査中',
+  sourceOffice: '気象庁本庁（連動デモ：各地の震度・震源確定）',
+  issueTypeLabel: '震源・震度に関する情報',
+  isConfirmed: true,
+  isTest: true,
+  stations: [
+    {
+      prefecture: '石川県',
+      city: '輪島市',
+      stationName: '輪島市門前町走出',
+      scaleCode: 70,
+      scaleLabel: '7',
+      lat: 37.291,
+      lon: 136.768,
+    },
+    {
+      prefecture: '石川県',
+      city: '珠洲市',
+      stationName: '珠洲市正院町',
+      scaleCode: 60,
+      scaleLabel: '6強',
+      lat: 37.441,
+      lon: 137.279,
+    },
+    {
+      prefecture: '石川県',
+      city: '能登町',
+      stationName: '能登町宇出津',
+      scaleCode: 60,
+      scaleLabel: '6強',
+      lat: 37.306,
+      lon: 137.149,
+    },
+    {
+      prefecture: '石川県',
+      city: '穴水町',
+      stationName: '穴水町大町',
+      scaleCode: 60,
+      scaleLabel: '6強',
+      lat: 37.229,
+      lon: 136.909,
+    },
+    {
+      prefecture: '石川県',
+      city: '七尾市',
+      stationName: '七尾市袖ケ江町',
+      scaleCode: 60,
+      scaleLabel: '6強',
+      lat: 37.043,
+      lon: 136.968,
+    },
+    {
+      prefecture: '新潟県',
+      city: '長岡市',
+      stationName: '長岡市小国町法坂',
+      scaleCode: 55,
+      scaleLabel: '6弱',
+      lat: 37.326,
+      lon: 138.726,
+    },
+    {
+      prefecture: '石川県',
+      city: '金沢市',
+      stationName: '金沢市西念',
+      scaleCode: 50,
+      scaleLabel: '5強',
+      lat: 36.578,
+      lon: 136.641,
+    },
+    {
+      prefecture: '富山県',
+      city: '富山市',
+      stationName: '富山市新桜町',
+      scaleCode: 50,
+      scaleLabel: '5強',
+      lat: 36.695,
+      lon: 137.213,
+    },
+  ],
+};
+
+/**
  * 津波警報・注意報のデモデータ
  * （大津波警報・津波警報・津波注意報・津波予報が各沿岸に発表されているフルスケール表示）
  */
