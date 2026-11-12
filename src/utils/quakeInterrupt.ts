@@ -343,6 +343,21 @@ export function evaluateEarthquakeLoopCompletion(
   return 'stay';
 }
 
+export function shouldBlockNormalPatrolAdvance(params: {
+  tsunamiSeverity: 'none' | 'forecast' | 'warning_or_above';
+  eqLockUntilConfirmed: boolean;
+  interruptKind: InterruptKind;
+  isEewActive: boolean;
+}): boolean {
+  if (params.tsunamiSeverity === 'warning_or_above') return true;
+  if (params.eqLockUntilConfirmed) return true;
+  if (params.interruptKind === 'eew' || params.interruptKind === 'earthquake') {
+    return true;
+  }
+  if (params.isEewActive) return true;
+  return false;
+}
+
 /**
  * Shallow equivalence check for earthquake lists to prevent idle poll re-renders in App.
  */

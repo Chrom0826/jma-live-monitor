@@ -86,6 +86,7 @@ import {
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
   isEarthquakeAwaitingDetail,
+  shouldBlockNormalPatrolAdvance,
 } from './utils/quakeInterrupt';
 
 const INITIAL_BUNDLE: MonitorDataBundle = {
@@ -1400,23 +1401,15 @@ export default function App() {
   // 4. When in `'amedas'`, step through `'temp' -> 'precip' -> 'wind' (-> 'snow')` (each metric performs 全国表示 -> 北海道〜沖縄連続スイープ -> 全国表示 in MonitorMap) before moving to the next scene.
   // 5. If a Tsunami Warning/Advisory is active ('warning_or_above'), lock onto the tsunami scene continuously until cancelled.
   const advanceScene = useCallback(() => {
-    // If locked onto tsunami warning or above, stay on tsunami scene continuously until cancelled!
-    if (tsunamiSeverity === 'warning_or_above') {
-      return;
-    }
-
-    // While an interrupt (EEW or non-EEW earthquake) or unconfirmed detail lock is active,
-    // keep the current interrupt active without overwriting `activeScene` (so return restores the interrupted scene).
-    const isAwaitingDetail =
-      !eqUnconfirmedTimedOutRef.current &&
-      isEarthquakeAwaitingDetail(selectedEarthquakeRef.current);
-
+    // While a Tsunami warning, EEW/earthquake interrupt, or unconfirmed detail lock is active,
+    // keep the current interrupt active without overwriting `activeScene`.
     if (
-      eqLockUntilConfirmedRef.current ||
-      interruptKind === 'eew' ||
-      interruptKind === 'earthquake' ||
-      isAwaitingDetail ||
-      (activeEew && isEewStillActive(activeEew))
+      shouldBlockNormalPatrolAdvance({
+        tsunamiSeverity,
+        eqLockUntilConfirmed: eqLockUntilConfirmedRef.current,
+        interruptKind,
+        isEewActive: Boolean(activeEew && isEewStillActive(activeEew)),
+      })
     ) {
       return;
     }
@@ -2045,6 +2038,12 @@ export default function App() {
       eqLockUntilConfirmedRef.current = false;
       eqUnconfirmedTimedOutRef.current = false;
       setInterruptKind('none');
+      if (
+        selectedEarthquakeRef.current?.isTest &&
+        sortedEarthquakesRef.current.length > 0
+      ) {
+        setSelectedEarthquake(sortedEarthquakesRef.current[0]);
+      }
       setActiveScene((prev) =>
         prev === 'earthquake'
           ? getNextSceneId('earthquake', effectiveEnabledScenes)

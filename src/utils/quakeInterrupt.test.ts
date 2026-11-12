@@ -9,6 +9,7 @@ import {
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
   isEarthquakeAwaitingDetail,
+  shouldBlockNormalPatrolAdvance,
 } from './quakeInterrupt';
 
 function makeEq(overrides: Partial<EarthquakeReport> = {}): EarthquakeReport {
@@ -453,4 +454,37 @@ test('areEarthquakeListsEquivalent avoids unnecessary re-renders on identical po
   assert.equal(areEarthquakeListsEquivalent([eq1, eq2], [copy1, copy2]), true);
   assert.equal(areEarthquakeListsEquivalent([eq1, eq2], [copy1, updated2]), false);
   assert.equal(areEarthquakeListsEquivalent([eq1], [eq1, eq2]), false);
+});
+
+test('shouldBlockNormalPatrolAdvance does not freeze normal patrol when interruptKind is none and lock is inactive', () => {
+  // Stale (>15m) unconfirmed quake at startup (silent_sync -> interruptKind='none', eqLockUntilConfirmed=false) must NOT block normal patrol!
+  assert.equal(
+    shouldBlockNormalPatrolAdvance({
+      tsunamiSeverity: 'none',
+      eqLockUntilConfirmed: false,
+      interruptKind: 'none',
+      isEewActive: false,
+    }),
+    false
+  );
+
+  // Active interrupt or unconfirmed lock MUST block normal patrol advance
+  assert.equal(
+    shouldBlockNormalPatrolAdvance({
+      tsunamiSeverity: 'none',
+      eqLockUntilConfirmed: true,
+      interruptKind: 'earthquake',
+      isEewActive: false,
+    }),
+    true
+  );
+  assert.equal(
+    shouldBlockNormalPatrolAdvance({
+      tsunamiSeverity: 'none',
+      eqLockUntilConfirmed: false,
+      interruptKind: 'earthquake',
+      isEewActive: false,
+    }),
+    true
+  );
 });
