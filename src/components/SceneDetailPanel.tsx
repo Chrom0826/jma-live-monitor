@@ -38,11 +38,9 @@ import {
 function formatCompactDateTime(raw: string | null | undefined): string {
   if (!raw) return '直近';
   const s = raw.trim();
-  const m = /^\d{4}[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}:\d{2}(?::\d{2})?)/.exec(s);
-  if (m) {
-    return `${m[1].padStart(2, '0')}/${m[2].padStart(2, '0')} ${m[3]}`;
-  }
-  return s;
+  return s.replace(/^\d{4}[/-](\d{1,2})[/-](\d{1,2})/, (_, m, d) => {
+    return `${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}`;
+  });
 }
 
 const broadcastWeatherSvgCache = new Map<string, string>();
@@ -2008,7 +2006,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                             <button
                               type="button"
                               onClick={() => onChangeEewDisplayMode?.('intensity')}
-                              className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center whitespace-nowrap ${
+                              className={`py-0.5 px-1 text-[9.5px] font-bold rounded-xs transition-colors cursor-pointer text-center min-w-0 truncate ${
                                 !showEewLpgm
                                   ? isSpecialWarn
                                     ? 'bg-purple-600 text-white font-black shadow-xs'
@@ -2016,18 +2014,18 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   : 'text-neutral-400 hover:text-white'
                               }`}
                             >
-                              震度予測 (1〜7)
+                              震度予測 (1-7)
                             </button>
                             <button
                               type="button"
                               onClick={() => onChangeEewDisplayMode?.('lpgm')}
-                              className={`py-0.5 text-[10px] font-bold rounded-xs transition-colors cursor-pointer text-center whitespace-nowrap ${
+                              className={`py-0.5 px-1 text-[9.5px] font-bold rounded-xs transition-colors cursor-pointer text-center min-w-0 truncate ${
                                 showEewLpgm
                                   ? 'bg-amber-600 text-white font-black shadow-xs'
                                   : 'text-neutral-400 hover:text-white'
                               }`}
                             >
-                              長周期地震動 (階級1〜4)
+                              長周期 (階級1-4)
                             </button>
                           </div>
                         )}
@@ -2232,8 +2230,8 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                                   </>
                                 )}
                               </div>
-                              <div className="text-[11px] font-mono text-neutral-400 whitespace-nowrap">
-                                {selectedEarthquake.occurrenceTime}
+                              <div className="text-[10.5px] font-mono text-neutral-400 whitespace-nowrap min-w-0 truncate">
+                                {formatCompactDateTime(selectedEarthquake.occurrenceTime)}
                               </div>
                               <div className="text-xs text-cyan-300 font-bold pt-0.5">
                                 {selectedEarthquake.domesticTsunami}
@@ -2291,9 +2289,18 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                         震度{grp.scaleLabel}
                       </span>
                     </div>
-                    <div className="px-2.5 pt-1 text-xs text-neutral-200 leading-relaxed">
-                      {grp.names.join('・')}
-                      {extraCount > 0 ? ` ほか${extraCount}地点` : ''}
+                    <div className="px-2.5 pt-1 text-xs text-neutral-200 leading-relaxed flex flex-wrap items-baseline">
+                      {grp.names.map((name, nIdx) => (
+                        <span key={name} className="inline-block whitespace-nowrap">
+                          {name}
+                          {nIdx < grp.names.length - 1 ? '・' : ''}
+                        </span>
+                      ))}
+                      {extraCount > 0 && (
+                        <span className="inline-block whitespace-nowrap text-neutral-400 ml-1">
+                          {`ほか${extraCount}地点`}
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
