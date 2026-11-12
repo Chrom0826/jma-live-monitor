@@ -11,7 +11,6 @@ import {
   CLEAN_PREF_SEVERITY_MAP,
   INITIAL_TSUNAMI_FORECAST,
   INITIAL_TSUNAMI_STATIONS,
-  INITIAL_TYPHOONS,
   INITIAL_VOLCANOES,
   INITIAL_WARNINGS,
   INITIAL_WEATHER_BULLETINS,
@@ -104,7 +103,11 @@ let cachedHourlySnowTs = '';
 let cachedHourlySnowMap: Record<string, any> | null = null;
 const cachedJmaQuakeDetails = new Map<string, EarthquakeReport>();
 const TYPHOON_24H_CACHE_KEY = 'jma_typhoons_24h_cache_v1';
-const TYPHOON_RETENTION_MS = 24 * 3600 * 1000; // 24 hours (1 day)
+let lastLiveTyphoons: TyphoonReport[] | null = null;
+
+export function resetLiveTyphoonCacheForTest(): void {
+  lastLiveTyphoons = null;
+}
 
 async function fetchWithTimeout(url: string, timeoutMs = 4500): Promise<Response> {
   const controller = new AbortController();
@@ -946,110 +949,116 @@ async function fetchLiveJmaForecasts(): Promise<{
   }
 }
 
-function loadCachedTyphoons24h(): TyphoonReport[] {
+function clearLegacyTyphoonStorageCache(): void {
   try {
-    if (typeof localStorage === 'undefined') return [];
-    const raw = localStorage.getItem(TYPHOON_24H_CACHE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const now = Date.now();
-    return parsed.filter(
-      (tc: any) =>
-        tc &&
-        typeof tc.id === 'string' &&
-        Array.isArray(tc.points) &&
-        tc.points.length > 0 &&
-        now - Number(tc.lastSeenMs || 0) <= TYPHOON_RETENTION_MS
-    );
-  } catch {
-    return [];
-  }
-}
-
-function saveCachedTyphoons24h(reports: TyphoonReport[]): void {
-  try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(TYPHOON_24H_CACHE_KEY, JSON.stringify(reports));
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(TYPHOON_24H_CACHE_KEY);
+    }
   } catch {
     // ignore storage errors
   }
 }
 
-async function fetchLiveJmaTyphoons(): Promise<{
+export async function fetchLiveJmaTyphoons(): Promise<{
   typhoons: TyphoonReport[];
   live: boolean;
 }> {
-  const recentCached = loadCachedTyphoons24h();
+  clearLegacyTyphoonStorageCache();
   try {
     const res = await fetchWithTimeout(JMA_TYPHOON_TARGET_URL, 3500);
     if (!res.ok) {
       return {
-        typhoons: recentCached.length > 0 ? recentCached : INITIAL_TYPHOONS,
-        live: recentCached.length > 0,
+        typhoons: lastLiveTyphoons ?? [],
+        live: false,
       };
     }
     const targetList = (await res.json()) as Array<{
       tropicalCyclone?: string;
     }>;
+    if (!Array.isArray(targetList)) {
+      return {
+        typhoons: lastLiveTyphoons ?? [],
+        live: false,
+      };
+    }
 
-    const parsedReports = Array.isArray(targetList)
-      ? await Promise.all(
-          targetList.map(async (item) => {
-            const tcId = item.tropicalCyclone;
-            if (!tcId) return null;
-            try {
-              const [specRes, fcRes] = await Promise.all([
-                fetchWithTimeout(
-                  `https://www.jma.go.jp/bosai/typhoon/data/${tcId}/specifications.json`,
-                  3500
-                ),
-                fetchWithTimeout(
-                  `https://www.jma.go.jp/bosai/typhoon/data/${tcId}/forecast.json`,
-                  3500
-                ).catch(() => null),
-              ]);
-              if (!specRes.ok) return null;
-              const rawSpecs = await specRes.json();
-              const rawForecast =
-                fcRes && fcRes.ok ? await fcRes.json().catch(() => undefined) : undefined;
-              return parseJmaTyphoonSpecifications(rawSpecs, tcId, rawForecast);
-            } catch {
-              return null;
+    // A successful fetch with an empty array is authoritative: no typhoons are currently active.
+    if (targetList.length === 0) {
+      lastLiveTyphoons = [];
+      return { typhoons: [], live: true };
+    }
+
+    let hadFetchFailure = false;
+    const targetIds = new Set<string>();
+    const notFoundIds = new Set<string>();
+    const parsedReports = await Promise.all(
+      targetList.map(async (item) => {
+        const tcId = item?.tropicalCyclone;
+        if (!tcId) return null;
+        targetIds.add(tcId);
+        try {
+          const [specRes, fcRes] = await Promise.all([
+            fetchWithTimeout(
+              `https://www.jma.go.jp/bosai/typhoon/data/${tcId}/specifications.json`,
+              3500
+            ),
+            fetchWithTimeout(
+              `https://www.jma.go.jp/bosai/typhoon/data/${tcId}/forecast.json`,
+              3500
+            ).catch(() => null),
+          ]);
+          if (!specRes.ok) {
+            if (specRes.status === 404) {
+              notFoundIds.add(tcId);
+            } else {
+              hadFetchFailure = true;
             }
-          })
-        )
-      : [];
+            return null;
+          }
+          const rawSpecs = await specRes.json();
+          const rawForecast =
+            fcRes && fcRes.ok
+              ? await fcRes.json().catch(() => undefined)
+              : undefined;
+          return parseJmaTyphoonSpecifications(rawSpecs, tcId, rawForecast);
+        } catch {
+          hadFetchFailure = true;
+          return null;
+        }
+      })
+    );
 
     const validReports = parsedReports.filter(
       (r): r is TyphoonReport => r !== null
     );
 
-    // Merge live reports with any typhoon/tropical depression seen within the last 24 hours
-    // so that weakened tropical/extratropical cyclones keep their trajectory visible for ~1 day.
-    const mergedMap = new Map<string, TyphoonReport>();
-    for (const liveTc of validReports) {
-      mergedMap.set(liveTc.id, { ...liveTc, lastSeenMs: Date.now() });
-    }
-    for (const cachedTc of recentCached) {
-      if (!mergedMap.has(cachedTc.id)) {
-        mergedMap.set(cachedTc.id, cachedTc);
-      }
-    }
-
-    const mergedList = Array.from(mergedMap.values());
-    if (mergedList.length > 0) {
-      saveCachedTyphoons24h(mergedList);
+    if (validReports.length > 0) {
+      lastLiveTyphoons = validReports;
       return {
-        typhoons: mergedList,
+        typhoons: validReports,
         live: true,
       };
     }
-    return { typhoons: INITIAL_TYPHOONS, live: false };
+
+    if (hadFetchFailure && lastLiveTyphoons && lastLiveTyphoons.length > 0) {
+      const stillListed = lastLiveTyphoons.filter(
+        (tc) => targetIds.has(tc.id) && !notFoundIds.has(tc.id)
+      );
+      if (stillListed.length > 0) {
+        lastLiveTyphoons = stillListed;
+        return {
+          typhoons: stillListed,
+          live: false,
+        };
+      }
+    }
+
+    lastLiveTyphoons = [];
+    return { typhoons: [], live: !hadFetchFailure };
   } catch {
     return {
-      typhoons: recentCached.length > 0 ? recentCached : INITIAL_TYPHOONS,
-      live: recentCached.length > 0,
+      typhoons: lastLiveTyphoons ?? [],
+      live: false,
     };
   }
 }

@@ -450,3 +450,37 @@ export function resolveInterruptKindOnTsunamiChange(
   }
   return prev;
 }
+
+/**
+ * Computes the effective list of scenes included in automatic normal patrol:
+ * - Tsunami Warning/Advisory locks onto `['tsunami']`.
+ * - Inactive typhoon (`hasActiveTyphoons === false`) is skipped in automatic patrol just like inactive tsunami.
+ * - Tsunami Forecast (`'forecast'`) dynamically inserts `'tsunami'` after `'earthquake'`; `'none'` excludes `'tsunami'`.
+ */
+export function resolveEffectiveEnabledScenes(options: {
+  enabledScenes: SceneId[];
+  tsunamiSeverity: 'none' | 'forecast' | 'warning_or_above';
+  hasActiveTyphoons: boolean;
+}): SceneId[] {
+  const { enabledScenes, tsunamiSeverity, hasActiveTyphoons } = options;
+  if (tsunamiSeverity === 'warning_or_above') {
+    return ['tsunami'];
+  }
+  const baseScenes = hasActiveTyphoons
+    ? enabledScenes
+    : enabledScenes.filter((s) => s !== 'typhoon');
+
+  if (tsunamiSeverity === 'forecast') {
+    if (baseScenes.includes('tsunami')) {
+      return baseScenes;
+    }
+    const eqIdx = baseScenes.indexOf('earthquake');
+    if (eqIdx !== -1) {
+      const next = [...baseScenes];
+      next.splice(eqIdx + 1, 0, 'tsunami');
+      return next;
+    }
+    return [...baseScenes, 'tsunami'];
+  }
+  return baseScenes.filter((s) => s !== 'tsunami');
+}

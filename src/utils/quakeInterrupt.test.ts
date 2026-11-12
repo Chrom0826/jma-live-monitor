@@ -9,6 +9,7 @@ import {
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
   isEarthquakeAwaitingDetail,
+  resolveEffectiveEnabledScenes,
   resolveEffectiveScene,
   resolveInterruptKindOnEew,
   resolveInterruptKindOnTsunami,
@@ -536,5 +537,59 @@ test('resolveEffectiveScene and interrupt priority keep tsunami prioritized whil
   assert.equal(
     resolveInterruptKindOnTsunamiChange('earthquake', 'none', 'none', false),
     'earthquake'
+  );
+});
+
+test('resolveEffectiveEnabledScenes skips typhoon when inactive and includes it when active', () => {
+  const defaultScenes = ['radar', 'warnings', 'typhoon', 'amedas', 'forecast', 'earthquake'] as const;
+
+  // No typhoon, no tsunami -> both skipped
+  assert.deepEqual(
+    resolveEffectiveEnabledScenes({
+      enabledScenes: [...defaultScenes],
+      tsunamiSeverity: 'none',
+      hasActiveTyphoons: false,
+    }),
+    ['radar', 'warnings', 'amedas', 'forecast', 'earthquake']
+  );
+
+  // Active typhoon, no tsunami -> typhoon included, tsunami excluded
+  assert.deepEqual(
+    resolveEffectiveEnabledScenes({
+      enabledScenes: [...defaultScenes],
+      tsunamiSeverity: 'none',
+      hasActiveTyphoons: true,
+    }),
+    ['radar', 'warnings', 'typhoon', 'amedas', 'forecast', 'earthquake']
+  );
+
+  // No typhoon, tsunami forecast -> typhoon skipped, tsunami inserted after earthquake
+  assert.deepEqual(
+    resolveEffectiveEnabledScenes({
+      enabledScenes: [...defaultScenes],
+      tsunamiSeverity: 'forecast',
+      hasActiveTyphoons: false,
+    }),
+    ['radar', 'warnings', 'amedas', 'forecast', 'earthquake', 'tsunami']
+  );
+
+  // User disabled typhoon in settings even though typhoon is active -> stays excluded
+  assert.deepEqual(
+    resolveEffectiveEnabledScenes({
+      enabledScenes: ['radar', 'warnings', 'amedas'],
+      tsunamiSeverity: 'none',
+      hasActiveTyphoons: true,
+    }),
+    ['radar', 'warnings', 'amedas']
+  );
+
+  // Tsunami warning_or_above locks strictly to tsunami
+  assert.deepEqual(
+    resolveEffectiveEnabledScenes({
+      enabledScenes: [...defaultScenes],
+      tsunamiSeverity: 'warning_or_above',
+      hasActiveTyphoons: true,
+    }),
+    ['tsunami']
   );
 });

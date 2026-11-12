@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { buildSceneFeed, buildBottomFlipFeed } from './sceneFeedBuilder';
+import { SceneDetailPanel } from '../components/SceneDetailPanel';
+import { REGION_CONFIGS } from './jmaParser';
 import {
   INITIAL_EARTHQUAKES,
   INITIAL_FORECASTS,
@@ -420,4 +424,111 @@ test('buildSceneFeed & buildBottomFlipFeed: integrate active EEW under Tsunami p
   assert.ok(flipFeed!.cards.some((c) => c.id.startsWith('tsunami-eew-alert-')));
   assert.ok(flipFeed!.cards.some((c) => c.id.startsWith('tsunami-eew-scale-')));
   assert.ok(flipFeed!.cards.some((c) => c.id.startsWith('tsunami-eew-lpgm-')));
+});
+
+test('buildSceneFeed & buildBottomFlipFeed & SceneDetailPanel: show empty-state message without past data when typhoons is empty', () => {
+  const emptyTyphoonBundle: MonitorDataBundle = {
+    ...mockBundle,
+    typhoons: [],
+  };
+
+  // Even if a stale selectedTyphoon were passed, empty data.typhoons must display empty-state only
+  const feed = buildSceneFeed({
+    effectiveScene: 'typhoon',
+    data: emptyTyphoonBundle,
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: INITIAL_TYPHOONS[0],
+    activeVolcano: null,
+    amedasMetric: 'temp',
+  });
+  assert.equal(feed.sceneId, 'typhoon');
+  assert.equal(feed.textKey, 'typhoon-none');
+  assert.equal(feed.items[0].text, '現在台風情報は発表されていません。');
+  assert.ok(!feed.title.includes('台風第31号'));
+  assert.ok(!feed.items[0].text.includes('インファ'));
+
+  const flip = buildBottomFlipFeed({
+    effectiveScene: 'typhoon',
+    data: emptyTyphoonBundle,
+    activeEew: null,
+  });
+  assert.ok(flip);
+  assert.equal(flip!.isFlipMode, true);
+  assert.equal(flip!.cards[0].id, 'typhoon-none-card');
+  assert.equal(flip!.cards[0].mainText, '現在台風情報は発表されていません');
+
+  // Active typhoon returns live ticker (flip null)
+  const activeFeed = buildSceneFeed({
+    effectiveScene: 'typhoon',
+    data: mockBundle,
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: INITIAL_TYPHOONS[0],
+    activeVolcano: null,
+    amedasMetric: 'temp',
+  });
+  assert.ok(activeFeed.title.includes('台風第31号'));
+  assert.equal(
+    buildBottomFlipFeed({
+      effectiveScene: 'typhoon',
+      data: mockBundle,
+      activeEew: null,
+    }),
+    null
+  );
+
+  // Render SceneDetailPanel directly via SSR to verify DOM output when typhoons is empty
+  const htmlEmpty = renderToStaticMarkup(
+    React.createElement(SceneDetailPanel, {
+      activeScene: 'typhoon',
+      activeRegionConfig: REGION_CONFIGS[0],
+      data: emptyTyphoonBundle,
+      selectedEarthquake: emptyTyphoonBundle.earthquakes[0],
+      selectedTyphoon: null,
+      typhoonPatrolStep: 1,
+      onSelectTyphoon: () => {},
+      activeVolcano: emptyTyphoonBundle.volcanoes[0],
+      amedasMetric: 'temp',
+      onChangeAmedasMetric: () => {},
+      onSelectEarthquake: () => {},
+      interruptKind: 'none',
+      onDismissInterrupt: () => {},
+      isLoopPaused: false,
+      loopIntervalSec: 15,
+      onSceneComplete: () => {},
+    })
+  );
+  assert.ok(htmlEmpty.includes('現在台風情報は発表されていません'));
+  assert.ok(htmlEmpty.includes('data-testid="typhoon-none-message"'));
+  assert.ok(!htmlEmpty.includes('台風第31号'));
+  assert.ok(!htmlEmpty.includes('インファ'));
+
+  // Render SceneDetailPanel with active typhoon to verify detail view still works
+  const htmlActive = renderToStaticMarkup(
+    React.createElement(SceneDetailPanel, {
+      activeScene: 'typhoon',
+      activeRegionConfig: REGION_CONFIGS[0],
+      data: mockBundle,
+      selectedEarthquake: mockBundle.earthquakes[0],
+      selectedTyphoon: INITIAL_TYPHOONS[0],
+      typhoonPatrolStep: 1,
+      onSelectTyphoon: () => {},
+      activeVolcano: mockBundle.volcanoes[0],
+      amedasMetric: 'temp',
+      onChangeAmedasMetric: () => {},
+      onSelectEarthquake: () => {},
+      interruptKind: 'none',
+      onDismissInterrupt: () => {},
+      isLoopPaused: false,
+      loopIntervalSec: 15,
+      onSceneComplete: () => {},
+    })
+  );
+  assert.ok(htmlActive.includes('台風第31号'));
+  assert.ok(!htmlActive.includes('現在台風情報は発表されていません'));
 });

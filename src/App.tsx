@@ -26,7 +26,6 @@ import {
   CLEAN_PREF_SEVERITY_MAP,
   INITIAL_TSUNAMI_FORECAST,
   INITIAL_TSUNAMI_STATIONS,
-  INITIAL_TYPHOONS,
   INITIAL_VOLCANOES,
   INITIAL_WARNINGS,
   INITIAL_WEATHER_BULLETINS,
@@ -107,6 +106,7 @@ import {
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
   isEarthquakeAwaitingDetail,
+  resolveEffectiveEnabledScenes,
   resolveEffectiveScene,
   resolveInterruptKindOnEew,
   resolveInterruptKindOnTsunami,
@@ -122,7 +122,7 @@ const INITIAL_BUNDLE: MonitorDataBundle = {
   municipalityWarnings: [],
   muniSeverityMap: {},
   prefSeverityMap: CLEAN_PREF_SEVERITY_MAP,
-  typhoons: INITIAL_TYPHOONS,
+  typhoons: [],
   bulletins: INITIAL_WEATHER_BULLETINS,
   amedas: INITIAL_AMEDAS_STATIONS,
   volcanoes: INITIAL_VOLCANOES,
@@ -820,9 +820,7 @@ export default function App() {
   const [warningPatrolStep, setWarningPatrolStep] = useState<number>(0);
   // Typhoon patrol step: 0 = overview (all cyclones blocks), 1..M = single cyclone focus, M+1 = return to overview
   // When total typhoons <= 1, overview is never shown, start directly at step 1
-  const [typhoonPatrolStep, setTyphoonPatrolStep] = useState<number>(
-    INITIAL_TYPHOONS.length <= 1 ? 1 : 0
-  );
+  const [typhoonPatrolStep, setTyphoonPatrolStep] = useState<number>(1);
   const [mapViewport, setMapViewport] = useState<MapViewportState | undefined>(
     undefined
   );
@@ -846,8 +844,8 @@ export default function App() {
     pinnedEarthquakeIdRef.current = id;
     setPinnedEarthquakeId(id);
   }, []);
-  const [selectedTyphoon, setSelectedTyphoon] = useState<TyphoonReport>(
-    INITIAL_TYPHOONS[0]
+  const [selectedTyphoon, setSelectedTyphoon] = useState<TyphoonReport | null>(
+    null
   );
   const [activeVolcano, setActiveVolcano] = useState<VolcanoStatusItem>(
     INITIAL_VOLCANOES[0]
@@ -977,6 +975,8 @@ export default function App() {
   selectedEarthquakeRef.current = selectedEarthquake;
   const typhoonsRef = useRef<TyphoonReport[]>(data.typhoons);
   typhoonsRef.current = data.typhoons;
+  const isLoopPausedRef = useRef<boolean>(isLoopPaused);
+  isLoopPausedRef.current = isLoopPaused;
   const tsunamiSeverityRef = useRef<'none' | 'forecast' | 'warning_or_above'>(
     'none'
   );
@@ -1222,9 +1222,13 @@ export default function App() {
       // 0. Sync live typhoon selection
       if (bundle.typhoons.length > 0) {
         setSelectedTyphoon((prev) => {
-          const found = bundle.typhoons.find((t) => t.id === prev.id);
+          const found = prev
+            ? bundle.typhoons.find((t) => t.id === prev.id)
+            : undefined;
           return found || bundle.typhoons[0];
         });
+      } else {
+        setSelectedTyphoon(null);
       }
 
       // 1. Check for new or upgraded earthquake report
@@ -1434,6 +1438,9 @@ export default function App() {
     severeWarningDivisions.length > 0 &&
     warningPatrolStep === severeWarningDivisions.length + 1;
 
+  const hasActiveTyphoons = data.typhoons.length > 0;
+  const prevHasTyphoonsRef = useRef<boolean>(hasActiveTyphoons);
+
   // Dynamic Tsunami Alert Severity: 'none' | 'forecast' | 'warning_or_above'
   const tsunamiSeverity = useMemo(
     () => getTsunamiAlertSeverity(data.tsunamiForecast),
@@ -1445,26 +1452,29 @@ export default function App() {
   // Order: ... -> forecast -> earthquake -> tsunami -> radar -> ...
   // When 'warning_or_above' is active, scenes are restricted so it continuously locks onto 'tsunami'.
   // When 'none', tsunami is excluded from the automated normal loop.
-  const effectiveEnabledScenes = useMemo<SceneId[]>(() => {
-    if (tsunamiSeverity === 'warning_or_above') {
-      return ['tsunami'];
+  // Similarly, when no typhoons are active (`hasActiveTyphoons === false`), 'typhoon' is skipped in automatic patrol.
+  const effectiveEnabledScenes = useMemo<SceneId[]>(
+    () =>
+      resolveEffectiveEnabledScenes({
+        enabledScenes,
+        tsunamiSeverity,
+        hasActiveTyphoons,
+      }),
+    [enabledScenes, tsunamiSeverity, hasActiveTyphoons]
+  );
+
+  // If active typhoons disappear while auto-patrolling the typhoon scene, advance cleanly to the next scene.
+  useEffect(() => {
+    const prevHas = prevHasTyphoonsRef.current;
+    prevHasTyphoonsRef.current = hasActiveTyphoons;
+    if (prevHas && !hasActiveTyphoons && !isLoopPausedRef.current) {
+      setActiveScene((prev) =>
+        prev === 'typhoon'
+          ? getNextSceneId('typhoon', effectiveEnabledScenes)
+          : prev
+      );
     }
-    if (tsunamiSeverity === 'forecast') {
-      if (enabledScenes.includes('tsunami')) {
-        return enabledScenes;
-      }
-      // Insert tsunami right after earthquake (or at the end so it advances to radar)
-      const eqIdx = enabledScenes.indexOf('earthquake');
-      if (eqIdx !== -1) {
-        const next = [...enabledScenes];
-        next.splice(eqIdx + 1, 0, 'tsunami');
-        return next;
-      }
-      return [...enabledScenes, 'tsunami'];
-    }
-    // 'none': do not include tsunami in normal automatic loop unless explicitly forced
-    return enabledScenes.filter((s) => s !== 'tsunami');
-  }, [enabledScenes, tsunamiSeverity]);
+  }, [hasActiveTyphoons, effectiveEnabledScenes]);
 
   // If a Tsunami Warning or Major Warning or Advisory is active, continuously lock onto the tsunami scene until cancelled!
   // If an EEW or earthquake interrupt is currently active, switch to 'tsunami' priority while preserving activeEew (P/S waves).
@@ -1571,7 +1581,7 @@ export default function App() {
     }
 
     if (activeScene === 'typhoon') {
-      const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+      const totalTyphoons = data.typhoons.length;
       // Step 0: Overview (all cyclones in blocks, no forecasts) - only when totalTyphoons > 1
       // Step 1..totalTyphoons: Single cyclone detail (header pinned + forecast timeline with ↓ arrows)
       // Step totalTyphoons + 1: Return to overview (all cyclones in blocks again)
@@ -1609,11 +1619,9 @@ export default function App() {
         setForecast3hIndex(0);
       }
       if (nextScene === 'typhoon') {
-        const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+        const totalTyphoons = data.typhoons.length;
         setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
-        if (data.typhoons.length > 0) {
-          setSelectedTyphoon(data.typhoons[0]);
-        }
+        setSelectedTyphoon(data.typhoons[0] || null);
       }
       if (regionScope === 'auto') {
         setPatrolStepIndex(0);
@@ -1672,8 +1680,7 @@ export default function App() {
       }
       setInterruptKind('none');
       setWarningPatrolStep(0);
-      const totalTyphoons =
-        typhoonsRef.current.length > 0 ? typhoonsRef.current.length : 1;
+      const totalTyphoons = typhoonsRef.current.length;
       setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
       if (sceneId === 'amedas') {
         setAmedasMetric('temp');
@@ -1682,8 +1689,8 @@ export default function App() {
         setForecastViewMode('today_3h');
         setForecast3hIndex(0);
       }
-      if (sceneId === 'typhoon' && typhoonsRef.current.length > 0) {
-        setSelectedTyphoon(typhoonsRef.current[0]);
+      if (sceneId === 'typhoon') {
+        setSelectedTyphoon(typhoonsRef.current[0] || null);
       }
       if (regionScope === 'auto') {
         setPatrolStepIndex(0);
@@ -2068,8 +2075,7 @@ export default function App() {
   }, []);
 
   const handleReturnTyphoonOverview = useCallback(() => {
-    const totalTyphoons =
-      typhoonsRef.current.length > 0 ? typhoonsRef.current.length : 1;
+    const totalTyphoons = typhoonsRef.current.length;
     setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
     setActiveScene('typhoon');
   }, []);
@@ -2220,9 +2226,17 @@ export default function App() {
       return `全国の天気　明後日 ${dayAfterLabel}`;
     }
     if (effectiveScene === 'typhoon') {
-      const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
-      if (totalTyphoons <= 1 || (typhoonPatrolStep >= 1 && typhoonPatrolStep <= totalTyphoons)) {
-        return `${selectedTyphoon.displayNumber}（${selectedTyphoon.nameJp}）実況・進路予想`;
+      if (data.typhoons.length === 0) {
+        return sceneMeta.title;
+      }
+      const totalTyphoons = data.typhoons.length;
+      const activeTc = selectedTyphoon || data.typhoons[0];
+      if (
+        activeTc &&
+        (totalTyphoons <= 1 ||
+          (typhoonPatrolStep >= 1 && typhoonPatrolStep <= totalTyphoons))
+      ) {
+        return `${activeTc.displayNumber}（${activeTc.nameJp}）実況・進路予想`;
       }
       return '全国 台風・熱帯低気圧 進路実況';
     }

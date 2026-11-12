@@ -1837,10 +1837,21 @@ export function getNextSceneId(
     return currentScene;
   }
   const currentIndex = orderedIds.indexOf(currentScene);
-  if (currentIndex === -1) {
-    return orderedIds[0];
+  if (currentIndex !== -1) {
+    return orderedIds[(currentIndex + 1) % orderedIds.length];
   }
-  return orderedIds[(currentIndex + 1) % orderedIds.length];
+  // If currentScene was manually selected while excluded from enabledScenes (e.g. inactive typhoon/tsunami),
+  // advance to the next enabled scene in SCENE_LIST order instead of jumping back to index 0.
+  const listIdx = SCENE_LIST.findIndex((s) => s.id === currentScene);
+  if (listIdx !== -1) {
+    for (let offset = 1; offset <= SCENE_LIST.length; offset++) {
+      const candidate = SCENE_LIST[(listIdx + offset) % SCENE_LIST.length].id;
+      if (enabledScenes.includes(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return orderedIds[0];
 }
 
 /**

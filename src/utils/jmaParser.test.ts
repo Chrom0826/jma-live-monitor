@@ -2119,3 +2119,10 @@ test('isEewSpecialWarning follows JMA criteria (警報かつ 予想最大震度6
   assert.equal(isEewSpecialWarning(TEST_EEW_REPORTS[2]), true);
   assert.equal(doesEarthquakeMatchEew(TEST_NOTO_EARTHQUAKE_DEMO, TEST_EEW_REPORTS[2]), true);
 });
+
+test('getNextSceneId skips inactive typhoon and advances cleanly from manually selected inactive typhoon', () => {
+  const withoutTyphoon = DEFAULT_NORMAL_LOOP_SCENES.filter((s) => s !== 'typhoon');
+  assert.equal(getNextSceneId('warnings', withoutTyphoon), 'amedas');
+  assert.equal(getNextSceneId('typhoon', withoutTyphoon), 'amedas');
+  assert.equal(getNextSceneId('tsunami', withoutTyphoon), 'radar');
+});

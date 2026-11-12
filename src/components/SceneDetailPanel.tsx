@@ -208,7 +208,7 @@ interface SceneDetailPanelProps {
   mapViewport?: MapViewportState;
   data: MonitorDataBundle;
   selectedEarthquake: EarthquakeReport;
-  selectedTyphoon: TyphoonReport;
+  selectedTyphoon: TyphoonReport | null;
   typhoonPatrolStep?: number;
   onSelectTyphoon: (tc: TyphoonReport) => void;
   onReturnTyphoonOverview?: () => void;
@@ -364,9 +364,16 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   // 「各都府県」「鹿児島県（奄美地方除く）」「奄美地方」「沖縄本島地方」「大東島地方」「宮古島地方」「八重山地方」
   const displayWarnings = data.warnings;
 
-  const totalTyphoons = data.typhoons.length > 0 ? data.typhoons.length : 1;
+  const hasTyphoons = data.typhoons.length > 0;
+  const totalTyphoons = data.typhoons.length;
+  const activeTyphoon =
+    (selectedTyphoon &&
+      data.typhoons.find((t) => t.id === selectedTyphoon.id)) ||
+    data.typhoons[0] ||
+    null;
   const isSingleTyphoonMode =
     effectiveScene === 'typhoon' &&
+    hasTyphoons &&
     (totalTyphoons <= 1 ||
       (typeof typhoonPatrolStep === 'number' &&
         typhoonPatrolStep >= 1 &&
@@ -386,7 +393,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     activeWarningDivision,
     isFinalWarningNational,
     amedasMetric,
-    selectedTyphoon.id,
+    selectedTyphoon?.id,
     typhoonPatrolStep,
     selectedEarthquake.id,
   ]);
@@ -455,9 +462,11 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
       const isOverview =
         totalTyphoons > 1 &&
         (typhoonPatrolStep === 0 || typhoonPatrolStep > totalTyphoons);
-      const holdMs = isOverview
-        ? Math.min(Math.max(5500, loopIntervalSec * 400), 7000)
-        : Math.min(Math.max(7000, loopIntervalSec * 500), 9000);
+      const holdMs = !hasTyphoons
+        ? Math.max(10000, loopIntervalSec * 1000)
+        : isOverview
+          ? Math.min(Math.max(5500, loopIntervalSec * 400), 7000)
+          : Math.min(Math.max(7000, loopIntervalSec * 500), 9000);
 
       fallbackTimer = setTimeout(() => {
         if (!cancelled) {
@@ -564,9 +573,10 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     activeWarningDivision,
     isFinalWarningNational,
     amedasMetric,
-    selectedTyphoon.id,
+    selectedTyphoon?.id,
     typhoonPatrolStep,
     totalTyphoons,
+    hasTyphoons,
     selectedEarthquake.id,
     isLoopPaused,
     interruptKind,
@@ -708,7 +718,24 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         {/* ==================== TYPHOON TRACK & FORECAST CONE ==================== */}
         {effectiveScene === 'typhoon' && (
           <>
-            {!isSingleTyphoonMode ? (
+            {!hasTyphoons || !activeTyphoon ? (
+              <div data-testid="typhoon-panel-root" className="pb-2">
+                <div className="bg-[#3E434F] px-2.5 py-1 text-[0.8125rem] font-bold text-white flex items-center justify-between gap-1.5">
+                  <span className="min-w-0 truncate">台風解析・進路予報情報</span>
+                  <span className="font-mono text-[0.6875rem] text-neutral-300 whitespace-nowrap shrink-0">
+                    0件
+                  </span>
+                </div>
+                <div className="px-2.5 py-3 text-xs text-neutral-300 space-y-2">
+                  <div
+                    data-testid="typhoon-none-message"
+                    className="p-2.5 bg-neutral-900/80 border border-neutral-700 text-neutral-200 font-medium"
+                  >
+                    現在台風情報は発表されていません
+                  </div>
+                </div>
+              </div>
+            ) : !isSingleTyphoonMode ? (
               /* ==================== 1. OVERVIEW MODE (All Cyclones in Blocks, Current Specs Only) ==================== */
               <div className="space-y-2.5 pb-2">
                 {/* Header banner */}
@@ -889,8 +916,8 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                 {/* Selected Typhoon Primary Header Block (Fixed) with Selection Highlight Animation */}
                 {(() => {
                   const p0 =
-                    selectedTyphoon.points.find((p) => !p.isForecast) ||
-                    selectedTyphoon.points[0];
+                    activeTyphoon.points.find((p) => !p.isForecast) ||
+                    activeTyphoon.points[0];
 
                   return (
                     <div className="border-2 border-sky-400 bg-[#141A28] rounded-md overflow-hidden shadow-[0_0_20px_rgba(56,189,248,0.35)] ring-1 ring-sky-300/50 animate-in fade-in slide-in-from-top-2 duration-300">
@@ -898,15 +925,15 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                       <div className="bg-sky-600 px-3 py-2 flex items-center justify-between text-white border-b border-sky-400/60 gap-2">
                         <div className="flex items-baseline gap-2 min-w-0">
                           <span className="text-base font-black tracking-wide shrink-0 whitespace-nowrap">
-                            {selectedTyphoon.displayNumber}
+                            {activeTyphoon.displayNumber}
                           </span>
-                          {selectedTyphoon.nameJp &&
-                            selectedTyphoon.nameJp !==
-                              selectedTyphoon.displayNumber && (
+                          {activeTyphoon.nameJp &&
+                            activeTyphoon.nameJp !==
+                              activeTyphoon.displayNumber && (
                               <span className="text-xs font-bold text-sky-100 truncate">
-                                {selectedTyphoon.nameJp}{' '}
-                                {selectedTyphoon.nameEn &&
-                                  `(${selectedTyphoon.nameEn})`}
+                                {activeTyphoon.nameJp}{' '}
+                                {activeTyphoon.nameEn &&
+                                  `(${activeTyphoon.nameEn})`}
                               </span>
                             )}
                         </div>
@@ -1029,7 +1056,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
 
                 {/* Forecast Timeline Connected by Downward Arrows */}
                 {(() => {
-                  const forecastPoints = selectedTyphoon.points.filter(
+                  const forecastPoints = activeTyphoon.points.filter(
                     (p) => p.isForecast
                   );
 
@@ -1044,7 +1071,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
                   return (
                     <div className="pt-0.5 space-y-1">
                       {forecastPoints.map((pt, fIdx) => (
-                        <React.Fragment key={`${selectedTyphoon.id}-fc-${fIdx}`}>
+                        <React.Fragment key={`${activeTyphoon.id}-fc-${fIdx}`}>
                           {/* Downward connecting arrow before each forecast card */}
                           <div className="flex flex-col items-center justify-center my-1.5 py-0.5">
                             <div className="w-0.5 h-3.5 bg-gradient-to-b from-sky-400 to-sky-500" />

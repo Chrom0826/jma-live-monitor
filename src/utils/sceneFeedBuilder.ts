@@ -49,7 +49,7 @@ export interface BuildSceneFeedOptions {
   selectedEarthquake: EarthquakeReport | null;
   pinnedEarthquakeId: string | null;
   activeWarningDivision: RegionalWarningItem | null;
-  selectedTyphoon: TyphoonReport;
+  selectedTyphoon?: TyphoonReport | null;
   activeVolcano: VolcanoStatusItem | null;
   amedasMetric: AmedasMetric;
   currentTime?: string;
@@ -386,7 +386,10 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
   // ==================== 4. TYPHOON SCENE ====================
   if (effectiveScene === 'typhoon') {
     const hasTyphoons = data.typhoons && data.typhoons.length > 0;
-    const t = selectedTyphoon || (hasTyphoons ? data.typhoons[0] : null);
+    const t =
+      (selectedTyphoon &&
+        data.typhoons.find((item) => item.id === selectedTyphoon.id)) ||
+      (hasTyphoons ? data.typhoons[0] : null);
 
     if (t && hasTyphoons) {
       const accentColor = '#A855F7';
@@ -435,15 +438,15 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
     // No active typhoon
     return {
       sceneId: 'typhoon',
-      badgeLabel: '台風進路情報',
-      badgeSub: '監視中',
-      title: '台風情報（日本近海・監視エリア）',
+      badgeLabel: '台風情報',
+      badgeSub: '発表なし',
+      title: '台風解析・進路予報情報',
       timeLabel: defaultTimeLabel,
       accentColor: '#64748B',
       items: [
         {
           prefix: '【実況】',
-          text: '現在、日本近海および監視対象エリアに発生している台風はありません。熱帯低気圧や気圧の谷の発生にご留意ください。',
+          text: '現在台風情報は発表されていません。',
         },
       ],
       textKey: 'typhoon-none',
@@ -845,16 +848,19 @@ export function buildBottomFlipFeed(
   const tsunamiSeverity = getTsunamiAlertSeverity(data.tsunamiForecast);
   const isTsunamiAlertActive = tsunamiSeverity === 'warning_or_above';
   const isEewActive = Boolean(activeEew && isEewStillActive(activeEew));
+  const hasActiveTyphoons = Boolean(data.typhoons && data.typhoons.length > 0);
 
   // Determine whether Flip Feed should be active:
   // 1) When Tsunami Advisory or Warning is active (ALWAYS on regardless of scene!)
   // 2) When EEW is active (in earthquake/eew or normal loop)
   // 3) When viewing earthquake or tsunami scene
+  // 4) When viewing typhoon scene with no active typhoon (shows empty-state message cleanly)
   const shouldActivateFlip =
     isTsunamiAlertActive ||
     isEewActive ||
     effectiveScene === 'earthquake' ||
-    effectiveScene === 'tsunami';
+    effectiveScene === 'tsunami' ||
+    (effectiveScene === 'typhoon' && !hasActiveTyphoons);
 
   if (!shouldActivateFlip) {
     return null;
@@ -1294,6 +1300,26 @@ export function buildBottomFlipFeed(
       headerTitle: '全国の津波予報発表状況',
       headerTime: defaultTime,
       accentColor: '#14B8A6',
+    };
+  }
+
+  // ==================== PRIORITY 5: TYPHOON SCENE (no active typhoon) ====================
+  if (effectiveScene === 'typhoon' && !hasActiveTyphoons) {
+    return {
+      isFlipMode: true,
+      cards: [
+        {
+          id: 'typhoon-none-card',
+          badge: '台風情報',
+          badgeBg: 'bg-slate-700 text-white font-bold',
+          mainText: '現在台風情報は発表されていません',
+          subText: '日本近海および監視エリアに台風・熱帯低気圧は発生していません。',
+          accentColor: '#64748B',
+        },
+      ],
+      headerTitle: '台風解析・進路予報情報',
+      headerTime: defaultTime,
+      accentColor: '#64748B',
     };
   }
 

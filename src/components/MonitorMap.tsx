@@ -494,7 +494,7 @@ interface MonitorMapProps {
   activeTsunamiForecast?: TsunamiForecastReport | null;
   data: MonitorDataBundle;
   selectedEarthquake: EarthquakeReport;
-  selectedTyphoon: TyphoonReport;
+  selectedTyphoon: TyphoonReport | null;
   typhoonPatrolStep?: number;
   activeVolcano: VolcanoStatusItem;
   activeTsunamiStation?: TsunamiStationItem;
@@ -844,7 +844,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   const effectiveScene: SceneId = resolveEffectiveScene(activeScene, interruptKind);
 
   const isSingleTyphoonMode = useMemo(() => {
-    const total = data.typhoons.length > 0 ? data.typhoons.length : 1;
+    if (data.typhoons.length === 0) return false;
+    const total = data.typhoons.length;
     if (total <= 1) return effectiveScene === 'typhoon';
     return (
       effectiveScene === 'typhoon' &&
@@ -1371,9 +1372,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   // Pre-compile Typhoon tracks, forecast cones, normalized Mercator radii, and deterministic non-overlapping label offsets
   // Eliminates all SVG/DOM blurring, position drift, and stop-redraw snapping during & after camera flight!
   const preCompiledTyphoons = useMemo(() => {
-    if (effectiveScene !== 'typhoon') return [];
-    const typhoonsToRender =
-      data.typhoons.length > 0 ? data.typhoons : [selectedTyphoon];
+    if (effectiveScene !== 'typhoon' || data.typhoons.length === 0) return [];
+    const typhoonsToRender = data.typhoons;
 
     const allLats: number[] = [];
     const allLons: number[] = [];
@@ -2827,7 +2827,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       if (effectiveScene === 'typhoon') {
         for (let tIdx = 0; tIdx < preCompiledTyphoons.length; tIdx++) {
           const item = preCompiledTyphoons[tIdx];
-          if (isSingleTyphoonMode && preCompiledTyphoons.length > 1 && item.tc.id !== selectedTyphoon.id) {
+          if (
+            isSingleTyphoonMode &&
+            preCompiledTyphoons.length > 1 &&
+            selectedTyphoon &&
+            item.tc.id !== selectedTyphoon.id
+          ) {
             continue;
           }
           const {
@@ -3155,7 +3160,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     preCompiledMunicipalityLabelsByDiv,
     preCompiledTyphoons,
     isSingleTyphoonMode,
-    selectedTyphoon.id,
+    selectedTyphoon?.id,
     divHasActiveWarningMap,
     preCompiledEarthquake,
     preCompiledEew,
@@ -4104,15 +4109,15 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.2, 3.0);
     }
     if (effectiveScene === 'typhoon') {
+      if (data.typhoons.length === 0) {
+        return fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.1, 3.0);
+      }
       const activeTyphoon =
-        data.typhoons.find((t) => t.id === selectedTyphoon.id) ||
-        data.typhoons[0] ||
-        selectedTyphoon;
+        (selectedTyphoon && data.typhoons.find((t) => t.id === selectedTyphoon.id)) ||
+        data.typhoons[0];
       const targetList = isSingleTyphoonMode
         ? (activeTyphoon ? [activeTyphoon] : [])
-        : data.typhoons.length > 0
-        ? data.typhoons
-        : (activeTyphoon ? [activeTyphoon] : []);
+        : data.typhoons;
       const allLats: number[] = [];
       const allLons: number[] = [];
       for (const tc of targetList) {
@@ -4282,7 +4287,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     selectedEarthquake.id,
     selectedEarthquake.lat,
     selectedEarthquake.lon,
-    selectedTyphoon.id,
+    selectedTyphoon?.id,
+    data.typhoons.length,
     isSingleTyphoonMode,
     typhoonPatrolStep,
     activeVolcano.id,
