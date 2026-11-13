@@ -92,10 +92,13 @@ import {
   shouldReplaceEew,
 } from './utils/eewTsunami';
 import {
+  buildAmedasFlipCardsFromPages,
   buildSceneFeed,
   buildBottomFlipFeed,
+  BottomFlipCard,
   BottomFlipFeedResult,
   evaluateTickerPassEnd,
+  paginateSegmentsGreedy,
   SceneFeedData,
 } from './utils/sceneFeedBuilder';
 import {
@@ -487,7 +490,81 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
   isTickerDriverScene,
   onTickerCycleComplete,
 }: BroadcastBottomBarProps) {
-  const cardCount = flipFeed?.cards.length ?? 0;
+  const isLoopPausedRef = useRef(isLoopPaused);
+  isLoopPausedRef.current = isLoopPaused;
+
+  const flipViewportRef = useRef<HTMLDivElement | null>(null);
+  const flipProbeRef = useRef<HTMLSpanElement | null>(null);
+  const citySegments = flipFeed?.citySegments;
+  const citySegmentsKey = citySegments ? citySegments.join('|') : '';
+  const amedasMetricForFlip = flipFeed?.amedasMetric ?? 'temp';
+
+  const [measuredFlipState, setMeasuredFlipState] = useState<{
+    key: string;
+    cards: BottomFlipCard[];
+  }>({ key: '', cards: [] });
+
+  useLayoutEffect(() => {
+    if (!citySegments || citySegments.length === 0) {
+      return;
+    }
+    const viewport = flipViewportRef.current;
+    const probe = flipProbeRef.current;
+    if (!viewport || !probe) return;
+
+    let cancelled = false;
+    const recomputePages = () => {
+      if (cancelled) return;
+      const availableWidth = viewport.clientWidth - 4;
+      if (availableWidth <= 20) return;
+
+      const pages = paginateSegmentsGreedy(citySegments, (candidateLine) => {
+        probe.textContent = candidateLine;
+        return probe.getBoundingClientRect().width <= availableWidth;
+      });
+      const nextCards = buildAmedasFlipCardsFromPages(
+        pages,
+        amedasMetricForFlip
+      );
+
+      setMeasuredFlipState((prev) => {
+        if (
+          prev.key === citySegmentsKey &&
+          prev.cards.length === nextCards.length &&
+          prev.cards.every((c, i) => c.mainText === nextCards[i]?.mainText)
+        ) {
+          return prev;
+        }
+        return { key: citySegmentsKey, cards: nextCards };
+      });
+    };
+
+    recomputePages();
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => recomputePages());
+      ro.observe(viewport);
+    }
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      document.fonts.ready.then(() => recomputePages()).catch(() => {});
+    }
+
+    return () => {
+      cancelled = true;
+      ro?.disconnect();
+    };
+  }, [citySegments, citySegmentsKey, amedasMetricForFlip, variant]);
+
+  const effectiveFlipCards =
+    citySegments &&
+    citySegments.length > 0 &&
+    measuredFlipState.key === citySegmentsKey &&
+    measuredFlipState.cards.length > 0
+      ? measuredFlipState.cards
+      : (flipFeed?.cards ?? []);
+
+  const cardCount = effectiveFlipCards.length;
   const isFlipFeedActive = cardCount > 0;
 
   const [flipState, setFlipState] = useState<{
@@ -501,6 +578,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
       return;
     }
     const timer = setInterval(() => {
+      if (isLoopPausedRef.current) return;
       setFlipState((prev) => ({
         sessionKey: flipSessionKey,
         ticks: prev.sessionKey === flipSessionKey ? prev.ticks + 1 : 1,
@@ -511,11 +589,15 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
 
   const activeTicks =
     flipState.sessionKey === flipSessionKey ? flipState.ticks : 0;
-  const { cardIndex: safeFlipIndex, completedRounds } = computeFlipCycleState(
+  const { cardIndex: rawFlipIndex, completedRounds } = computeFlipCycleState(
     activeTicks,
     cardCount
   );
-  const currentFlipCard = flipFeed?.cards[safeFlipIndex];
+  const safeFlipIndex =
+    flipFeed?.stopOnLastCard && completedRounds >= 1
+      ? Math.max(0, cardCount - 1)
+      : rawFlipIndex;
+  const currentFlipCard = effectiveFlipCards[safeFlipIndex];
 
   const onFlipRoundsChangeRef = useRef(onFlipRoundsChange);
   useEffect(() => {
@@ -693,10 +775,10 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
           ref={tickerTrackRef}
           onAnimationEnd={handlePassAnimationEnd}
           data-paused={isLoopPaused ? 'true' : undefined}
-          className={`ticker-pass-track inline-flex items-center font-bold text-white tracking-wide leading-none ${
+          className={`ticker-pass-track inline-flex items-center font-bold text-white tracking-wide leading-tight ${
             isMobile
-              ? 'gap-2 text-[15px]'
-              : 'gap-2.5 text-[1.3125rem] md:text-[1.4375rem]'
+              ? 'gap-2 text-[18px]'
+              : 'gap-3 text-[1.5rem] md:text-[1.75rem]'
           }`}
         >
           {activeItem.prefix && (
@@ -718,25 +800,25 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
       <section
         aria-label="気象防災ライブフィード"
         data-testid="mobile-top-feed-bar"
-        className="h-[58px] shrink-0 border-b-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden z-20 px-2.5 py-1"
+        className="h-[68px] shrink-0 border-b-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden z-20 px-2.5 py-1.5"
       >
         <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
           <div className="flex items-center gap-1.5 min-w-0">
             <span
-              className="w-1.5 h-3.5 rounded-xs shrink-0"
+              className="w-1.5 h-4 rounded-xs shrink-0"
               style={{ backgroundColor: accentColor }}
             />
-            <span className="text-[11px] font-black text-neutral-100 tracking-wider truncate">
+            <span className="text-[14px] leading-tight font-black text-neutral-100 tracking-wider truncate">
               {headerTitle}
             </span>
-            <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[10px] text-neutral-300 whitespace-nowrap">
+            <div className="ml-auto shrink-0 flex items-center gap-1.5 font-mono text-[11px] text-neutral-300 whitespace-nowrap">
               <span className="whitespace-nowrap">{headerTime}</span>
               <span className="px-1 py-0.2 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[10px] font-sans font-bold whitespace-nowrap">
                 気象庁発表
               </span>
-              {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
+              {isFlipFeedActive && cardCount > 1 && (
                 <span className="px-1 py-0.2 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[10px] font-mono font-bold whitespace-nowrap">
-                  {safeFlipIndex + 1}/{flipFeed.cards.length}
+                  {safeFlipIndex + 1}/{cardCount}
                 </span>
               )}
             </div>
@@ -744,20 +826,34 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
 
           {isFlipFeedActive && currentFlipCard ? (
             <div
-              key={`mobile-flip-${safeFlipIndex}-${currentFlipCard.id}`}
-              data-testid="mobile-flip-feed-card"
-              className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+              ref={flipViewportRef}
+              className="flex-1 flex items-center min-w-0 relative overflow-hidden"
             >
-              <div className="flex items-center gap-2 w-full min-w-0">
+              {citySegments && citySegments.length > 0 && (
                 <span
-                  className={`px-1.5 py-0.5 text-[10px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
-                >
-                  {currentFlipCard.badge}
-                </span>
-                <div className="min-w-0 flex-1 truncate">
-                  <span className="text-[14px] font-black text-white tracking-wide truncate block">
-                    {currentFlipCard.mainText}
-                  </span>
+                  ref={flipProbeRef}
+                  aria-hidden="true"
+                  className="absolute left-0 top-0 invisible pointer-events-none whitespace-nowrap text-[17px] leading-tight font-black tracking-wide"
+                />
+              )}
+              <div
+                key={`mobile-flip-${safeFlipIndex}-${currentFlipCard.id}`}
+                data-testid="mobile-flip-feed-card"
+                className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+              >
+                <div className="flex items-center gap-2 w-full min-w-0">
+                  {currentFlipCard.badge && (
+                    <span
+                      className={`px-1.5 py-0.5 text-[11px] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
+                    >
+                      {currentFlipCard.badge}
+                    </span>
+                  )}
+                  <div className="min-w-0 flex-1 truncate">
+                    <span className="text-[17px] leading-tight font-black text-white tracking-wide truncate block">
+                      {currentFlipCard.mainText}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -772,25 +868,25 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
   return (
     <footer
       aria-label="気象防災ライブフィード"
-      className="h-[5.25rem] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
+      className="h-[6.5rem] shrink-0 border-t-2 border-[#5A606D] bg-[#0B0D12] flex items-center overflow-hidden animate-startup-bottom z-30 px-4 py-2"
     >
       <div className="flex-1 min-w-0 h-full flex flex-col justify-between overflow-hidden">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2.5 min-w-0">
           <span
-            className="w-1.5 h-4 rounded-xs shrink-0"
+            className="w-1.5 h-6 rounded-xs shrink-0"
             style={{ backgroundColor: accentColor }}
           />
-          <span className="text-sm md:text-[0.9375rem] font-black text-neutral-100 tracking-wider truncate">
+          <span className="text-[1.25rem] md:text-[1.5rem] leading-tight font-black text-neutral-100 tracking-wider truncate">
             {headerTitle}
           </span>
-          <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs text-neutral-300 whitespace-nowrap">
+          <div className="ml-auto shrink-0 flex items-center gap-2.5 font-mono text-xs md:text-[0.8125rem] text-neutral-300 whitespace-nowrap">
             <span className="whitespace-nowrap">{headerTime}</span>
-            <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[0.6875rem] font-sans font-bold whitespace-nowrap">
+            <span className="px-1.5 py-0.5 bg-[#1C2029] text-neutral-200 border border-neutral-700 rounded-xs text-[0.75rem] font-sans font-bold whitespace-nowrap">
               気象庁発表
             </span>
-            {isFlipFeedActive && flipFeed && flipFeed.cards.length > 1 && (
-              <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[0.6875rem] font-mono font-bold whitespace-nowrap">
-                {safeFlipIndex + 1}/{flipFeed.cards.length}
+            {isFlipFeedActive && cardCount > 1 && (
+              <span className="px-1.5 py-0.5 bg-black/50 text-neutral-300 border border-neutral-700 rounded-xs text-[0.75rem] font-mono font-bold whitespace-nowrap">
+                {safeFlipIndex + 1}/{cardCount}
               </span>
             )}
           </div>
@@ -798,25 +894,39 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
 
         {isFlipFeedActive && currentFlipCard ? (
           <div
-            key={`desktop-flip-${safeFlipIndex}-${currentFlipCard.id}`}
-            data-testid="desktop-flip-feed-card"
-            className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+            ref={flipViewportRef}
+            className="flex-1 flex items-center min-w-0 relative overflow-hidden"
           >
-            <div className="flex items-center gap-3 w-full min-w-0">
+            {citySegments && citySegments.length > 0 && (
               <span
-                className={`px-2.5 py-0.5 text-xs md:text-[0.8125rem] font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
-              >
-                {currentFlipCard.badge}
-              </span>
-              <div className="min-w-0 flex-1 flex items-baseline gap-3 truncate">
-                <span className="text-[1.1875rem] md:text-[1.4375rem] font-black text-white tracking-wide truncate">
-                  {currentFlipCard.mainText}
-                </span>
-                {currentFlipCard.subText && (
-                  <span className="text-xs md:text-sm font-mono text-neutral-400 truncate">
-                    {currentFlipCard.subText}
+                ref={flipProbeRef}
+                aria-hidden="true"
+                className="absolute left-0 top-0 invisible pointer-events-none whitespace-nowrap text-[1.4375rem] md:text-[1.75rem] leading-tight font-black tracking-wide"
+              />
+            )}
+            <div
+              key={`desktop-flip-${safeFlipIndex}-${currentFlipCard.id}`}
+              data-testid="desktop-flip-feed-card"
+              className="flex-1 flex items-center min-w-0 animate-title-swap overflow-hidden"
+            >
+              <div className="flex items-center gap-3 w-full min-w-0">
+                {currentFlipCard.badge && (
+                  <span
+                    className={`px-2.5 py-0.5 text-xs md:text-sm font-black rounded-xs shrink-0 tracking-wide uppercase shadow-xs whitespace-nowrap ${currentFlipCard.badgeBg}`}
+                  >
+                    {currentFlipCard.badge}
                   </span>
                 )}
+                <div className="min-w-0 flex-1 flex items-baseline gap-3 truncate">
+                  <span className="text-[1.4375rem] md:text-[1.75rem] leading-tight font-black text-white tracking-wide truncate">
+                    {currentFlipCard.mainText}
+                  </span>
+                  {currentFlipCard.subText && (
+                    <span className="text-xs md:text-[0.9375rem] font-mono text-neutral-400 truncate">
+                      {currentFlipCard.subText}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -2494,7 +2604,7 @@ export default function App() {
     ]
   );
 
-  // High-priority bottom flip feed for Earthquake, EEW, and Tsunami alerts (Pattern B TV disaster style)
+  // High-priority bottom flip feed for Earthquake, EEW, Tsunami alerts, and AMeDAS major cities
   const flipFeed = useMemo(
     () =>
       buildBottomFlipFeed({
@@ -2503,6 +2613,7 @@ export default function App() {
         activeEew,
         selectedEarthquake,
         pinnedEarthquakeId,
+        amedasMetric,
         isLiveInterrupt: interruptKind === 'earthquake' || interruptKind === 'eew',
       }),
     [
@@ -2511,11 +2622,15 @@ export default function App() {
       activeEew,
       selectedEarthquake,
       pinnedEarthquakeId,
+      amedasMetric,
       interruptKind,
     ]
   );
 
-  const currentFlipSessionKey = `${effectiveScene}|${flipSessionNonce}`;
+  const currentFlipSessionKey =
+    effectiveScene === 'amedas'
+      ? `amedas|${amedasMetric}|${flipSessionNonce}`
+      : `${effectiveScene}|${flipSessionNonce}`;
   const currentTickerSessionKey =
     effectiveScene === 'warnings'
       ? `warnings|${warningPatrolStep}|${flipSessionNonce}`
@@ -2592,6 +2707,13 @@ export default function App() {
       return;
     }
 
+    if (effectiveScene === 'amedas') {
+      if (activeFlipCompletedRounds >= 1) {
+        advanceSceneRef.current();
+      }
+      return;
+    }
+
     if (effectiveScene === 'warnings') {
       if (isFinalWarningNational) {
         if (isWarningsScrollDone) {
@@ -2614,6 +2736,8 @@ export default function App() {
     }
   }, [
     effectiveScene,
+    amedasMetric,
+    activeFlipCompletedRounds,
     isLoopPaused,
     interruptKind,
     completedTickerSessionKey,

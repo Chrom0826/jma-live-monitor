@@ -3,14 +3,17 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  buildAmedasFlipCardsFromPages,
   buildSceneFeed,
   buildBottomFlipFeed,
   evaluateTickerPassEnd,
+  paginateSegmentsGreedy,
   WEATHER_COMMENTARY_EMPTY_MESSAGE,
 } from './sceneFeedBuilder';
 import { SceneDetailPanel } from '../components/SceneDetailPanel';
 import { REGION_CONFIGS } from './jmaParser';
 import {
+  INITIAL_AMEDAS_STATIONS,
   INITIAL_EARTHQUAKES,
   INITIAL_FORECASTS,
   INITIAL_TYPHOONS,
@@ -603,9 +606,14 @@ test('radar and warnings share 24h VPZJ51/VPCJ51/VPFJ51 commentary and show exac
   });
 
   assert.equal(radarFeed.items.length, 1);
-  assert.equal(radarFeed.items[0].text, freshVpf51.content);
+  assert.equal(radarFeed.title, '沖縄本島地方気象解説情報');
+  assert.equal(radarFeed.items[0].sourceTitle, '沖縄本島地方気象解説情報');
+  assert.equal(radarFeed.items[0].prefix, undefined);
+  assert.equal(radarFeed.items[0].text, '落雷や急な強い雨に注意してください。');
   assert.equal(warningsNationwideFeed.items.length, 1);
-  assert.equal(warningsNationwideFeed.items[0].text, freshVpf51.content);
+  assert.equal(warningsNationwideFeed.title, '沖縄本島地方気象解説情報');
+  assert.equal(warningsNationwideFeed.items[0].prefix, undefined);
+  assert.equal(warningsNationwideFeed.items[0].text, '落雷や急な強い雨に注意してください。');
   // Warnings nationwide must not synthesize non-XML boilerplate like "特別警報 ... 発表されています"
   assert.ok(!warningsNationwideFeed.items.some((i) => i.text.includes('発表されています')));
 
@@ -706,7 +714,10 @@ test('warnings zoomed division uses R06 VPWW55-61 / VPWS50 verbatim and rejects 
   });
 
   assert.equal(zoomedFeed.items.length, 1);
-  assert.equal(zoomedFeed.items[0].text, vpww55.content);
+  assert.equal(zoomedFeed.title, '石川県大雨警報・注意報');
+  assert.equal(zoomedFeed.items[0].sourceTitle, '石川県大雨警報・注意報');
+  assert.equal(zoomedFeed.items[0].prefix, undefined);
+  assert.equal(zoomedFeed.items[0].text, '能登では、土砂災害に警戒してください。');
   assert.ok(!zoomedFeed.items.some((i) => i.text.includes('廃止予定')));
   assert.ok(!zoomedFeed.items.some((i) => i.text.includes('該当地域の各市区町村')));
 
@@ -730,7 +741,8 @@ test('warnings zoomed division uses R06 VPWW55-61 / VPWS50 verbatim and rejects 
 
   assert.equal(vpws50ZoomFeed.items.length, 1);
   assert.ok(vpws50ZoomFeed.items[0].text.includes('大雨警報・暴風警報'));
-  assert.ok(vpws50ZoomFeed.items[0].prefix?.includes('集約通報'));
+  assert.equal(vpws50ZoomFeed.items[0].prefix, undefined);
+  assert.ok(vpws50ZoomFeed.title.includes('集約通報'));
 });
 
 test('evaluateTickerPassEnd waits for >= 15s and finishes current pass before advancing', () => {
@@ -768,4 +780,74 @@ test('evaluateTickerPassEnd waits for >= 15s and finishes current pass before ad
     itemCount: 1,
   });
   assert.equal(paused.shouldSignalComplete, false);
+});
+
+test('buildBottomFlipFeed: amedas displays 8 major cities with dynamic pagination and metric titles', () => {
+  const amedasBundle: MonitorDataBundle = {
+    ...mockBundle,
+    amedas: INITIAL_AMEDAS_STATIONS,
+  };
+
+  const tempFlip = buildBottomFlipFeed({
+    effectiveScene: 'amedas',
+    data: amedasBundle,
+    activeEew: null,
+    amedasMetric: 'temp',
+  });
+  assert.ok(tempFlip);
+  assert.equal(tempFlip.headerTitle, '現在の気温');
+  assert.equal(tempFlip.stopOnLastCard, true);
+  assert.equal(tempFlip.citySegments?.length, 8);
+  assert.deepEqual(
+    tempFlip.citySegments?.map((s) => s.split(' ')[0]),
+    ['札幌', '仙台', '東京', '名古屋', '大阪', '広島', '福岡', '那覇']
+  );
+  assert.ok(tempFlip.citySegments?.[0].endsWith('℃'));
+
+  const precipFlip = buildBottomFlipFeed({
+    effectiveScene: 'amedas',
+    data: amedasBundle,
+    activeEew: null,
+    amedasMetric: 'precip',
+  });
+  assert.equal(precipFlip?.headerTitle, '現在の1時間降水量');
+  assert.ok(precipFlip?.citySegments?.[0].endsWith('mm'));
+
+  const windFlip = buildBottomFlipFeed({
+    effectiveScene: 'amedas',
+    data: amedasBundle,
+    activeEew: null,
+    amedasMetric: 'wind',
+  });
+  assert.equal(windFlip?.headerTitle, '現在の風向・風速');
+  assert.ok(windFlip?.citySegments?.[0].endsWith('m/s'));
+
+  const snowFlip = buildBottomFlipFeed({
+    effectiveScene: 'amedas',
+    data: amedasBundle,
+    activeEew: null,
+    amedasMetric: 'snow',
+  });
+  assert.equal(snowFlip?.headerTitle, '現在の積雪深');
+  assert.ok(snowFlip?.citySegments?.[0].endsWith('cm'));
+
+  // Dynamic pagination packs as many cities as fit per screen width
+  const segs = tempFlip.citySegments!;
+  // Narrow screen (fits max 30 chars): spills cleanly into multiple cards joined by '／'
+  const narrowPages = paginateSegmentsGreedy(segs, (line) => line.length <= 26);
+  assert.ok(narrowPages.length >= 3);
+  assert.deepEqual(narrowPages.flat(), segs);
+
+  // Medium laptop screen (fits 5 cities on page 1, remaining 3 on page 2)
+  const midPages = paginateSegmentsGreedy(segs, (line) => line.length <= 45);
+  assert.equal(midPages.length, 2);
+  const midCards = buildAmedasFlipCardsFromPages(midPages, 'temp');
+  assert.equal(midCards.length, 2);
+  assert.ok(midCards[0].mainText.includes('／'));
+  assert.equal(midCards[0].badge, '');
+
+  // Wide screen (all 8 fit on 1 card)
+  const widePages = paginateSegmentsGreedy(segs, (line) => line.length <= 200);
+  assert.equal(widePages.length, 1);
+  assert.equal(widePages[0].length, 8);
 });

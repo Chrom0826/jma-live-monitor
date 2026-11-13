@@ -3330,7 +3330,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     if (!map || effectiveScene !== 'amedas') return;
 
     let cancelled = false;
-    let timerId: ReturnType<typeof setTimeout> | null = null;
     let rafId = 0;
 
     // Always start hidden; points only drop in once the camera has fully settled.
@@ -3354,35 +3353,11 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         if (elapsed < AMEDAS_ENTER_TOTAL_MS) {
           rafId = requestAnimationFrame(stepEntering);
         } else {
+          // Stay steady on the map while bottom city flip cards cycle through all pages;
+          // App.tsx advances `amedasMetric` or the scene once flipping completes.
           amedasAnimRef.current.phase = 'steady';
           amedasAnimRef.current.startTime = performance.now();
           renderInteractiveCanvasRef.current();
-
-          timerId = setTimeout(() => {
-            if (cancelled || isLoopPaused || interruptKind !== 'none') return;
-            amedasAnimRef.current.phase = 'exiting';
-            amedasAnimRef.current.startTime = performance.now();
-
-            const stepExiting = (nowExit: number) => {
-              if (cancelled) return;
-              const exitElapsed = nowExit - amedasAnimRef.current.startTime;
-              renderInteractiveCanvasRef.current();
-
-              if (exitElapsed < AMEDAS_EXIT_TOTAL_MS) {
-                rafId = requestAnimationFrame(stepExiting);
-              } else {
-                amedasAnimRef.current.phase = 'transitioning';
-                amedasAnimRef.current.startTime = performance.now();
-                renderInteractiveCanvasRef.current();
-
-                timerId = setTimeout(() => {
-                  if (cancelled || isLoopPaused || interruptKind !== 'none') return;
-                  onSceneCompleteRef.current();
-                }, 300);
-              }
-            };
-            rafId = requestAnimationFrame(stepExiting);
-          }, 7000);
         }
       };
       rafId = requestAnimationFrame(stepEntering);
@@ -3426,7 +3401,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
 
     return () => {
       cancelled = true;
-      if (timerId) clearTimeout(timerId);
       if (rafId) cancelAnimationFrame(rafId);
     };
   }, [
@@ -4754,89 +4728,6 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           data-testid="interactive-map-overlay-canvas"
           className="absolute inset-0 w-full h-full pointer-events-none z-[390]"
         />
-
-        {/* Subtle Map Zoom & World/Japan View Controls */}
-        <div
-          className={`absolute z-[400] flex items-center gap-1 bg-[#111318]/92 border border-neutral-700/80 p-1 ${
-            isMobilePortrait
-              ? effectiveScene === 'forecast'
-                ? 'top-1.5 right-1.5'
-                : 'top-1.5 left-1.5'
-              : 'bottom-3 left-3'
-          }`}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              const map = mapInstanceRef.current;
-              if (!map) return;
-              map.flyTo(map.getCenter(), Math.min(12, map.getZoom() + 1), {
-                animate: true,
-                duration: 0.75,
-                easeLinearity: 0.15,
-              });
-            }}
-            aria-label="地図を拡大"
-            className="px-2 py-0.5 text-[0.6875rem] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
-          >
-            +拡大
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const map = mapInstanceRef.current;
-              if (!map) return;
-              map.flyTo(map.getCenter(), Math.max(2, map.getZoom() - 1), {
-                animate: true,
-                duration: 0.75,
-                easeLinearity: 0.15,
-              });
-            }}
-            aria-label="地図を縮小"
-            className="px-2 py-0.5 text-[0.6875rem] font-mono text-neutral-200 hover:bg-neutral-800 transition-colors cursor-pointer"
-          >
-            -縮小
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const map = mapInstanceRef.current;
-              if (!map) return;
-              const { center: targetCenter, zoom: targetZoom } =
-                fitLatLonBoundsToSafeViewport(30.0, 45.75, 128.8, 146.0, 5.1, 3.0);
-              map.flyTo(targetCenter, targetZoom, {
-                animate: true,
-                duration: 1.15,
-                easeLinearity: 0.1,
-              });
-            }}
-            aria-label="日本全体を表示"
-            className="px-2 py-0.5 text-[0.6875rem] font-mono text-neutral-300 hover:bg-neutral-800 transition-colors cursor-pointer"
-          >
-            日本全体
-          </button>
-          <button
-            type="button"
-            data-testid="world-map-view-btn"
-            onClick={() => {
-              const map = mapInstanceRef.current;
-              if (!map) return;
-              map.flyTo(
-                [30.0, 140.0],
-                getScaledMaxZoom(3, overlayScale, isMobilePortrait),
-                {
-                  animate: true,
-                  duration: 1.4,
-                  easeLinearity: 0.1,
-                }
-              );
-            }}
-            aria-label="世界全体を表示"
-            className="px-2 py-0.5 text-[0.6875rem] font-mono text-cyan-300 hover:bg-neutral-800 transition-colors cursor-pointer"
-          >
-            世界全体
-          </button>
-        </div>
       </div>
 
       {/* EEW Mode Indicator / Switcher Bar & LPGM Legend (長周期地震動が実際に予測されているときだけ表示) */}
@@ -4849,10 +4740,10 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-x-2 gap-y-1 ${
             isMobilePortrait
               ? 'shrink-0 w-full border-t border-red-500/80 overflow-x-auto whitespace-nowrap'
-              : `absolute bottom-3 left-64 w-fit flex-wrap border border-red-500/80 rounded-xs shadow-xl ${
+              : `absolute bottom-3 left-3 w-fit flex-wrap border border-red-500/80 rounded-xs shadow-xl ${
                   isRightPanelHidden
-                    ? 'max-w-[calc(100%-16.75rem)]'
-                    : 'max-w-[calc(100%-33.25rem)]'
+                    ? 'max-w-[calc(100%-1.5rem)]'
+                    : 'max-w-[calc(100%-18rem)]'
                 }`
           }`}
         >
@@ -4907,7 +4798,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-1.5 ${
             isMobilePortrait
               ? 'shrink-0 w-full border-t border-neutral-700/80 overflow-x-auto whitespace-nowrap'
-              : 'absolute bottom-3 left-64 border border-neutral-700/80'
+              : 'absolute bottom-3 left-3 border border-neutral-700/80'
           }`}
         >
           <button
@@ -4954,7 +4845,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           className={`z-[400] bg-[#111318]/94 px-2.5 py-1 flex items-center gap-1.5 ${
             isMobilePortrait
               ? 'shrink-0 w-full border-t border-neutral-700/80 overflow-x-auto whitespace-nowrap'
-              : 'absolute bottom-3 left-64 border border-neutral-700/80'
+              : 'absolute bottom-3 left-3 border border-neutral-700/80'
           }`}
         >
           <span className="text-[0.6875rem] font-mono text-neutral-300 font-bold mr-1 shrink-0">
@@ -4999,7 +4890,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             className={`z-[400] flex flex-col gap-1 ${
               isMobilePortrait
                 ? 'shrink-0 w-full bg-[#111318]/95 border-t border-neutral-700/80 px-2 py-1 overflow-x-auto'
-                : 'absolute bottom-3 left-64'
+                : 'absolute bottom-3 left-3'
             }`}
           >
             {/* 3-Hour Slot Scrubber when in 'today_3h' mode */}

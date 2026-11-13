@@ -1,5 +1,6 @@
 import {
   AmedasMetric,
+  AmedasStationData,
   CityForecastItem,
   EarthquakeReport,
   EewReport,
@@ -226,6 +227,30 @@ export function selectDivisionR06WarningEntries(
     });
 }
 
+/**
+ * Extracts a leading JMA bracketed headline (`【...】`) into `headline`
+ * and returns the remaining body text without `【】` wrappers.
+ */
+export function splitJmaBracketHeadline(
+  content: string,
+  fallbackTitle: string
+): { headline: string; body: string } {
+  const trimmed = content.trim();
+  const match = /^【([^】]+)】\s*(.*)$/s.exec(trimmed);
+  if (match) {
+    const innerHeadline = match[1].trim();
+    const rest = match[2].trim();
+    return {
+      headline: innerHeadline || fallbackTitle,
+      body: rest || innerHeadline || trimmed,
+    };
+  }
+  return {
+    headline: fallbackTitle,
+    body: trimmed,
+  };
+}
+
 function buildSharedCommentaryResult(
   sceneId: 'radar' | 'warnings',
   xmlEntries: JmaXmlEntry[],
@@ -242,16 +267,20 @@ function buildSharedCommentaryResult(
 
   const items: SceneFeedItem[] =
     commentaryXmls.length > 0
-      ? commentaryXmls.map((entry) => ({
-          prefix: `【${entry.title}】`,
-          text: entry.content,
-          sourceTitle: entry.title,
-          sourceTime: formatXmlUpdatedJst(entry.updated, defaultTimeLabel),
-        }))
+      ? commentaryXmls.map((entry) => {
+          const { headline, body } = splitJmaBracketHeadline(
+            entry.content,
+            entry.title
+          );
+          return {
+            text: body,
+            sourceTitle: headline,
+            sourceTime: formatXmlUpdatedJst(entry.updated, defaultTimeLabel),
+          };
+        })
       : [{ text: WEATHER_COMMENTARY_EMPTY_MESSAGE }];
 
-  const title =
-    commentaryXmls.length > 0 ? commentaryXmls[0].title : options.defaultTitle;
+  const title = items[0]?.sourceTitle || options.defaultTitle;
   const timeLabel =
     commentaryXmls.length > 0
       ? formatXmlUpdatedJst(commentaryXmls[0].updated, defaultTimeLabel)
@@ -523,17 +552,22 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
         activeWarningDivision
       );
       if (matchedR06.length > 0) {
-        const items: SceneFeedItem[] = matchedR06.map((entry) => ({
-          prefix: `【${entry.title}】`,
-          text: entry.content,
-          sourceTitle: `${divName} ${entry.title}`,
-          sourceTime: formatXmlUpdatedJst(entry.updated, defaultTimeLabel),
-        }));
+        const items: SceneFeedItem[] = matchedR06.map((entry) => {
+          const { headline, body } = splitJmaBracketHeadline(
+            entry.content,
+            `${divName} ${entry.title}`
+          );
+          return {
+            text: body,
+            sourceTitle: headline,
+            sourceTime: formatXmlUpdatedJst(entry.updated, defaultTimeLabel),
+          };
+        });
         return {
           sceneId: 'warnings',
           badgeLabel,
           badgeSub: divName,
-          title: `${divName} ${matchedR06[0].title}`,
+          title: items[0]?.sourceTitle || `${divName} ${matchedR06[0].title}`,
           timeLabel: formatXmlUpdatedJst(matchedR06[0].updated, defaultTimeLabel),
           accentColor,
           items,
@@ -556,7 +590,6 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
           accentColor,
           items: [
             {
-              prefix: '【気象警報・注意報（Ｒ０６）（集約通報）】',
               text: `${divName}：${vpws50Kinds.join('・')}`,
               sourceTitle: `${divName} 気象警報・注意報（Ｒ０６）（集約通報）`,
               sourceTime: vpwsTime,
@@ -902,6 +935,120 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
 }
 
 
+export const AMEDAS_BOTTOM_CITY_TARGETS: Array<{
+  code: string;
+  cityName: string;
+}> = [
+  { code: '14163', cityName: '札幌' },
+  { code: '34392', cityName: '仙台' },
+  { code: '44132', cityName: '東京' },
+  { code: '51106', cityName: '名古屋' },
+  { code: '62078', cityName: '大阪' },
+  { code: '67437', cityName: '広島' },
+  { code: '82182', cityName: '福岡' },
+  { code: '91197', cityName: '那覇' },
+];
+
+export function getAmedasCityMetricTitle(metric: AmedasMetric): string {
+  switch (metric) {
+    case 'temp':
+      return '現在の気温';
+    case 'precip':
+      return '現在の1時間降水量';
+    case 'wind':
+      return '現在の風向・風速';
+    case 'snow':
+      return '現在の積雪深';
+  }
+}
+
+function findAmedasTargetStation(
+  stations: AmedasStationData[],
+  target: { code: string; cityName: string }
+): AmedasStationData | undefined {
+  return (
+    stations.find(
+      (s) => s.id === target.code || s.id === `amd-${target.code}`
+    ) ||
+    stations.find(
+      (s) =>
+        s.stationName === target.cityName ||
+        s.stationName.startsWith(`${target.cityName}（`)
+    )
+  );
+}
+
+/**
+ * Formats the 8 major Japanese cities (`札幌・仙台・東京・名古屋・大阪・広島・福岡・那覇`)
+ * for the active AMeDAS metric as `都市名 値`.
+ */
+export function buildAmedasCitySegments(
+  stations: AmedasStationData[],
+  metric: AmedasMetric
+): string[] {
+  const segments: string[] = [];
+  for (const target of AMEDAS_BOTTOM_CITY_TARGETS) {
+    const st = findAmedasTargetStation(stations, target);
+    if (!st) continue;
+    if (metric === 'temp') {
+      if (st.hasTemp === false) continue;
+      segments.push(`${target.cityName} ${st.temp.toFixed(1)}℃`);
+    } else if (metric === 'precip') {
+      segments.push(`${target.cityName} ${st.precip1h.toFixed(1)}mm`);
+    } else if (metric === 'wind') {
+      const dir = st.windDirection ? `${st.windDirection} ` : '';
+      segments.push(`${target.cityName} ${dir}${st.windSpeed.toFixed(1)}m/s`);
+    } else {
+      segments.push(`${target.cityName} ${st.snowCm ?? 0}cm`);
+    }
+  }
+  return segments;
+}
+
+/**
+ * Greedily packs consecutive city segments onto one card using `doesLineFit`,
+ * putting overflow segments onto card 2 (and further cards if needed on narrow screens).
+ */
+export function paginateSegmentsGreedy(
+  segments: string[],
+  doesLineFit: (candidateLine: string) => boolean
+): string[][] {
+  if (segments.length === 0) return [];
+  const pages: string[][] = [];
+  let current: string[] = [];
+
+  for (const seg of segments) {
+    const candidate =
+      current.length === 0 ? seg : `${current.join('／')}／${seg}`;
+    if (current.length === 0 || doesLineFit(candidate)) {
+      current.push(seg);
+    } else {
+      pages.push(current);
+      current = [seg];
+    }
+  }
+
+  if (current.length > 0) {
+    pages.push(current);
+  }
+  return pages;
+}
+
+export function buildAmedasFlipCardsFromPages(
+  pages: string[][],
+  metric: AmedasMetric
+): BottomFlipCard[] {
+  return pages
+    .filter((page) => page.length > 0)
+    .map((page, idx) => ({
+      id: `amedas-${metric}-page-${idx}`,
+      badge: '',
+      badgeBg: 'bg-emerald-600 text-white',
+      mainText: page.join('／'),
+      accentColor: '#10B981',
+    }));
+}
+
 export interface BottomFlipCard {
   id: string;
   badge: string;
@@ -917,6 +1064,9 @@ export interface BottomFlipFeedResult {
   headerTitle: string;
   headerTime: string;
   accentColor: string;
+  citySegments?: string[];
+  amedasMetric?: AmedasMetric;
+  stopOnLastCard?: boolean;
 }
 
 export interface BuildBottomFlipFeedOptions {
@@ -925,6 +1075,7 @@ export interface BuildBottomFlipFeedOptions {
   activeEew: EewReport | null;
   selectedEarthquake?: EarthquakeReport | null;
   pinnedEarthquakeId?: string | null;
+  amedasMetric?: AmedasMetric;
   isLiveInterrupt?: boolean;
   currentTime?: string;
 }
@@ -974,6 +1125,7 @@ export function buildBottomFlipFeed(
     activeEew,
     selectedEarthquake,
     pinnedEarthquakeId,
+    amedasMetric = 'temp',
     isLiveInterrupt = false,
     currentTime = '',
   } = options;
@@ -986,13 +1138,14 @@ export function buildBottomFlipFeed(
   // Determine whether Flip Feed should be active:
   // 1) When Tsunami Advisory or Warning is active (ALWAYS on regardless of scene!)
   // 2) When EEW is active (in earthquake/eew or normal loop)
-  // 3) When viewing earthquake or tsunami scene
+  // 3) When viewing earthquake, tsunami, or amedas scene
   // 4) When viewing typhoon scene with no active typhoon (shows empty-state message cleanly)
   const shouldActivateFlip =
     isTsunamiAlertActive ||
     isEewActive ||
     effectiveScene === 'earthquake' ||
     effectiveScene === 'tsunami' ||
+    effectiveScene === 'amedas' ||
     (effectiveScene === 'typhoon' && !hasActiveTyphoons);
 
   if (!shouldActivateFlip) {
@@ -1453,6 +1606,32 @@ export function buildBottomFlipFeed(
       headerTitle: '台風解析・進路予報情報',
       headerTime: defaultTime,
       accentColor: '#64748B',
+    };
+  }
+
+  // ==================== PRIORITY 6: AMEDAS SCENE (8 Major Cities Flip Cards) ====================
+  if (effectiveScene === 'amedas') {
+    const citySegments = buildAmedasCitySegments(data.amedas, amedasMetric);
+    const defaultPages =
+      citySegments.length > 4
+        ? [citySegments.slice(0, 4), citySegments.slice(4)]
+        : citySegments.length > 0
+          ? [citySegments]
+          : [['現在アメダス観測データを取得中です']];
+    const cards = buildAmedasFlipCardsFromPages(defaultPages, amedasMetric);
+    const observedTime = data.amedas[0]?.observedAt
+      ? data.amedas[0].observedAt
+      : defaultTime;
+
+    return {
+      isFlipMode: true,
+      cards,
+      headerTitle: getAmedasCityMetricTitle(amedasMetric),
+      headerTime: observedTime,
+      accentColor: '#10B981',
+      citySegments,
+      amedasMetric,
+      stopOnLastCard: true,
     };
   }
 
