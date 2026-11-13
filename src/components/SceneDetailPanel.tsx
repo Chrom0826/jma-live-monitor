@@ -414,6 +414,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
     let cancelled = false;
 
     // Special handling for warnings scene when zoomed into an active 警報/特別警報 division
+    // Scroll the target division into view; bottom XML ticker + min loop interval controls step progression.
     if (effectiveScene === 'warnings' && activeWarningDivision) {
       const targetCode =
         activeWarningDivision.divisionCode || activeWarningDivision.id;
@@ -427,16 +428,7 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
         );
         el.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
       }
-      fallbackTimer = setTimeout(() => {
-        if (!cancelled) {
-          onSceneCompleteRef.current();
-        }
-      }, 4200);
-
-      return () => {
-        cancelled = true;
-        if (fallbackTimer) clearTimeout(fallbackTimer);
-      };
+      return;
     }
 
     // Special handling for final nationwide return view in warnings scene after zooming into active divisions

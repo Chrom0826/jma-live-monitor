@@ -36,7 +36,12 @@ import {
   buildCity3HourlySlots,
   classifyJmaWeatherDescriptor,
   decideIncomingEarthquake,
+  extractJmaXmlDataCode,
+  extractJmaXmlOfficeCode,
+  isDeprecatedWarningXmlEntry,
+  isR06WarningXmlEntry,
   isSameEarthquakeEvent,
+  isWeatherCommentaryXmlEntry,
   classifyXmlEntryScene,
   computeAmedasTop5Rankings,
   computeTyphoonConeEnvelope,
@@ -73,6 +78,7 @@ import {
   renderBroadcastWeatherSvg,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
+  parseVpws50SummaryMap,
   resolveLabelBoxCollisions,
   selectNonOverlappingAmedasStations,
   WARNING_DIVISIONS,
@@ -2125,4 +2131,98 @@ test('getNextSceneId skips inactive typhoon and advances cleanly from manually s
   assert.equal(getNextSceneId('warnings', withoutTyphoon), 'amedas');
   assert.equal(getNextSceneId('typhoon', withoutTyphoon), 'amedas');
   assert.equal(getNextSceneId('tsunami', withoutTyphoon), 'radar');
+});
+
+test('XML code classifiers distinguish VPZJ51/VPCJ51/VPFJ51 commentary, R06 VPWW55-61/VPWS50, and deprecated VPWW50/53/54', () => {
+  const vpf51 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113074315_0_VPFJ51_471000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113074315_0_VPFJ51_471000.xml',
+    title: '府県気象解説情報',
+  };
+  const vpf50 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113074315_0_VPFJ50_471000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113074315_0_VPFJ50_471000.xml',
+    title: '府県気象情報',
+  };
+  const vpz51 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113074000_0_VPZJ51_010000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113074000_0_VPZJ51_010000.xml',
+    title: '全般気象解説情報',
+  };
+  const vpc51 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113074143_0_VPCJ51_471000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113074143_0_VPCJ51_471000.xml',
+    title: '地方気象解説情報',
+  };
+  const vpww55 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW55_170000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW55_170000.xml',
+    title: '気象警報・注意報（Ｒ０６）（大雨）',
+  };
+  const vpws50 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113161054_0_VPWS50_010000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113161054_0_VPWS50_010000.xml',
+    title: '気象警報・注意報（Ｒ０６）（集約通報）',
+  };
+  const vpww53 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW53_170000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW53_170000.xml',
+    title: '気象特別警報・警報・注意報',
+  };
+  const vpww54 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW54_170000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW54_170000.xml',
+    title: '気象警報・注意報（Ｈ２７）',
+  };
+  const vpww50 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW50_170000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113080000_0_VPWW50_170000.xml',
+    title: '気象警報・注意報',
+  };
+
+  assert.equal(extractJmaXmlDataCode(vpf51), 'VPFJ51');
+  assert.equal(extractJmaXmlOfficeCode(vpf51), '471000');
+  assert.equal(isWeatherCommentaryXmlEntry(vpf51), true);
+  assert.equal(isWeatherCommentaryXmlEntry(vpz51), true);
+  assert.equal(isWeatherCommentaryXmlEntry(vpc51), true);
+  assert.equal(isWeatherCommentaryXmlEntry(vpf50), false);
+
+  assert.equal(isR06WarningXmlEntry(vpww55), true);
+  assert.equal(isR06WarningXmlEntry(vpws50), true);
+  assert.equal(isR06WarningXmlEntry(vpws50, { includeAggregate: false }), false);
+  assert.equal(isDeprecatedWarningXmlEntry(vpww53), true);
+  assert.equal(isDeprecatedWarningXmlEntry(vpww54), true);
+  assert.equal(isDeprecatedWarningXmlEntry(vpww50), true);
+  assert.equal(isR06WarningXmlEntry(vpww53), false);
+  assert.equal(isR06WarningXmlEntry(vpww54), false);
+  assert.equal(isR06WarningXmlEntry(vpww50), false);
+});
+
+test('parseVpws50SummaryMap extracts R06 active warning names keyed by JMA divisionCode', () => {
+  const sampleVpws50 = `<?xml version="1.0" encoding="UTF-8"?>
+<Report>
+  <Head>
+    <Headline>
+      <Information type="気象警報・注意報（府県予報区等）">
+        <Item>
+          <Kind><Name>大雨警報</Name><Code>03</Code></Kind>
+          <Kind><Name>雷注意報</Name><Code>14</Code></Kind>
+          <Areas codeType="気象情報／府県予報区・細分区域等">
+            <Area><Name>石川県</Name><Code>170000</Code></Area>
+          </Areas>
+        </Item>
+        <Item>
+          <Kind><Name>暴風警報</Name><Code>05</Code></Kind>
+          <Areas codeType="気象情報／府県予報区・細分区域等">
+            <Area><Name>上川地方</Name><Code>012010</Code></Area>
+          </Areas>
+        </Item>
+      </Information>
+    </Headline>
+  </Head>
+</Report>`;
+
+  const parsed = parseVpws50SummaryMap(sampleVpws50);
+  assert.deepEqual(parsed['170000'], ['大雨警報', '雷注意報']);
+  assert.deepEqual(parsed['012000'], ['暴風警報']);
 });

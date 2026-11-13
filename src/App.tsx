@@ -28,7 +28,6 @@ import {
   INITIAL_TSUNAMI_STATIONS,
   INITIAL_VOLCANOES,
   INITIAL_WARNINGS,
-  INITIAL_WEATHER_BULLETINS,
   INITIAL_XML_ENTRIES,
   TEST_EEW_FORECAST_REPORT,
   TEST_EEW_REPORTS,
@@ -96,6 +95,7 @@ import {
   buildSceneFeed,
   buildBottomFlipFeed,
   BottomFlipFeedResult,
+  evaluateTickerPassEnd,
   SceneFeedData,
 } from './utils/sceneFeedBuilder';
 import {
@@ -123,7 +123,7 @@ const INITIAL_BUNDLE: MonitorDataBundle = {
   muniSeverityMap: {},
   prefSeverityMap: CLEAN_PREF_SEVERITY_MAP,
   typhoons: [],
-  bulletins: INITIAL_WEATHER_BULLETINS,
+  bulletins: [],
   amedas: INITIAL_AMEDAS_STATIONS,
   volcanoes: INITIAL_VOLCANOES,
   tsunamiStations: INITIAL_TSUNAMI_STATIONS,
@@ -462,11 +462,17 @@ interface BroadcastBottomBarProps {
   sceneFeed: SceneFeedData;
   flipSessionKey: string;
   onFlipRoundsChange: (sessionKey: string, completedRounds: number) => void;
+  tickerSessionKey: string;
+  loopIntervalSec: number;
+  isLoopPaused: boolean;
+  interruptKind: InterruptKind;
+  isTickerDriverScene: boolean;
+  onTickerCycleComplete: (sessionKey: string) => void;
 }
 
 /**
- * Isolated bottom/feed bar owning the 4.8s flip timer and compositor ticker measurements
- * so flip card transitions never re-render App, MonitorMap, or SceneDetailPanel.
+ * Isolated bottom/feed bar owning the 4.8s flip timer and sequential compositor ticker passes
+ * (advances after `loopIntervalSec` elapsed AND the current item scrolls completely off the left edge).
  */
 const BroadcastBottomBar = memo(function BroadcastBottomBar({
   variant,
@@ -474,6 +480,12 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
   sceneFeed,
   flipSessionKey,
   onFlipRoundsChange,
+  tickerSessionKey,
+  loopIntervalSec,
+  isLoopPaused,
+  interruptKind,
+  isTickerDriverScene,
+  onTickerCycleComplete,
 }: BroadcastBottomBarProps) {
   const cardCount = flipFeed?.cards.length ?? 0;
   const isFlipFeedActive = cardCount > 0;
@@ -510,6 +522,11 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
     onFlipRoundsChangeRef.current = onFlipRoundsChange;
   }, [onFlipRoundsChange]);
 
+  const onTickerCycleCompleteRef = useRef(onTickerCycleComplete);
+  useEffect(() => {
+    onTickerCycleCompleteRef.current = onTickerCycleComplete;
+  }, [onTickerCycleComplete]);
+
   const lastReportedRef = useRef<{ sessionKey: string; rounds: number }>({
     sessionKey: flipSessionKey,
     rounds: 0,
@@ -529,44 +546,172 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
     onFlipRoundsChangeRef.current(flipSessionKey, completedRounds);
   }, [flipSessionKey, completedRounds]);
 
-  const tickerTrackRef = useRef<HTMLDivElement | null>(null);
-  const tickerFirstCopyRef = useRef<HTMLDivElement | null>(null);
+  // Sequential single-item ticker state:
+  // Wait for BOTH >= loopIntervalSec active display time AND current item scrolling off the left edge.
+  const [passState, setPassState] = useState<{
+    sessionKey: string;
+    passIndex: number;
+  }>(() => ({ sessionKey: tickerSessionKey, passIndex: 0 }));
+
+  const activePassIndex =
+    passState.sessionKey === tickerSessionKey ? passState.passIndex : 0;
+  const items = sceneFeed.items;
+  const activeItemIndex = items.length > 0 ? activePassIndex % items.length : 0;
+  const activeItem = items[activeItemIndex] ?? null;
+
+  const isTickerPausedOrInterrupted = isLoopPaused || interruptKind !== 'none';
+  const activeAccumulatedMsRef = useRef<number>(0);
+  const activeResumedAtMsRef = useRef<number | null>(
+    isTickerPausedOrInterrupted ? null : performance.now()
+  );
+  const completionReportedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (isFlipFeedActive) return;
-    const track = tickerTrackRef.current;
-    const copy = tickerFirstCopyRef.current;
-    const applyTickerGeometry = () => {
-      if (!track || !copy) return;
-      const w = copy.offsetWidth;
-      if (w <= 0) return;
-      const rootFontPx =
-        parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
-      const speedPxPerSec = 72 * (rootFontPx / 16);
-      track.style.setProperty('--ticker-shift', `${w}px`);
-      track.style.setProperty(
-        '--ticker-duration',
-        `${Math.max(10, w / speedPxPerSec)}s`
-      );
-    };
-    applyTickerGeometry();
-    const resizeObserver =
-      copy && typeof ResizeObserver !== 'undefined'
-        ? new ResizeObserver(applyTickerGeometry)
-        : null;
-    if (resizeObserver && copy) resizeObserver.observe(copy);
+    setPassState({ sessionKey: tickerSessionKey, passIndex: 0 });
+    activeAccumulatedMsRef.current = 0;
+    activeResumedAtMsRef.current =
+      isLoopPaused || interruptKind !== 'none' ? null : performance.now();
+    completionReportedSessionRef.current = null;
+  }, [tickerSessionKey]);
 
-    return () => {
-      resizeObserver?.disconnect();
-    };
-  }, [sceneFeed.textKey, variant, isFlipFeedActive]);
+  useEffect(() => {
+    const now = performance.now();
+    if (isTickerPausedOrInterrupted) {
+      if (activeResumedAtMsRef.current !== null) {
+        activeAccumulatedMsRef.current += now - activeResumedAtMsRef.current;
+        activeResumedAtMsRef.current = null;
+      }
+    } else if (activeResumedAtMsRef.current === null) {
+      activeResumedAtMsRef.current = now;
+    }
+  }, [isTickerPausedOrInterrupted]);
+
+  const tickerViewportRef = useRef<HTMLDivElement | null>(null);
+  const tickerTrackRef = useRef<HTMLDivElement | null>(null);
+  const passRenderKey = `${tickerSessionKey}|${activePassIndex}|${variant}`;
+
+  useLayoutEffect(() => {
+    if (isFlipFeedActive) return;
+    const viewport = tickerViewportRef.current;
+    const track = tickerTrackRef.current;
+    if (!viewport || !track) return;
+
+    const viewportW = viewport.clientWidth;
+    const itemW = track.offsetWidth;
+    if (itemW <= 0) {
+      // Headless / zero-layout fallback so completion does not stall
+      if (!isTickerDriverScene || isTickerPausedOrInterrupted) return;
+      const timer = setTimeout(() => {
+        if (completionReportedSessionRef.current !== tickerSessionKey) {
+          completionReportedSessionRef.current = tickerSessionKey;
+          onTickerCycleCompleteRef.current(tickerSessionKey);
+        }
+      }, Math.max(1000, loopIntervalSec * 1000));
+      return () => clearTimeout(timer);
+    }
+
+    const startX = activePassIndex === 0 ? 0 : viewportW;
+    const endX = -itemW;
+    const distance = Math.max(1, startX - endX);
+    const rootFontPx =
+      parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const speedPxPerSec = 105 * (rootFontPx / 16);
+    const durationSec = Math.max(1.5, distance / speedPxPerSec);
+
+    track.style.setProperty('--ticker-start', `${startX}px`);
+    track.style.setProperty('--ticker-end', `${endX}px`);
+    track.style.setProperty('--ticker-duration', `${durationSec}s`);
+  }, [
+    passRenderKey,
+    sceneFeed.textKey,
+    isFlipFeedActive,
+    activePassIndex,
+    isTickerDriverScene,
+    isTickerPausedOrInterrupted,
+    loopIntervalSec,
+    tickerSessionKey,
+  ]);
+
+  const handlePassAnimationEnd = useCallback(() => {
+    const now = performance.now();
+    const elapsedMs =
+      activeAccumulatedMsRef.current +
+      (activeResumedAtMsRef.current !== null
+        ? now - activeResumedAtMsRef.current
+        : 0);
+
+    const { shouldSignalComplete, nextPassIndex } = evaluateTickerPassEnd({
+      isDriverScene: isTickerDriverScene,
+      isPausedOrInterrupted: isTickerPausedOrInterrupted,
+      activeElapsedMs: elapsedMs,
+      minDurationSec: loopIntervalSec,
+      currentPassIndex: activePassIndex,
+      itemCount: items.length,
+    });
+
+    if (
+      shouldSignalComplete &&
+      completionReportedSessionRef.current !== tickerSessionKey
+    ) {
+      completionReportedSessionRef.current = tickerSessionKey;
+      onTickerCycleCompleteRef.current(tickerSessionKey);
+    }
+
+    setPassState({
+      sessionKey: tickerSessionKey,
+      passIndex: nextPassIndex,
+    });
+  }, [
+    isTickerDriverScene,
+    isTickerPausedOrInterrupted,
+    loopIntervalSec,
+    activePassIndex,
+    items.length,
+    tickerSessionKey,
+  ]);
 
   const accentColor =
     isFlipFeedActive && flipFeed ? flipFeed.accentColor : sceneFeed.accentColor;
   const headerTitle =
-    isFlipFeedActive && flipFeed ? flipFeed.headerTitle : sceneFeed.title;
+    isFlipFeedActive && flipFeed
+      ? flipFeed.headerTitle
+      : activeItem?.sourceTitle || sceneFeed.title;
   const headerTime =
-    isFlipFeedActive && flipFeed ? flipFeed.headerTime : sceneFeed.timeLabel;
+    isFlipFeedActive && flipFeed
+      ? flipFeed.headerTime
+      : activeItem?.sourceTime || sceneFeed.timeLabel;
+
+  const renderScrollingTicker = (isMobile: boolean) => (
+    <div
+      ref={tickerViewportRef}
+      data-testid="xml-ticker-scroll-container"
+      className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
+    >
+      {activeItem && (
+        <div
+          key={passRenderKey}
+          ref={tickerTrackRef}
+          onAnimationEnd={handlePassAnimationEnd}
+          data-paused={isLoopPaused ? 'true' : undefined}
+          className={`ticker-pass-track inline-flex items-center font-bold text-white tracking-wide leading-none ${
+            isMobile
+              ? 'gap-2 text-[15px]'
+              : 'gap-2.5 text-[1.3125rem] md:text-[1.4375rem]'
+          }`}
+        >
+          {activeItem.prefix && (
+            <span
+              className="font-extrabold shrink-0"
+              style={{ color: sceneFeed.accentColor }}
+            >
+              {activeItem.prefix}
+            </span>
+          )}
+          <span className="text-neutral-100">{activeItem.text}</span>
+        </div>
+      )}
+    </div>
+  );
 
   if (variant === 'mobile') {
     return (
@@ -617,67 +762,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
               </div>
             </div>
           ) : (
-            <div
-              data-testid="xml-ticker-scroll-container"
-              className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
-            >
-              <div ref={tickerTrackRef} className="ticker-track">
-                <div
-                  ref={tickerFirstCopyRef}
-                  className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
-                >
-                  {sceneFeed.items.map((item, idx) => (
-                    <span
-                      key={`mobile-feed-copy1-${idx}`}
-                      className="inline-flex items-center gap-2 shrink-0"
-                    >
-                      {item.prefix && (
-                        <span
-                          className="font-extrabold"
-                          style={{ color: sceneFeed.accentColor }}
-                        >
-                          {item.prefix}
-                        </span>
-                      )}
-                      <span className="text-neutral-100">{item.text}</span>
-                      <span
-                        aria-hidden="true"
-                        className="text-neutral-600 ml-2 font-normal"
-                      >
-                        ｜
-                      </span>
-                    </span>
-                  ))}
-                </div>
-                <div
-                  aria-hidden="true"
-                  className="inline-flex items-center gap-8 pr-8 text-[15px] font-bold text-white tracking-wide leading-none"
-                >
-                  {sceneFeed.items.map((item, idx) => (
-                    <span
-                      key={`mobile-feed-copy2-${idx}`}
-                      className="inline-flex items-center gap-2 shrink-0"
-                    >
-                      {item.prefix && (
-                        <span
-                          className="font-extrabold"
-                          style={{ color: sceneFeed.accentColor }}
-                        >
-                          {item.prefix}
-                        </span>
-                      )}
-                      <span className="text-neutral-100">{item.text}</span>
-                      <span
-                        aria-hidden="true"
-                        className="text-neutral-600 ml-2 font-normal"
-                      >
-                        ｜
-                      </span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
+            renderScrollingTicker(true)
           )}
         </div>
       </section>
@@ -736,67 +821,7 @@ const BroadcastBottomBar = memo(function BroadcastBottomBar({
             </div>
           </div>
         ) : (
-          <div
-            data-testid="xml-ticker-scroll-container"
-            className="ticker-viewport flex-1 flex items-center overflow-hidden whitespace-nowrap relative"
-          >
-            <div ref={tickerTrackRef} className="ticker-track">
-              <div
-                ref={tickerFirstCopyRef}
-                className="inline-flex items-center gap-12 pr-12 text-[1.3125rem] md:text-[1.4375rem] font-bold text-white tracking-wide leading-none"
-              >
-                {sceneFeed.items.map((item, idx) => (
-                  <span
-                    key={`feed-item-copy1-${idx}`}
-                    className="inline-flex items-center gap-2.5 shrink-0"
-                  >
-                    {item.prefix && (
-                      <span
-                        className="font-extrabold"
-                        style={{ color: sceneFeed.accentColor }}
-                      >
-                        {item.prefix}
-                      </span>
-                    )}
-                    <span className="text-neutral-100">{item.text}</span>
-                    <span
-                      aria-hidden="true"
-                      className="text-neutral-600 ml-4 font-normal"
-                    >
-                      ｜
-                    </span>
-                  </span>
-                ))}
-              </div>
-              <div
-                aria-hidden="true"
-                className="inline-flex items-center gap-12 pr-12 text-[1.3125rem] md:text-[1.4375rem] font-bold text-white tracking-wide leading-none"
-              >
-                {sceneFeed.items.map((item, idx) => (
-                  <span
-                    key={`feed-item-copy2-${idx}`}
-                    className="inline-flex items-center gap-2.5 shrink-0"
-                  >
-                    {item.prefix && (
-                      <span
-                        className="font-extrabold"
-                        style={{ color: sceneFeed.accentColor }}
-                      >
-                        {item.prefix}
-                      </span>
-                    )}
-                    <span className="text-neutral-100">{item.text}</span>
-                    <span
-                      aria-hidden="true"
-                      className="text-neutral-600 ml-4 font-normal"
-                    >
-                      ｜
-                    </span>
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
+          renderScrollingTicker(false)
         )}
       </div>
     </footer>
@@ -2491,16 +2516,34 @@ export default function App() {
   );
 
   const currentFlipSessionKey = `${effectiveScene}|${flipSessionNonce}`;
+  const currentTickerSessionKey =
+    effectiveScene === 'warnings'
+      ? `warnings|${warningPatrolStep}|${flipSessionNonce}`
+      : `${effectiveScene}|${flipSessionNonce}`;
+  const isTickerDriverScene =
+    !(flipFeed && flipFeed.cards.length > 0) &&
+    (effectiveScene === 'radar' ||
+      (effectiveScene === 'warnings' && !isFinalWarningNational));
+
   const [flipRoundsState, setFlipRoundsState] = useState<{
     sessionKey: string;
     rounds: number;
   }>({ sessionKey: currentFlipSessionKey, rounds: 0 });
   const [isEarthquakeScrollDone, setIsEarthquakeScrollDone] = useState<boolean>(false);
+  const [completedTickerSessionKey, setCompletedTickerSessionKey] =
+    useState<string>('');
+  const [isWarningsScrollDone, setIsWarningsScrollDone] =
+    useState<boolean>(false);
 
   // Reset right-panel scroll completion state when scene, selected earthquake, or interrupt session changes
   useEffect(() => {
     setIsEarthquakeScrollDone(false);
   }, [effectiveScene, selectedEarthquake?.id, flipSessionNonce]);
+
+  useEffect(() => {
+    setIsWarningsScrollDone(false);
+    setCompletedTickerSessionKey('');
+  }, [currentTickerSessionKey]);
 
   const handleFlipRoundsChange = useCallback(
     (sessionKey: string, completedRounds: number) => {
@@ -2508,6 +2551,10 @@ export default function App() {
     },
     []
   );
+
+  const handleTickerCycleComplete = useCallback((sessionKey: string) => {
+    setCompletedTickerSessionKey(sessionKey);
+  }, []);
 
   const activeFlipCompletedRounds =
     flipRoundsState.sessionKey === currentFlipSessionKey
@@ -2524,8 +2571,59 @@ export default function App() {
       setIsEarthquakeScrollDone(true);
       return;
     }
+    if (effectiveSceneRef.current === 'warnings') {
+      setIsWarningsScrollDone(true);
+      return;
+    }
     advanceSceneRef.current();
   }, []);
+
+  // Advance 'radar' and 'warnings' once bottom ticker satisfies (elapsed >= loopIntervalSec AND scroll off left edge),
+  // coordinating with right-panel scroll on nationwide 'warnings' view.
+  useEffect(() => {
+    if (isLoopPaused || interruptKind !== 'none') return;
+    const isTickerDone =
+      completedTickerSessionKey === currentTickerSessionKey;
+
+    if (effectiveScene === 'radar') {
+      if (isTickerDone) {
+        advanceSceneRef.current();
+      }
+      return;
+    }
+
+    if (effectiveScene === 'warnings') {
+      if (isFinalWarningNational) {
+        if (isWarningsScrollDone) {
+          advanceSceneRef.current();
+        }
+        return;
+      }
+      if (activeWarningDivision !== null) {
+        if (isTickerDone) {
+          advanceSceneRef.current();
+        }
+        return;
+      }
+      const isPanelDone =
+        isWarningsScrollDone ||
+        (isMobilePortrait && mobileBottomTab !== 'detail');
+      if (isTickerDone && isPanelDone) {
+        advanceSceneRef.current();
+      }
+    }
+  }, [
+    effectiveScene,
+    isLoopPaused,
+    interruptKind,
+    completedTickerSessionKey,
+    currentTickerSessionKey,
+    isFinalWarningNational,
+    activeWarningDivision,
+    isWarningsScrollDone,
+    isMobilePortrait,
+    mobileBottomTab,
+  ]);
 
   // Return cleanly after 2 bottom-bar loops on non-EEW earthquake interrupts,
   // or advance in normal patrol once BOTH 2 bottom-bar loops and right-panel scroll finish.
@@ -2759,6 +2857,12 @@ export default function App() {
             sceneFeed={sceneFeed}
             flipSessionKey={currentFlipSessionKey}
             onFlipRoundsChange={handleFlipRoundsChange}
+            tickerSessionKey={currentTickerSessionKey}
+            loopIntervalSec={loopIntervalSec}
+            isLoopPaused={isLoopPaused}
+            interruptKind={interruptKind}
+            isTickerDriverScene={isTickerDriverScene}
+            onTickerCycleComplete={handleTickerCycleComplete}
           />
 
           {/* 3. INTERACTIVE CENTER MAP STAGE */}
@@ -3233,6 +3337,12 @@ export default function App() {
               sceneFeed={sceneFeed}
               flipSessionKey={currentFlipSessionKey}
               onFlipRoundsChange={handleFlipRoundsChange}
+              tickerSessionKey={currentTickerSessionKey}
+              loopIntervalSec={loopIntervalSec}
+              isLoopPaused={isLoopPaused}
+              interruptKind={interruptKind}
+              isTickerDriverScene={isTickerDriverScene}
+              onTickerCycleComplete={handleTickerCycleComplete}
             />
           </div>
         </div>

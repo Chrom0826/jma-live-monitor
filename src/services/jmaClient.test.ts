@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   fetchLiveJmaTyphoons,
   resetLiveTyphoonCacheForTest,
+  selectFeedXmlEntries,
 } from './jmaClient';
 import { INITIAL_TYPHOONS } from '../data/fallbackData';
 
@@ -183,4 +184,55 @@ test('fetchLiveJmaTyphoons does not resurrect a removed typhoon ID when a differ
     g.fetch = savedFetch;
     resetLiveTyphoonCacheForTest();
   }
+});
+
+test('selectFeedXmlEntries strips deprecated VPWW50/53/54 and preserves R06/commentary/VPWS50 entries', () => {
+  const mkEntry = (idx: number, title: string, dataCode: string) => ({
+    id: `urn:jma:${dataCode}:${idx}`,
+    title,
+    updated: '2026-11-13T12:00:00Z',
+    author: '気象庁',
+    summary: `${title} summary`,
+    content: `${title} summary`,
+    link: `https://www.data.jma.go.jp/developer/xml/data/20261113120000_0_${dataCode}_010000.xml`,
+    category: 'warnings' as const,
+    feedType: 'extra' as const,
+  });
+
+  const extraEntries = [
+    mkEntry(1, '気象警報・注意報', 'VPWW50'),
+    mkEntry(2, '気象特別警報・警報・注意報', 'VPWW53'),
+    mkEntry(3, '気象警報・注意報（Ｈ２７）', 'VPWW54'),
+    mkEntry(4, '気象警報・注意報（Ｒ０６）（大雨）', 'VPWW55'),
+    mkEntry(5, '全般気象解説情報', 'VPZJ51'),
+    mkEntry(6, '地方気象解説情報', 'VPCJ51'),
+    mkEntry(7, '府県気象解説情報', 'VPFJ51'),
+  ];
+  const selectedExtra = selectFeedXmlEntries(extraEntries, 'extra');
+  assert.deepEqual(
+    selectedExtra.map((e) => e.id),
+    [
+      'urn:jma:VPWW55:4',
+      'urn:jma:VPZJ51:5',
+      'urn:jma:VPCJ51:6',
+      'urn:jma:VPFJ51:7',
+    ],
+  );
+
+  const regularEntries = [
+    { ...mkEntry(10, '気象警報・注意報（Ｒ０６）（集約通報）', 'VPWS50'), feedType: 'regular' as const },
+    { ...mkEntry(11, '気象警報・注意報（Ｒ０６）（集約通報）', 'VPWS50'), feedType: 'regular' as const },
+    { ...mkEntry(12, '気象警報・注意報（Ｒ０６）（集約通報）', 'VPWS50'), feedType: 'regular' as const },
+    { ...mkEntry(13, '府県気象解説情報', 'VPFJ51'), feedType: 'regular' as const },
+    ...Array.from({ length: 25 }, (_, i) => ({
+      ...mkEntry(100 + i, '一般情報', 'VZSA50'),
+      feedType: 'regular' as const,
+    })),
+  ];
+  const selectedRegular = selectFeedXmlEntries(regularEntries, 'regular');
+  const vpwsCount = selectedRegular.filter((e) => e.link.includes('VPWS50')).length;
+  const vpfjCount = selectedRegular.filter((e) => e.link.includes('VPFJ51')).length;
+  assert.equal(vpwsCount, 2);
+  assert.equal(vpfjCount, 1);
+  assert.equal(selectedRegular.length, 23);
 });

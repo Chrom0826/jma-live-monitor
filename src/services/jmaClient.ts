@@ -13,7 +13,6 @@ import {
   INITIAL_TSUNAMI_STATIONS,
   INITIAL_VOLCANOES,
   INITIAL_WARNINGS,
-  INITIAL_WEATHER_BULLETINS,
   INITIAL_XML_ENTRIES,
 } from '../data/fallbackData';
 import {
@@ -34,7 +33,11 @@ import {
   XmlFeedType,
 } from '../types/jma';
 import {
+  extractJmaXmlDataCode,
   formatSeismicScale,
+  getActiveSevereWarningDivisions,
+  isDeprecatedWarningXmlEntry,
+  isWeatherCommentaryXmlEntry,
   MAJOR_FORECAST_CITY_TARGETS,
   mergeProgressiveEarthquakeReports,
   parseJmaAmedasNationwide,
@@ -43,6 +46,7 @@ import {
   parseJmaQuakeDetailJson,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
+  parseVpws50SummaryMap,
   PREFECTURE_NAMES,
   sortEarthquakesByNewest,
 } from '../utils/jmaParser';
@@ -133,18 +137,70 @@ export function fetchSharedJmaAreaConst(): Promise<Record<string, any> | null> {
   return jmaAreaConstPromise;
 }
 
+let lastVpws50Cache: {
+  id: string;
+  summaries: Record<string, string[]>;
+  updated: string;
+} | null = null;
+
+export function selectFeedXmlEntries(
+  entries: JmaXmlEntry[],
+  feedType: XmlFeedType
+): JmaXmlEntry[] {
+  const nonDeprecated = entries.filter((e) => !isDeprecatedWarningXmlEntry(e));
+  if (feedType === 'extra') {
+    return nonDeprecated;
+  }
+  if (feedType === 'regular') {
+    const selected: JmaXmlEntry[] = [];
+    const seenIds = new Set<string>();
+    let vpws50Count = 0;
+    let generalCount = 0;
+    for (const entry of nonDeprecated) {
+      const code = extractJmaXmlDataCode(entry);
+      const isCommentary = isWeatherCommentaryXmlEntry(entry);
+      const isVpws50 =
+        code === 'VPWS50' ||
+        (!code &&
+          entry.title.startsWith('気象警報・注意報（Ｒ０６）') &&
+          entry.title.includes('集約通報'));
+      let include = false;
+      if (isCommentary) {
+        include = true;
+      } else if (isVpws50) {
+        if (vpws50Count < 2) {
+          vpws50Count++;
+          include = true;
+        }
+      } else if (generalCount < 20) {
+        generalCount++;
+        include = true;
+      }
+      if (include && !seenIds.has(entry.id)) {
+        seenIds.add(entry.id);
+        selected.push(entry);
+      }
+    }
+    return selected;
+  }
+  return nonDeprecated.slice(0, 25);
+}
+
 async function fetchSingleJmaXmlFeed(
   feedType: XmlFeedType
 ): Promise<{ entries: JmaXmlEntry[]; live: boolean }> {
   const url = JMA_XML_URLS[feedType];
+  const parseLimit =
+    feedType === 'regular' ? 600 : feedType === 'extra' ? 500 : 40;
   try {
-    const res = await fetchWithTimeout(url, 4000);
+    const res = await fetchWithTimeout(url, 6000);
     if (!res.ok) {
       return { entries: [], live: false };
     }
     const text = await res.text();
-    const parsed = parseJmaAtomXml(text, feedType, 16);
-    return { entries: parsed, live: parsed.length > 0 };
+    const rawParsed = parseJmaAtomXml(text, feedType, parseLimit);
+    const filtered = selectFeedXmlEntries(rawParsed, feedType);
+    return { entries: filtered, live: rawParsed.length > 0 };
   } catch {
     return { entries: [], live: false };
   }
@@ -1162,6 +1218,46 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
   const xmlEntries =
     liveXmlEntries.length > 0 ? liveXmlEntries : lastLiveXmlEntries || [];
 
+  // Lazily parse VPWS50 (気象警報・注意報（Ｒ０６）（集約通報）) only when 警報以上 is active
+  let vpws50Summaries: Record<string, string[]> | undefined;
+  let vpws50Updated: string | undefined;
+  const hasSevereWarnings =
+    getActiveSevereWarningDivisions(liveWarningsRes.warnings).length > 0;
+  if (hasSevereWarnings) {
+    const vpws50Entry = xmlEntries.find(
+      (e) =>
+        extractJmaXmlDataCode(e) === 'VPWS50' ||
+        (e.title.startsWith('気象警報・注意報（Ｒ０６）') &&
+          e.title.includes('集約通報'))
+    );
+    if (vpws50Entry) {
+      if (lastVpws50Cache && lastVpws50Cache.id === vpws50Entry.id) {
+        vpws50Summaries = lastVpws50Cache.summaries;
+        vpws50Updated = lastVpws50Cache.updated;
+      } else if (vpws50Entry.link) {
+        try {
+          const vpwsRes = await fetchWithTimeout(vpws50Entry.link, 8000);
+          if (vpwsRes.ok) {
+            const vpwsXml = await vpwsRes.text();
+            const parsedSummaries = parseVpws50SummaryMap(vpwsXml);
+            lastVpws50Cache = {
+              id: vpws50Entry.id,
+              summaries: parsedSummaries,
+              updated: vpws50Entry.updated,
+            };
+            vpws50Summaries = parsedSummaries;
+            vpws50Updated = vpws50Entry.updated;
+          }
+        } catch {
+          if (lastVpws50Cache) {
+            vpws50Summaries = lastVpws50Cache.summaries;
+            vpws50Updated = lastVpws50Cache.updated;
+          }
+        }
+      }
+    }
+  }
+
   const forecasts = liveForecastsRes.forecasts.map((fc) => {
     if (fc.id === 'fc-130000' && tokyoOverview.overviewText) {
       return {
@@ -1185,8 +1281,10 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     municipalityWarnings: liveWarningsRes.municipalityWarnings,
     muniSeverityMap: liveWarningsRes.muniSeverityMap,
     prefSeverityMap: liveWarningsRes.prefSeverityMap,
+    vpws50Summaries,
+    vpws50Updated,
     typhoons: liveTyphoonsRes.typhoons,
-    bulletins: INITIAL_WEATHER_BULLETINS,
+    bulletins: [],
     amedas: liveAmedasRes.amedas,
     volcanoes: INITIAL_VOLCANOES,
     tsunamiStations: INITIAL_TSUNAMI_STATIONS,

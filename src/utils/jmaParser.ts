@@ -3985,6 +3985,184 @@ export function parseJmaCityForecastJson(
   };
 }
 
+export const WEATHER_COMMENTARY_XML_CODES = new Set([
+  'VPZJ51',
+  'VPCJ51',
+  'VPFJ51',
+]);
+
+export const DEPRECATED_WARNING_XML_CODES = new Set([
+  'VPWW50',
+  'VPWW53',
+  'VPWW54',
+]);
+
+export const R06_WARNING_XML_CODES = [
+  'VPWW55',
+  'VPWW56',
+  'VPWW57',
+  'VPWW58',
+  'VPWW59',
+  'VPWW60',
+  'VPWW61',
+] as const;
+
+const R06_WARNING_XML_CODE_SET = new Set<string>([
+  ...R06_WARNING_XML_CODES,
+  'VPWS50',
+]);
+
+const COMMENTARY_EXACT_TITLES = new Set([
+  '全般気象解説情報',
+  '地方気象解説情報',
+  '府県気象解説情報',
+]);
+
+const DEPRECATED_WARNING_TITLES = new Set([
+  '気象警報・注意報',
+  '気象特別警報・警報・注意報',
+  '気象警報・注意報（Ｈ２７）',
+  '気象警報・注意報(H27)',
+]);
+
+/**
+ * Extracts the 6-character JMA data type code (e.g. `VPFJ51`, `VPWW55`, `VPWS50`)
+ * from a JMA Atom entry's link or id URL.
+ */
+export function extractJmaXmlDataCode(
+  entry: Pick<JmaXmlEntry, 'id' | 'link'>
+): string | null {
+  const candidates = [entry.link, entry.id];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const match = /_([A-Z]{4}\d{2})(?:_|\.xml|\b)/i.exec(raw);
+    if (match) return match[1].toUpperCase();
+  }
+  return null;
+}
+
+/**
+ * Extracts the 6-digit JMA publishing office / area code from an Atom entry's link or id URL.
+ */
+export function extractJmaXmlOfficeCode(
+  entry: Pick<JmaXmlEntry, 'id' | 'link'>
+): string | null {
+  const candidates = [entry.link, entry.id];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const match = /_[A-Z]{4}\d{2}_(\d{6})(?:\.xml|\b)/i.exec(raw);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+/**
+ * True for deprecated JMA warning XMLs slated for abolition (`VPWW50`, `VPWW53`, `VPWW54`).
+ */
+export function isDeprecatedWarningXmlEntry(
+  entry: Pick<JmaXmlEntry, 'id' | 'link' | 'title'>
+): boolean {
+  const code = extractJmaXmlDataCode(entry);
+  if (code && DEPRECATED_WARNING_XML_CODES.has(code)) {
+    return true;
+  }
+  const title = String(entry.title || '').trim();
+  if (
+    DEPRECATED_WARNING_TITLES.has(title) ||
+    title.includes('（Ｈ２７）') ||
+    title.includes('(H27)')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * True for meteorological commentary XML entries:
+ * `VPZJ51` (全般気象解説情報), `VPCJ51` (地方気象解説情報), `VPFJ51` (府県気象解説情報).
+ */
+export function isWeatherCommentaryXmlEntry(
+  entry: Pick<JmaXmlEntry, 'id' | 'link' | 'title'>
+): boolean {
+  const code = extractJmaXmlDataCode(entry);
+  if (code) {
+    return WEATHER_COMMENTARY_XML_CODES.has(code);
+  }
+  const title = String(entry.title || '').trim();
+  return COMMENTARY_EXACT_TITLES.has(title);
+}
+
+/**
+ * True for R06 warning XML entries (`VPWW55`..`VPWW61` and `VPWS50`), strictly excluding
+ * deprecated `VPWW50`, `VPWW53`, and `VPWW54`.
+ */
+export function isR06WarningXmlEntry(
+  entry: Pick<JmaXmlEntry, 'id' | 'link' | 'title'>,
+  options?: { includeAggregate?: boolean }
+): boolean {
+  if (isDeprecatedWarningXmlEntry(entry)) return false;
+  const includeAggregate = options?.includeAggregate ?? true;
+  const code = extractJmaXmlDataCode(entry);
+  if (code) {
+    if (!includeAggregate && code === 'VPWS50') return false;
+    return R06_WARNING_XML_CODE_SET.has(code);
+  }
+  const title = String(entry.title || '').trim();
+  if (!includeAggregate && title.includes('集約通報')) {
+    return false;
+  }
+  return (
+    title.startsWith('気象警報・注意報（Ｒ０６）') ||
+    title.startsWith('気象警報・注意報(R06)')
+  );
+}
+
+/**
+ * Parses a full `VPWS50` (`気象警報・注意報（Ｒ０６）（集約通報）`) XML document into
+ * a map of 6-digit JMA `divisionCode` -> active warning/advisory names from `<Headline>`.
+ */
+export function parseVpws50SummaryMap(
+  xmlText: string
+): Record<string, string[]> {
+  const summary: Record<string, string[]> = {};
+  if (!xmlText || !xmlText.includes('<Information')) return summary;
+
+  const prefInfoMatch =
+    /<Information\s+type="気象警報・注意報（府県予報区等）"[^>]*>([\s\S]*?)<\/Information>/i.exec(
+      xmlText
+    );
+  const block = prefInfoMatch ? prefInfoMatch[1] : xmlText;
+
+  const itemRegex = /<Item>([\s\S]*?)<\/Item>/gi;
+  let itemMatch: RegExpExecArray | null;
+  while ((itemMatch = itemRegex.exec(block)) !== null) {
+    const itemXml = itemMatch[1];
+    const kindNames: string[] = [];
+    const kindRegex = /<Kind>[\s\S]*?<Name>([^<]+)<\/Name>[\s\S]*?<\/Kind>/gi;
+    let kindMatch: RegExpExecArray | null;
+    while ((kindMatch = kindRegex.exec(itemXml)) !== null) {
+      const name = decodeXmlEntities(kindMatch[1].trim());
+      if (name && !kindNames.includes(name)) kindNames.push(name);
+    }
+    if (kindNames.length === 0) continue;
+
+    const areaCodeRegex = /<Area>[\s\S]*?<Code>([^<]+)<\/Code>[\s\S]*?<\/Area>/gi;
+    let areaMatch: RegExpExecArray | null;
+    while ((areaMatch = areaCodeRegex.exec(itemXml)) !== null) {
+      const div = resolveWarningDivision(areaMatch[1].trim());
+      if (!div) continue;
+      if (!summary[div.code]) summary[div.code] = [];
+      for (const name of kindNames) {
+        if (!summary[div.code].includes(name)) {
+          summary[div.code].push(name);
+        }
+      }
+    }
+  }
+
+  return summary;
+}
+
 
 
 

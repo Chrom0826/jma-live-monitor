@@ -3,6 +3,7 @@ import {
   CityForecastItem,
   EarthquakeReport,
   EewReport,
+  JmaXmlEntry,
   MonitorDataBundle,
   RegionalWarningItem,
   SceneId,
@@ -12,6 +13,13 @@ import {
 } from '../types/jma';
 import {
   computeAmedasTop5Rankings,
+  extractJmaXmlDataCode,
+  extractJmaXmlOfficeCode,
+  isDeprecatedWarningXmlEntry,
+  isR06WarningXmlEntry,
+  isWarningOrAbove,
+  isWeatherCommentaryXmlEntry,
+  resolveWarningDivision,
 } from './jmaParser';
 import {
   formatEewArrivalLabel,
@@ -26,9 +34,15 @@ import {
   parseJstDateTimeMs,
 } from './eewTsunami';
 
+export const WEATHER_COMMENTARY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const WEATHER_COMMENTARY_EMPTY_MESSAGE =
+  '24時間以内に気象解説情報は発表されていません';
+
 export interface SceneFeedItem {
   prefix?: string;
   text: string;
+  sourceTitle?: string;
+  sourceTime?: string;
 }
 
 export interface SceneFeedData {
@@ -53,6 +67,206 @@ export interface BuildSceneFeedOptions {
   activeVolcano: VolcanoStatusItem | null;
   amedasMetric: AmedasMetric;
   currentTime?: string;
+  nowMs?: number;
+}
+
+function formatXmlUpdatedJst(updatedIso: string, fallback: string): string {
+  const ms = Date.parse(updatedIso);
+  if (!Number.isFinite(ms)) return fallback;
+  const jst = new Date(ms + 9 * 3600 * 1000);
+  const hh = String(jst.getUTCHours()).padStart(2, '0');
+  const mm = String(jst.getUTCMinutes()).padStart(2, '0');
+  return `${hh}:${mm} 発表`;
+}
+
+/**
+ * Evaluates whether a finished horizontal bottom-bar scroll pass should transition
+ * to the next scene/step or continue streaming the next feed item until `minDurationSec` elapses.
+ */
+export function evaluateTickerPassEnd(options: {
+  isDriverScene: boolean;
+  isPausedOrInterrupted: boolean;
+  activeElapsedMs: number;
+  minDurationSec: number;
+  currentPassIndex: number;
+  itemCount: number;
+}): { shouldSignalComplete: boolean; nextPassIndex: number } {
+  const {
+    isDriverScene,
+    isPausedOrInterrupted,
+    activeElapsedMs,
+    minDurationSec,
+    currentPassIndex,
+  } = options;
+  const requiredMs = Math.max(1000, minDurationSec * 1000);
+  const shouldSignalComplete =
+    isDriverScene && !isPausedOrInterrupted && activeElapsedMs >= requiredMs;
+  return {
+    shouldSignalComplete,
+    nextPassIndex: currentPassIndex + 1,
+  };
+}
+
+/**
+ * Selects active meteorological commentary entries (`VPZJ51`, `VPCJ51`, `VPFJ51`)
+ * issued within `maxAgeMs` (default 24h), sorted newest-first and deduplicated per topic/office.
+ */
+export function selectActiveWeatherCommentaryEntries(
+  xmlEntries: JmaXmlEntry[],
+  nowMs: number = Date.now(),
+  maxAgeMs: number = WEATHER_COMMENTARY_MAX_AGE_MS
+): JmaXmlEntry[] {
+  const cutoffMs = nowMs - maxAgeMs;
+  const candidates = xmlEntries
+    .filter((entry) => {
+      if (isDeprecatedWarningXmlEntry(entry)) return false;
+      if (!isWeatherCommentaryXmlEntry(entry)) return false;
+      const ms = Date.parse(entry.updated);
+      if (!Number.isFinite(ms)) return false;
+      return ms >= cutoffMs;
+    })
+    .sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
+
+  const seenTopics = new Set<string>();
+  const deduped: JmaXmlEntry[] = [];
+  for (const entry of candidates) {
+    const code = extractJmaXmlDataCode(entry) || entry.title;
+    const office = extractJmaXmlOfficeCode(entry) || entry.author || '';
+    const bracketMatch = /^【([^】]+)】/.exec(entry.content.trim());
+    const topicLabel = bracketMatch
+      ? bracketMatch[1]
+      : entry.content.trim().slice(0, 24);
+    const key = `${code}|${office}|${topicLabel}`;
+    if (seenTopics.has(key)) continue;
+    seenTopics.add(key);
+    deduped.push(entry);
+  }
+  return deduped;
+}
+
+function doesWarningEntryMatchDivision(
+  entry: JmaXmlEntry,
+  division: RegionalWarningItem
+): boolean {
+  const divCode = division.divisionCode || '';
+  const officeCode = extractJmaXmlOfficeCode(entry);
+  if (officeCode && divCode) {
+    const resolved = resolveWarningDivision(officeCode);
+    if (resolved?.code === divCode) {
+      if (divCode === '471000' && entry.content.includes('大東島')) {
+        return false;
+      }
+      return true;
+    }
+    if (divCode === '460040' && officeCode === '460100') {
+      return entry.content.includes('奄美');
+    }
+    if (divCode === '472000' && officeCode === '471000') {
+      return entry.content.includes('大東島');
+    }
+    if (
+      division.prefId >= 2 &&
+      division.prefId <= 45 &&
+      officeCode.slice(0, 2) === divCode.slice(0, 2)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  const hay = `${entry.content} ${entry.author}`;
+  if (division.areaName && hay.includes(division.areaName)) return true;
+  if (division.prefecture && hay.includes(division.prefecture)) return true;
+  return false;
+}
+
+/**
+ * Selects active R06 warning XML entries (`VPWW55`..`VPWW61`) for a zoomed-in warning division,
+ * strictly excluding deprecated `VPWW50`, `VPWW53`, and `VPWW54`, and filtering out lifted notices.
+ */
+export function selectDivisionR06WarningEntries(
+  xmlEntries: JmaXmlEntry[],
+  division: RegionalWarningItem
+): JmaXmlEntry[] {
+  const candidates = xmlEntries
+    .filter(
+      (entry) =>
+        isR06WarningXmlEntry(entry, { includeAggregate: false }) &&
+        doesWarningEntryMatchDivision(entry, division)
+    )
+    .sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
+
+  const latestPerKind = new Map<string, JmaXmlEntry>();
+  for (const entry of candidates) {
+    const code = extractJmaXmlDataCode(entry) || entry.title;
+    const office = extractJmaXmlOfficeCode(entry) || entry.author || '';
+    const key = `${office}|${code}`;
+    if (!latestPerKind.has(key)) {
+      latestPerKind.set(key, entry);
+    }
+  }
+
+  return Array.from(latestPerKind.values())
+    .filter((entry) => !entry.content.includes('解除します'))
+    .sort((a, b) => {
+      const aSevere =
+        a.content.includes('特別警報') ||
+        a.content.includes('危険警報') ||
+        a.content.includes('警報')
+          ? 0
+          : 1;
+      const bSevere =
+        b.content.includes('特別警報') ||
+        b.content.includes('危険警報') ||
+        b.content.includes('警報')
+          ? 0
+          : 1;
+      if (aSevere !== bSevere) return aSevere - bSevere;
+      return Date.parse(b.updated) - Date.parse(a.updated);
+    });
+}
+
+function buildSharedCommentaryResult(
+  sceneId: 'radar' | 'warnings',
+  xmlEntries: JmaXmlEntry[],
+  nowMs: number,
+  defaultTimeLabel: string,
+  options: {
+    badgeLabel: string;
+    badgeSub: string;
+    accentColor: string;
+    defaultTitle: string;
+  }
+): SceneFeedData {
+  const commentaryXmls = selectActiveWeatherCommentaryEntries(xmlEntries, nowMs);
+
+  const items: SceneFeedItem[] =
+    commentaryXmls.length > 0
+      ? commentaryXmls.map((entry) => ({
+          prefix: `【${entry.title}】`,
+          text: entry.content,
+          sourceTitle: entry.title,
+          sourceTime: formatXmlUpdatedJst(entry.updated, defaultTimeLabel),
+        }))
+      : [{ text: WEATHER_COMMENTARY_EMPTY_MESSAGE }];
+
+  const title =
+    commentaryXmls.length > 0 ? commentaryXmls[0].title : options.defaultTitle;
+  const timeLabel =
+    commentaryXmls.length > 0
+      ? formatXmlUpdatedJst(commentaryXmls[0].updated, defaultTimeLabel)
+      : defaultTimeLabel;
+
+  return {
+    sceneId,
+    badgeLabel: options.badgeLabel,
+    badgeSub: options.badgeSub,
+    title,
+    timeLabel,
+    accentColor: options.accentColor,
+    items,
+    textKey: `${sceneId}-commentary-${commentaryXmls.map((e) => e.id).join('-') || 'none'}`,
+  };
 }
 
 /**
@@ -70,6 +284,7 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
     activeVolcano,
     amedasMetric,
     currentTime = '',
+    nowMs = Date.now(),
   } = options;
 
   const defaultTimeLabel = data.lastXmlFetchTime
@@ -285,102 +500,87 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
   if (effectiveScene === 'warnings') {
     let hasSpecial = false;
     let hasWarning = false;
-    let specialCount = 0;
-    let warningCount = 0;
-    let advisoryCount = 0;
 
     const muniMap = data.muniSeverityMap || {};
     for (const sev of Object.values(muniMap)) {
       if (sev === 'special') {
         hasSpecial = true;
-        specialCount++;
       } else if (sev === 'danger' || sev === 'warning') {
         hasWarning = true;
-        warningCount++;
-      } else if (sev === 'advisory') {
-        advisoryCount++;
       }
     }
 
     const accentColor = hasSpecial ? '#DC2626' : hasWarning ? '#EF4444' : '#F59E0B';
     const badgeLabel = '気象警報・注意報';
     const divName = activeWarningDivision
-      ? (activeWarningDivision.areaName || activeWarningDivision.prefecture)
+      ? activeWarningDivision.areaName || activeWarningDivision.prefecture
       : '';
-    const badgeSub = activeWarningDivision ? divName : '全国発表実況';
-    const title = activeWarningDivision
-      ? `${divName} 気象警報・注意報 発表実況`
-      : '全国の気象警報・注意報 発表実況';
-    const timeLabel = defaultTimeLabel;
 
-    const items: SceneFeedItem[] = [];
+    // When zoomed into an active 警報以上 division, use R06 warning XMLs (VPWW55..61 / VPWS50)
+    if (activeWarningDivision && isWarningOrAbove(activeWarningDivision.severity)) {
+      const matchedR06 = selectDivisionR06WarningEntries(
+        data.xmlEntries,
+        activeWarningDivision
+      );
+      if (matchedR06.length > 0) {
+        const items: SceneFeedItem[] = matchedR06.map((entry) => ({
+          prefix: `【${entry.title}】`,
+          text: entry.content,
+          sourceTitle: `${divName} ${entry.title}`,
+          sourceTime: formatXmlUpdatedJst(entry.updated, defaultTimeLabel),
+        }));
+        return {
+          sceneId: 'warnings',
+          badgeLabel,
+          badgeSub: divName,
+          title: `${divName} ${matchedR06[0].title}`,
+          timeLabel: formatXmlUpdatedJst(matchedR06[0].updated, defaultTimeLabel),
+          accentColor,
+          items,
+          textKey: `warnings-zoom-${activeWarningDivision.divisionCode || activeWarningDivision.id}-${matchedR06.map((e) => e.id).join('-')}`,
+        };
+      }
 
-    // Summary count item
-    if (specialCount > 0 || warningCount > 0 || advisoryCount > 0) {
-      items.push({
-        prefix: '【全国発表状況】',
-        text: `${specialCount > 0 ? `特別警報 ${specialCount}地域、` : ''}${warningCount > 0 ? `警報 ${warningCount}地域、` : ''}注意報 ${advisoryCount}地域に発表されています。土砂災害、浸水害、河川の増水や氾濫、暴風、高波に警戒・注意してください。`,
-      });
-    } else {
-      items.push({
-        prefix: '【全国発表状況】',
-        text: '現在、全国に気象警報・特別警報は発表されていません。',
-      });
-    }
-
-    // Active regional warning breakdown
-    if (data.warnings && data.warnings.length > 0) {
-      const activeWarns = data.warnings
-        .filter(
-          (w) =>
-            w.severity === 'warning' ||
-            w.severity === 'danger' ||
-            w.severity === 'special' ||
-            (w.badgeItems && w.badgeItems.some((i) => i.severity === 'warning' || i.severity === 'special'))
-        )
-        .slice(0, 6)
-        .map(
-          (w) =>
-            `${w.areaName || w.prefecture}（${(w.activeWarnings || w.badgeItems?.map((b) => b.name) || []).join('・')}）`
-        );
-
-      if (activeWarns.length > 0) {
-        items.push({
-          prefix: '【主な警報発表地域】',
-          text: activeWarns.join(' ｜ '),
-        });
+      const divCode = activeWarningDivision.divisionCode || '';
+      const vpws50Kinds = divCode ? data.vpws50Summaries?.[divCode] : undefined;
+      if (vpws50Kinds && vpws50Kinds.length > 0) {
+        const vpwsTime = data.vpws50Updated
+          ? formatXmlUpdatedJst(data.vpws50Updated, defaultTimeLabel)
+          : defaultTimeLabel;
+        return {
+          sceneId: 'warnings',
+          badgeLabel,
+          badgeSub: divName,
+          title: `${divName} 気象警報・注意報（Ｒ０６）（集約通報）`,
+          timeLabel: vpwsTime,
+          accentColor,
+          items: [
+            {
+              prefix: '【気象警報・注意報（Ｒ０６）（集約通報）】',
+              text: `${divName}：${vpws50Kinds.join('・')}`,
+              sourceTitle: `${divName} 気象警報・注意報（Ｒ０６）（集約通報）`,
+              sourceTime: vpwsTime,
+            },
+          ],
+          textKey: `warnings-vpws50-${divCode}-${vpws50Kinds.join('-')}`,
+        };
       }
     }
 
-    // Focused division detail
-    if (activeWarningDivision) {
-      items.push({
-        prefix: `【${divName}】`,
-        text: '該当地域の各市区町村における詳細な警報・注意報状況を表示しています。今後の気象情報に注意してください。',
-      });
-    }
-
-    // Latest XML warning commentary
-    const extraWarnXml = data.xmlEntries.find(
-      (e) => e.feedType === 'extra' && (e.title.includes('警報') || e.title.includes('気象情報'))
+    // Nationwide view (or fallback when no R06 warning XML exists for zoomed division):
+    // Share exact 24h meteorological commentary XMLs (VPZJ51 / VPCJ51 / VPFJ51) with radar.
+    return buildSharedCommentaryResult(
+      'warnings',
+      data.xmlEntries,
+      nowMs,
+      defaultTimeLabel,
+      {
+        badgeLabel,
+        badgeSub: activeWarningDivision ? divName : '気象解説情報',
+        accentColor,
+        defaultTitle: '気象解説情報（気象庁発表）',
+      }
     );
-    if (extraWarnXml) {
-      items.push({
-        prefix: `【${extraWarnXml.title}】`,
-        text: extraWarnXml.content,
-      });
-    }
-
-    return {
-      sceneId: 'warnings',
-      badgeLabel,
-      badgeSub,
-      title,
-      timeLabel,
-      accentColor,
-      items,
-      textKey: `warnings-${activeWarningDivision?.divisionCode || 'all'}-${specialCount}-${warningCount}-${advisoryCount}`,
-    };
   }
 
   // ==================== 4. TYPHOON SCENE ====================
@@ -532,85 +732,18 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
 
   // ==================== 6. RADAR SCENE ====================
   if (effectiveScene === 'radar') {
-    const accentColor = '#3B82F6';
-    const badgeLabel = '気象解説情報';
-    const badgeSub = '雨雲レーダー';
-
-    const items: SceneFeedItem[] = [];
-
-    // Filter meteorological commentary XML telegrams:
-    // extra / regular feeds that contain 気象情報, 気象解説, 天気の概況, 大雨, 暴風, 雷, 警報, etc.
-    const commentaryXmls = data.xmlEntries.filter((e) => {
-      if (e.feedType !== 'extra' && e.feedType !== 'regular') return false;
-      const t = e.title;
-      if (
-        t.includes('震源') ||
-        t.includes('震度') ||
-        t.includes('地震') ||
-        t.includes('津波') ||
-        t.includes('噴火') ||
-        t.includes('火山')
-      ) {
-        return false;
+    return buildSharedCommentaryResult(
+      'radar',
+      data.xmlEntries,
+      nowMs,
+      defaultTimeLabel,
+      {
+        badgeLabel: '気象解説情報',
+        badgeSub: '雨雲レーダー',
+        accentColor: '#3B82F6',
+        defaultTitle: '気象解説情報（気象庁発表）',
       }
-      return (
-        t.includes('気象情報') ||
-        t.includes('気象解説') ||
-        t.includes('解説情報') ||
-        t.includes('天気の概況') ||
-        t.includes('全般気象') ||
-        t.includes('地方気象') ||
-        t.includes('府県気象') ||
-        t.includes('大雨') ||
-        t.includes('暴風') ||
-        t.includes('高波') ||
-        t.includes('雷') ||
-        t.includes('雪')
-      );
-    });
-
-    if (commentaryXmls.length > 0) {
-      for (const entry of commentaryXmls) {
-        items.push({
-          prefix: `【${entry.title}】`,
-          text: entry.content,
-        });
-      }
-    } else if (data.bulletins && data.bulletins.length > 0) {
-      for (const b of data.bulletins) {
-        if (b.headline || b.bodyText) {
-          items.push({
-            prefix: `【${b.office}発表 気象解説】`,
-            text: b.headline || b.bodyText || '',
-          });
-        }
-      }
-    }
-
-    if (items.length === 0) {
-      items.push({
-        prefix: '【全般気象解説情報】',
-        text: '北日本海側では西高東低の気圧配置の影響により、西よりの暴風や大しけ、落雷、急な強い雨に警戒してください。最新の気象レーダー実況および気象情報にご注意ください。',
-      });
-    }
-
-    // Title reflects prominent commentary
-    const firstTitle = commentaryXmls[0]?.title;
-    const title = firstTitle || '気象解説情報（気象庁発表）';
-    const timeLabel = commentaryXmls[0]?.updated
-      ? `${commentaryXmls[0].updated.slice(11, 19)} 発表`
-      : defaultTimeLabel;
-
-    return {
-      sceneId: 'radar',
-      badgeLabel,
-      badgeSub,
-      title,
-      timeLabel,
-      accentColor,
-      items,
-      textKey: `radar-commentary-${commentaryXmls.map((e) => e.id).join('-') || 'default'}`,
-    };
+    );
   }
 
   // ==================== 7. TSUNAMI SCENE ====================

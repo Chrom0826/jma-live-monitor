@@ -64,7 +64,25 @@
   animation: ticker-track-loop var(--ticker-duration, 60s) linear infinite;
 }
 
-.ticker-viewport:hover .ticker-track {
+@keyframes ticker-pass-scroll {
+  from {
+    transform: translate3d(var(--ticker-start, 0px), 0, 0);
+  }
+  to {
+    transform: translate3d(var(--ticker-end, -100%), 0, 0);
+  }
+}
+
+.ticker-pass-track {
+  display: inline-flex;
+  width: max-content;
+  will-change: transform;
+  animation: ticker-pass-scroll var(--ticker-duration, 15s) linear 1 forwards;
+}
+
+.ticker-viewport:hover .ticker-track,
+.ticker-viewport:hover .ticker-pass-track,
+.ticker-pass-track[data-paused='true'] {
   animation-play-state: paused;
 }
 

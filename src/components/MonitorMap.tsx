@@ -3302,13 +3302,8 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     const timer = setTimeout(() => {
       if (radarFrameIndex < totalFrames - 1) {
         setRadarFrameIndex((prev) => prev + 1);
-      } else if (radarPass === 0) {
-        setRadarPass(1);
-        setRadarFrameIndex(0);
-      } else if (!isLoopPaused && interruptKind === 'none') {
-        onSceneCompleteRef.current();
       } else {
-        setRadarPass(0);
+        setRadarPass((prev) => (prev === 0 ? 1 : 0));
         setRadarFrameIndex(0);
       }
     }, 1800);

@@ -416,6 +416,9 @@ export interface MonitorDataBundle {
   municipalityWarnings?: RegionalWarningItem[];
   muniSeverityMap?: Record<string, WarningSeverity>;
   prefSeverityMap: Record<number, WarningSeverity>;
+  /** 気象警報・注意報（Ｒ０６）（集約通報）VPWS50 から抽出した57地域ごとの発表種別一覧 */
+  vpws50Summaries?: Record<string, string[]>;
+  vpws50Updated?: string;
   typhoons: TyphoonReport[];
   bulletins: WeatherBulletinItem[];
   amedas: AmedasStationData[];

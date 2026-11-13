@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { buildSceneFeed, buildBottomFlipFeed } from './sceneFeedBuilder';
+import {
+  buildSceneFeed,
+  buildBottomFlipFeed,
+  evaluateTickerPassEnd,
+  WEATHER_COMMENTARY_EMPTY_MESSAGE,
+} from './sceneFeedBuilder';
 import { SceneDetailPanel } from '../components/SceneDetailPanel';
 import { REGION_CONFIGS } from './jmaParser';
 import {
@@ -531,4 +536,236 @@ test('buildSceneFeed & buildBottomFlipFeed & SceneDetailPanel: show empty-state 
   );
   assert.ok(htmlActive.includes('台風第31号'));
   assert.ok(!htmlActive.includes('現在台風情報は発表されていません'));
+});
+
+test('radar and warnings share 24h VPZJ51/VPCJ51/VPFJ51 commentary and show exact empty message when 0 valid within 24h', () => {
+  const nowMs = Date.parse('2026-11-14T00:00:00+09:00');
+  const freshVpf51 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113120000_0_VPFJ51_471000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113120000_0_VPFJ51_471000.xml',
+    title: '府県気象解説情報',
+    updated: '2026-11-13T12:00:00+09:00',
+    author: '沖縄気象台',
+    content: '【沖縄本島地方気象解説情報】落雷や急な強い雨に注意してください。',
+    feedType: 'extra' as const,
+    category: 'weather_info' as const,
+  };
+  const duplicateVpf50 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113120000_0_VPFJ50_471000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113120000_0_VPFJ50_471000.xml',
+    title: '府県気象情報',
+    updated: '2026-11-13T12:00:00+09:00',
+    author: '沖縄気象台',
+    content: '【沖縄本島地方気象解説情報】重複のため除外されるべき電文',
+    feedType: 'extra' as const,
+    category: 'weather_info' as const,
+  };
+  const expiredVpz51 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261112140000_0_VPZJ51_010000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261112140000_0_VPZJ51_010000.xml',
+    title: '全般気象解説情報',
+    updated: '2026-11-12T23:00:00+09:00', // 25h old (> 24h)
+    author: '気象庁',
+    content: '【全般気象解説情報】24時間超過のため除外されるべき電文',
+    feedType: 'extra' as const,
+    category: 'weather_info' as const,
+  };
+
+  const sharedBundle: MonitorDataBundle = {
+    ...mockBundle,
+    xmlEntries: [freshVpf51, duplicateVpf50, expiredVpz51],
+  };
+
+  const radarFeed = buildSceneFeed({
+    effectiveScene: 'radar',
+    data: sharedBundle,
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+    nowMs,
+  });
+
+  const warningsNationwideFeed = buildSceneFeed({
+    effectiveScene: 'warnings',
+    data: sharedBundle,
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+    nowMs,
+  });
+
+  assert.equal(radarFeed.items.length, 1);
+  assert.equal(radarFeed.items[0].text, freshVpf51.content);
+  assert.equal(warningsNationwideFeed.items.length, 1);
+  assert.equal(warningsNationwideFeed.items[0].text, freshVpf51.content);
+  // Warnings nationwide must not synthesize non-XML boilerplate like "特別警報 ... 発表されています"
+  assert.ok(!warningsNationwideFeed.items.some((i) => i.text.includes('発表されています')));
+
+  // When all commentary XMLs are expired (> 24h), both scenes show ONLY the 0-count message
+  const expiredOnlyBundle: MonitorDataBundle = {
+    ...mockBundle,
+    xmlEntries: [expiredVpz51],
+  };
+  const emptyRadar = buildSceneFeed({
+    effectiveScene: 'radar',
+    data: expiredOnlyBundle,
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+    nowMs,
+  });
+  const emptyWarnings = buildSceneFeed({
+    effectiveScene: 'warnings',
+    data: expiredOnlyBundle,
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+    nowMs,
+  });
+
+  assert.deepEqual(emptyRadar.items.map((i) => i.text), [
+    WEATHER_COMMENTARY_EMPTY_MESSAGE,
+  ]);
+  assert.deepEqual(emptyWarnings.items.map((i) => i.text), [
+    WEATHER_COMMENTARY_EMPTY_MESSAGE,
+  ]);
+  assert.equal(emptyRadar.items[0].prefix, undefined);
+});
+
+test('warnings zoomed division uses R06 VPWW55-61 / VPWS50 verbatim and rejects deprecated VPWW50/53/54', () => {
+  const ishikawaDiv = {
+    ...mockBundle.warnings[0],
+    id: 'div-170000',
+    prefId: 17,
+    prefecture: '石川県',
+    areaName: '石川県',
+    divisionCode: '170000',
+    severity: 'warning' as const,
+  };
+
+  const vpww55 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113140000_0_VPWW55_170000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113140000_0_VPWW55_170000.xml',
+    title: '気象警報・注意報（Ｒ０６）（大雨）',
+    updated: '2026-11-13T14:00:00+09:00',
+    author: '金沢地方気象台',
+    content: '【石川県大雨警報・注意報】能登では、土砂災害に警戒してください。',
+    feedType: 'extra' as const,
+    category: 'warnings' as const,
+  };
+  const vpww53Deprecated = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113140001_0_VPWW53_170000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113140001_0_VPWW53_170000.xml',
+    title: '気象特別警報・警報・注意報',
+    updated: '2026-11-13T14:00:01+09:00',
+    author: '金沢地方気象台',
+    content: '廃止予定VPWW53の文言',
+    feedType: 'extra' as const,
+    category: 'warnings' as const,
+  };
+  const vpww54Deprecated = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261113140002_0_VPWW54_170000.xml',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261113140002_0_VPWW54_170000.xml',
+    title: '気象警報・注意報（Ｈ２７）',
+    updated: '2026-11-13T14:00:02+09:00',
+    author: '金沢地方気象台',
+    content: '廃止予定VPWW54の文言',
+    feedType: 'extra' as const,
+    category: 'warnings' as const,
+  };
+
+  const zoomedFeed = buildSceneFeed({
+    effectiveScene: 'warnings',
+    data: {
+      ...mockBundle,
+      xmlEntries: [vpww55, vpww53Deprecated, vpww54Deprecated],
+    },
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: ishikawaDiv,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+  });
+
+  assert.equal(zoomedFeed.items.length, 1);
+  assert.equal(zoomedFeed.items[0].text, vpww55.content);
+  assert.ok(!zoomedFeed.items.some((i) => i.text.includes('廃止予定')));
+  assert.ok(!zoomedFeed.items.some((i) => i.text.includes('該当地域の各市区町村')));
+
+  // Fallback to VPWS50 summary when no VPWW55-61 exists for the zoomed division
+  const vpws50ZoomFeed = buildSceneFeed({
+    effectiveScene: 'warnings',
+    data: {
+      ...mockBundle,
+      xmlEntries: [vpww53Deprecated, vpww54Deprecated],
+      vpws50Summaries: { '170000': ['大雨警報', '暴風警報'] },
+      vpws50Updated: '2026-11-13T14:10:00+09:00',
+    },
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: ishikawaDiv,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+  });
+
+  assert.equal(vpws50ZoomFeed.items.length, 1);
+  assert.ok(vpws50ZoomFeed.items[0].text.includes('大雨警報・暴風警報'));
+  assert.ok(vpws50ZoomFeed.items[0].prefix?.includes('集約通報'));
+});
+
+test('evaluateTickerPassEnd waits for >= 15s and finishes current pass before advancing', () => {
+  // Pass 0 finishes early at 8s (< 15s) -> stream next item instead of completing
+  const early = evaluateTickerPassEnd({
+    isDriverScene: true,
+    isPausedOrInterrupted: false,
+    activeElapsedMs: 8000,
+    minDurationSec: 15,
+    currentPassIndex: 0,
+    itemCount: 3,
+  });
+  assert.equal(early.shouldSignalComplete, false);
+  assert.equal(early.nextPassIndex, 1);
+
+  // Pass 1 finishes at 17s (>= 15s) -> completes and moves to next scene without showing item 2
+  const finishedAfterMin = evaluateTickerPassEnd({
+    isDriverScene: true,
+    isPausedOrInterrupted: false,
+    activeElapsedMs: 17000,
+    minDurationSec: 15,
+    currentPassIndex: 1,
+    itemCount: 3,
+  });
+  assert.equal(finishedAfterMin.shouldSignalComplete, true);
+  assert.equal(finishedAfterMin.nextPassIndex, 2);
+
+  // Paused/interrupted must never signal completion
+  const paused = evaluateTickerPassEnd({
+    isDriverScene: true,
+    isPausedOrInterrupted: true,
+    activeElapsedMs: 25000,
+    minDurationSec: 15,
+    currentPassIndex: 0,
+    itemCount: 1,
+  });
+  assert.equal(paused.shouldSignalComplete, false);
 });
