@@ -399,9 +399,15 @@ export const SceneDetailPanel: React.FC<SceneDetailPanelProps> = React.memo(({
   ]);
 
   // Auto-scroll right-side information list and transition to next scene when scroll finishes
-  // ('radar' and 'amedas' scene transitions are controlled by MonitorMap)
+  // ('radar', 'amedas', 'apac_analysis' scene transitions are driven by bottom bar / App)
   useEffect(() => {
-    if (effectiveScene === 'radar' || effectiveScene === 'amedas') return;
+    if (
+      effectiveScene === 'radar' ||
+      effectiveScene === 'amedas' ||
+      effectiveScene === 'apac_analysis'
+    ) {
+      return;
+    }
     if (isLoopPaused || interruptKind !== 'none') return;
 
     const el = scrollContainerRef.current;

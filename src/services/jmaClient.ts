@@ -27,12 +27,17 @@ import {
   NowcastTimeEntry,
   RegionalWarningItem,
   RegionId,
+  MarineWarningOverlay,
+  SurfaceChartCode,
+  SurfaceChartHistoryFrame,
+  SurfaceWeatherChartData,
   TsunamiForecastReport,
   TyphoonReport,
   WarningSeverity,
   XmlFeedType,
 } from '../types/jma';
 import {
+  buildSurfaceChartHistoryFrames,
   extractJmaXmlDataCode,
   formatSeismicScale,
   getActiveSevereWarningDivisions,
@@ -46,6 +51,8 @@ import {
   parseJmaQuakeDetailJson,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
+  parseMarineWarningXml,
+  parseSurfaceWeatherChartXml,
   parseVpws50SummaryMap,
   PREFECTURE_NAMES,
   sortEarthquakesByNewest,
@@ -63,6 +70,10 @@ import {
   shouldReplaceEew,
 } from '../utils/eewTsunami';
 import { JMA_SUBDIVISION_CENTERS } from '../data/jmaSubdivisionCenters';
+import {
+  ensureMunicipalityLookupLoaded,
+  resolveMunicipalityFromP2PPoint,
+} from '../utils/municipalityLookup';
 
 const JMA_XML_URLS: Record<XmlFeedType, string> = {
   regular: 'https://www.data.jma.go.jp/developer/xml/feed/regular.xml',
@@ -143,6 +154,288 @@ let lastVpws50Cache: {
   updated: string;
 } | null = null;
 
+const lastSurfaceChartCache: Partial<
+  Record<
+    SurfaceChartCode,
+    { id: string; chart: SurfaceWeatherChartData }
+  >
+> = {};
+
+function findLatestSurfaceChartEntry(
+  entries: JmaXmlEntry[],
+  code: SurfaceChartCode
+): JmaXmlEntry | undefined {
+  const titleTargets: Record<SurfaceChartCode, string[]> = {
+    VZSA50: ['地上実況図'],
+    VZSA60: ['アジア太平洋地上実況図'],
+    VZSF60: ['アジア太平洋海上悪天２４時間予想図', 'アジア太平洋海上悪天24時間予想図'],
+    VZSF61: ['アジア太平洋海上悪天４８時間予想図', 'アジア太平洋海上悪天48時間予想図'],
+  };
+  const targets = titleTargets[code];
+  return entries.find(
+    (e) =>
+      extractJmaXmlDataCode(e) === code || targets.includes(e.title.trim())
+  );
+}
+
+async function fetchSurfaceChartEntry(
+  entry: JmaXmlEntry | undefined,
+  code: SurfaceChartCode
+): Promise<SurfaceWeatherChartData | null> {
+  const cached = lastSurfaceChartCache[code];
+  if (!entry || !entry.link) {
+    return cached?.chart ?? null;
+  }
+  if (cached && cached.id === entry.id) {
+    return cached.chart;
+  }
+  try {
+    const res = await fetchWithTimeout(entry.link, 8000);
+    if (!res.ok) {
+      return cached?.chart ?? null;
+    }
+    const xml = await res.text();
+    const chart = parseSurfaceWeatherChartXml(xml, code, entry.link);
+    if (chart) {
+      lastSurfaceChartCache[code] = { id: entry.id, chart };
+      return chart;
+    }
+  } catch {
+    // Fall back to last cached chart on transient network/parse error
+  }
+  return cached?.chart ?? null;
+}
+
+const JMA_OTHER_XML_URL =
+  'https://www.data.jma.go.jp/developer/xml/feed/other.xml';
+const JMA_REGULAR_L_XML_URL =
+  'https://www.data.jma.go.jp/developer/xml/feed/regular_l.xml';
+const JMA_OTHER_L_XML_URL =
+  'https://www.data.jma.go.jp/developer/xml/feed/other_l.xml';
+
+const SURFACE_CHART_HISTORY_FEED_TTL_MS = 25 * 60 * 1000;
+const cachedPastSurfaceCharts = new Map<string, SurfaceWeatherChartData>();
+const cachedPastMarineWarnings = new Map<string, MarineWarningOverlay>();
+let cachedArchiveFeedState: {
+  fetchedAtMs: number;
+  regularEntries: JmaXmlEntry[];
+  otherEntries: JmaXmlEntry[];
+} | null = null;
+let cachedSurfaceChartHistoryResult: {
+  latestKey: string;
+  builtAtMs: number;
+  frames: SurfaceChartHistoryFrame[];
+} | null = null;
+const sessionObservedAnalysisCharts = new Map<string, SurfaceWeatherChartData>();
+const sessionObservedMarineOverlays = new Map<string, MarineWarningOverlay>();
+
+async function fetchArchiveSurfaceChartFeedsIfStale(): Promise<{
+  regularEntries: JmaXmlEntry[];
+  otherEntries: JmaXmlEntry[];
+}> {
+  const now = Date.now();
+  if (
+    cachedArchiveFeedState &&
+    now - cachedArchiveFeedState.fetchedAtMs < SURFACE_CHART_HISTORY_FEED_TTL_MS
+  ) {
+    return {
+      regularEntries: cachedArchiveFeedState.regularEntries,
+      otherEntries: cachedArchiveFeedState.otherEntries,
+    };
+  }
+  try {
+    const [regRes, otherRes] = await Promise.all([
+      fetchWithTimeout(JMA_REGULAR_L_XML_URL, 11000).catch(() => null),
+      fetchWithTimeout(JMA_OTHER_L_XML_URL, 7000).catch(() => null),
+    ]);
+    const regularEntries =
+      regRes && regRes.ok
+        ? parseJmaAtomXml(await regRes.text(), 'regular', 6000)
+        : cachedArchiveFeedState?.regularEntries || [];
+    const otherEntries =
+      otherRes && otherRes.ok
+        ? parseJmaAtomXml(await otherRes.text(), 'regular', 1200)
+        : cachedArchiveFeedState?.otherEntries || [];
+    if (regularEntries.length > 0 || otherEntries.length > 0) {
+      cachedArchiveFeedState = {
+        fetchedAtMs: now,
+        regularEntries,
+        otherEntries,
+      };
+    }
+    return { regularEntries, otherEntries };
+  } catch {
+    return {
+      regularEntries: cachedArchiveFeedState?.regularEntries || [],
+      otherEntries: cachedArchiveFeedState?.otherEntries || [],
+    };
+  }
+}
+
+async function resolveSurfaceChartHistory24h(
+  latestChart: SurfaceWeatherChartData | null | undefined,
+  latestMarineOverlay: MarineWarningOverlay | null | undefined,
+  archiveFeeds: { regularEntries: JmaXmlEntry[]; otherEntries: JmaXmlEntry[] }
+): Promise<SurfaceChartHistoryFrame[]> {
+  if (latestChart) {
+    const k = latestChart.targetTime || latestChart.reportTime;
+    if (k) sessionObservedAnalysisCharts.set(k, latestChart);
+  }
+  if (latestMarineOverlay) {
+    const k = latestMarineOverlay.targetTime || latestMarineOverlay.reportTime;
+    if (k) sessionObservedMarineOverlays.set(k, latestMarineOverlay);
+  }
+
+  if (!latestChart) return [];
+  const latestKey = latestChart.targetTime || latestChart.reportTime || '';
+  const latestMs = Date.parse(latestKey);
+  if (Number.isNaN(latestMs)) return [];
+
+  if (
+    cachedSurfaceChartHistoryResult &&
+    cachedSurfaceChartHistoryResult.latestKey === latestKey &&
+    Date.now() - cachedSurfaceChartHistoryResult.builtAtMs < SURFACE_CHART_HISTORY_FEED_TTL_MS &&
+    cachedSurfaceChartHistoryResult.frames.length > 0
+  ) {
+    return cachedSurfaceChartHistoryResult.frames;
+  }
+
+  const windowStartMs = latestMs - 28 * 3600 * 1000;
+  const vzsaEntries = archiveFeeds.regularEntries
+    .filter((e) => {
+      if (!e.link) return false;
+      const code = extractJmaXmlDataCode(e);
+      if (code !== 'VZSA60' && !e.title.includes('アジア太平洋地上実況図')) {
+        return false;
+      }
+      const uMs = Date.parse(e.updated || '');
+      return Number.isNaN(uMs) || (uMs >= windowStartMs && uMs <= latestMs + 3 * 3600 * 1000);
+    })
+    .slice(0, 8);
+
+  const vpzuEntries = archiveFeeds.otherEntries
+    .filter((e) => {
+      if (!e.link) return false;
+      const code = extractJmaXmlDataCode(e);
+      if (
+        code !== 'VPZU55' &&
+        code !== 'VPZU54' &&
+        code !== 'VPZU53' &&
+        code !== 'VPZU52' &&
+        !e.title.startsWith('全般海上警報')
+      ) {
+        return false;
+      }
+      const uMs = Date.parse(e.updated || '');
+      return Number.isNaN(uMs) || (uMs >= windowStartMs && uMs <= latestMs + 3 * 3600 * 1000);
+    })
+    .slice(0, 12);
+
+  const [fetchedCharts, fetchedOverlays] = await Promise.all([
+    Promise.all(
+      vzsaEntries.map(async (entry) => {
+        const cached = cachedPastSurfaceCharts.get(entry.link);
+        if (cached) return cached;
+        try {
+          const res = await fetchWithTimeout(entry.link, 6000);
+          if (!res.ok) return null;
+          const xml = await res.text();
+          const parsed = parseSurfaceWeatherChartXml(xml, 'VZSA60', entry.link);
+          if (parsed) {
+            cachedPastSurfaceCharts.set(entry.link, parsed);
+          }
+          return parsed;
+        } catch {
+          return null;
+        }
+      })
+    ),
+    Promise.all(
+      vpzuEntries.map(async (entry) => {
+        const cached = cachedPastMarineWarnings.get(entry.link);
+        if (cached) return cached;
+        try {
+          const res = await fetchWithTimeout(entry.link, 5000);
+          if (!res.ok) return null;
+          const xml = await res.text();
+          const parsed = parseMarineWarningXml(xml, entry.link);
+          if (parsed) {
+            cachedPastMarineWarnings.set(entry.link, parsed);
+          }
+          return parsed;
+        } catch {
+          return null;
+        }
+      })
+    ),
+  ]);
+
+  const pastCharts: SurfaceWeatherChartData[] = [
+    ...sessionObservedAnalysisCharts.values(),
+    ...fetchedCharts.filter((c): c is SurfaceWeatherChartData => c !== null),
+  ];
+  const allOverlays: MarineWarningOverlay[] = [
+    ...sessionObservedMarineOverlays.values(),
+    ...fetchedOverlays.filter((o): o is MarineWarningOverlay => o !== null),
+  ];
+
+  const frames = buildSurfaceChartHistoryFrames(latestChart, pastCharts, allOverlays);
+  cachedSurfaceChartHistoryResult = {
+    latestKey,
+    builtAtMs: Date.now(),
+    frames,
+  };
+  return frames;
+}
+
+let lastMarineWarningCache: {
+  id: string;
+  overlay: MarineWarningOverlay;
+} | null = null;
+
+async function fetchLatestMarineWarningOverlay(): Promise<MarineWarningOverlay | null> {
+  try {
+    const feedRes = await fetchWithTimeout(JMA_OTHER_XML_URL, 8000);
+    if (!feedRes.ok) {
+      return lastMarineWarningCache?.overlay ?? null;
+    }
+    const feedText = await feedRes.text();
+    const entries = parseJmaAtomXml(feedText, 'regular', 250);
+    const preferR08 = entries.find((e) => {
+      const code = extractJmaXmlDataCode(e);
+      return code === 'VPZU55' || code === 'VPZU54';
+    });
+    const fallback = entries.find((e) => {
+      const code = extractJmaXmlDataCode(e);
+      return (
+        code === 'VPZU53' ||
+        code === 'VPZU52' ||
+        e.title.startsWith('全般海上警報')
+      );
+    });
+    const target = preferR08 || fallback;
+    if (!target || !target.link) {
+      return lastMarineWarningCache?.overlay ?? null;
+    }
+    if (lastMarineWarningCache && lastMarineWarningCache.id === target.id) {
+      return lastMarineWarningCache.overlay;
+    }
+    const xmlRes = await fetchWithTimeout(target.link, 8000);
+    if (!xmlRes.ok) {
+      return lastMarineWarningCache?.overlay ?? null;
+    }
+    const xmlText = await xmlRes.text();
+    const overlay = parseMarineWarningXml(xmlText, target.link);
+    if (overlay) {
+      lastMarineWarningCache = { id: target.id, overlay };
+      return overlay;
+    }
+  } catch {
+    // Fall back to last cached marine warning overlay on transient network/parse error
+  }
+  return lastMarineWarningCache?.overlay ?? null;
+}
+
 export function selectFeedXmlEntries(
   entries: JmaXmlEntry[],
   feedType: XmlFeedType
@@ -188,10 +481,17 @@ export function selectFeedXmlEntries(
 
 async function fetchSingleJmaXmlFeed(
   feedType: XmlFeedType
-): Promise<{ entries: JmaXmlEntry[]; live: boolean }> {
+): Promise<{
+  entries: JmaXmlEntry[];
+  surfaceChartApacEntry?: JmaXmlEntry;
+  surfaceChartApac24hEntry?: JmaXmlEntry;
+  surfaceChartApac48hEntry?: JmaXmlEntry;
+  live: boolean;
+}> {
   const url = JMA_XML_URLS[feedType];
+  // regular.xml holds ~750-1500 entries; VZSF60 (24h forecast) often sits around #750
   const parseLimit =
-    feedType === 'regular' ? 600 : feedType === 'extra' ? 500 : 40;
+    feedType === 'regular' ? 3000 : feedType === 'extra' ? 500 : 40;
   try {
     const res = await fetchWithTimeout(url, 6000);
     if (!res.ok) {
@@ -200,7 +500,25 @@ async function fetchSingleJmaXmlFeed(
     const text = await res.text();
     const rawParsed = parseJmaAtomXml(text, feedType, parseLimit);
     const filtered = selectFeedXmlEntries(rawParsed, feedType);
-    return { entries: filtered, live: rawParsed.length > 0 };
+    const surfaceChartApacEntry =
+      feedType === 'regular'
+        ? findLatestSurfaceChartEntry(rawParsed, 'VZSA60')
+        : undefined;
+    const surfaceChartApac24hEntry =
+      feedType === 'regular'
+        ? findLatestSurfaceChartEntry(rawParsed, 'VZSF60')
+        : undefined;
+    const surfaceChartApac48hEntry =
+      feedType === 'regular'
+        ? findLatestSurfaceChartEntry(rawParsed, 'VZSF61')
+        : undefined;
+    return {
+      entries: filtered,
+      surfaceChartApacEntry,
+      surfaceChartApac24hEntry,
+      surfaceChartApac48hEntry,
+      live: rawParsed.length > 0,
+    };
   } catch {
     return { entries: [], live: false };
   }
@@ -625,18 +943,22 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       P2P_QUAKE_ISSUE_TYPE_LABELS[issueType] ||
       (issueType ? `地震情報（${issueType}）` : '地震情報');
 
-    // Extract 188-area subdivision scales from P2PQuake points
+    // Extract 188-area subdivision scales (strictly for area-level items / ScalePrompt so station addresses never flood a whole prefecture)
+    // and municipality scales + real coordinates from JMA class20 centroids for DetailScale points.
     const areaMaxScales: Record<
       string,
       { scaleCode: number; scaleLabel: string; name?: string }
     > = {};
+    const cityMaxScales: Record<string, number> = {};
 
     for (let i = 0; i < rawPoints.length; i++) {
       const pt = rawPoints[i];
       const pref = String(pt.pref || '');
       const addr = String(pt.addr || '');
       const scale = typeof pt.scale === 'number' ? pt.scale : 10;
-      const matchedCodes = findSubdivisionAreaCodes(pref, addr);
+      const matchedCodes = findSubdivisionAreaCodes(pref, addr, {
+        allowPrefectureFallback: Boolean(pt.isArea),
+      });
       for (const code of matchedCodes) {
         const cur = areaMaxScales[code];
         if (!cur || scale > cur.scaleCode) {
@@ -658,7 +980,9 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
         const center = JMA_SUBDIVISION_CENTERS[code];
         const name = info.name || code;
         const pt = rawPoints.find((p: any) =>
-          findSubdivisionAreaCodes(String(p.pref || ''), String(p.addr || '')).includes(code)
+          findSubdivisionAreaCodes(String(p.pref || ''), String(p.addr || ''), {
+            allowPrefectureFallback: Boolean(p.isArea),
+          }).includes(code)
         );
         const pref = String(pt?.pref || '');
         const base = findPrefectureBaseCoords(pref, hypoLat, hypoLon);
@@ -674,35 +998,46 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
         });
       }
     } else {
-      for (let i = 0; i < Math.min(rawPoints.length, 60); i++) {
-        const pt = rawPoints[i];
+      // Sort by seismic scale descending BEFORE capping so highest-intensity stations are never dropped
+      const orderedPoints = [...rawPoints].sort(
+        (a: any, b: any) =>
+          (typeof b?.scale === 'number' ? b.scale : -1) -
+          (typeof a?.scale === 'number' ? a.scale : -1)
+      );
+
+      for (let i = 0; i < orderedPoints.length; i++) {
+        const pt = orderedPoints[i];
         const pref = String(pt.pref || '');
         const addr = String(pt.addr || '');
         const scale = typeof pt.scale === 'number' ? pt.scale : 10;
-        const base = findPrefectureBaseCoords(pref, hypoLat, hypoLon);
 
-        let hash = 0;
-        for (let c = 0; c < addr.length; c++) {
-          hash = (hash * 31 + addr.charCodeAt(c)) & 0xffff;
+        const hasExplicitCoords =
+          typeof pt.lat === 'number' &&
+          !Number.isNaN(pt.lat) &&
+          typeof pt.lon === 'number' &&
+          !Number.isNaN(pt.lon);
+        const resolved = !hasExplicitCoords
+          ? resolveMunicipalityFromP2PPoint(pref, addr)
+          : null;
+
+        if (resolved && resolved.isExactClass20 && scale >= 10) {
+          const curCity = cityMaxScales[resolved.muniCode] || 0;
+          if (scale > curCity) {
+            cityMaxScales[resolved.muniCode] = scale;
+          }
         }
-        const dLat = (((hash % 17) - 8) * 0.045);
-        const dLon = ((((hash >> 4) % 17) - 8) * 0.045);
 
-        stations.push({
-          prefecture: pref,
-          city: addr,
-          stationName: addr,
-          scaleCode: scale,
-          scaleLabel: formatSeismicScale(scale),
-          lat:
-            typeof pt.lat === 'number'
-              ? pt.lat
-              : Number((base.lat + dLat).toFixed(4)),
-          lon:
-            typeof pt.lon === 'number'
-              ? pt.lon
-              : Number((base.lon + dLon).toFixed(4)),
-        });
+        if (i < 120) {
+          stations.push({
+            prefecture: pref,
+            city: addr,
+            stationName: addr,
+            scaleCode: scale,
+            scaleLabel: formatSeismicScale(scale),
+            lat: hasExplicitCoords ? pt.lat : resolved?.lat,
+            lon: hasExplicitCoords ? pt.lon : resolved?.lon,
+          });
+        }
       }
     }
 
@@ -718,10 +1053,17 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       (issueType === 'DetailScale' || stations.some((s) => s.scaleCode <= 20) || maxScaleCode < 30);
 
     const id = String(item.id || `p2p-${eq.time}`);
+    const firstValidStation = stations.find(
+      (s) =>
+        typeof s.lat === 'number' &&
+        !Number.isNaN(s.lat) &&
+        typeof s.lon === 'number' &&
+        !Number.isNaN(s.lon)
+    );
     const finalLat =
-      hypocenterUnknown && stations[0]?.lat ? stations[0].lat : hypoLat;
+      hypocenterUnknown && firstValidStation?.lat ? firstValidStation.lat : hypoLat;
     const finalLon =
-      hypocenterUnknown && stations[0]?.lon ? stations[0].lon : hypoLon;
+      hypocenterUnknown && firstValidStation?.lon ? firstValidStation.lon : hypoLon;
 
     const reportKey = `${id}|${issueTypeLabel}|${hypocenterName}|${maxScaleCode}|${stations.length}|${isConfirmed ? 1 : 0}`;
 
@@ -750,10 +1092,11 @@ export function convertP2PQuakeItem(item: Record<string, any>): EarthquakeReport
       isConfirmed,
       reportKey,
       areaMaxScales: Object.keys(areaMaxScales).length > 0 ? areaMaxScales : undefined,
+      cityMaxScales: Object.keys(cityMaxScales).length > 0 ? cityMaxScales : undefined,
       stations:
         stations.length > 0
           ? stations
-          : maxScaleCode >= 10
+          : maxScaleCode >= 10 && !hypocenterUnknown && finalLat > 0
             ? [
                 {
                   prefecture: hypocenterName,
@@ -909,7 +1252,10 @@ export async function fetchRecentEarthquakes(): Promise<{
     })(),
     (async (): Promise<EarthquakeReport[]> => {
       try {
-        const res = await fetchWithTimeout(P2P_QUAKE_HISTORY_URL, 3800);
+        const [, res] = await Promise.all([
+          ensureMunicipalityLookupLoaded().catch(() => false),
+          fetchWithTimeout(P2P_QUAKE_HISTORY_URL, 3800),
+        ]);
         if (!res.ok) return [];
         const json = (await res.json()) as Array<Record<string, any>>;
         if (!Array.isArray(json)) return [];
@@ -1180,10 +1526,29 @@ async function fetchLiveTsunami(): Promise<{
  * Fetches all JMA XML & JSON feeds at low frequency (every 5 minutes) and returns a unified bundle.
  */
 export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
+  const regularBundlePromise = fetchSingleJmaXmlFeed('regular').then(
+    async (res) => {
+      const [surfaceChartApac, surfaceChartApac24h, surfaceChartApac48h] =
+        await Promise.all([
+          fetchSurfaceChartEntry(res.surfaceChartApacEntry, 'VZSA60'),
+          fetchSurfaceChartEntry(res.surfaceChartApac24hEntry, 'VZSF60'),
+          fetchSurfaceChartEntry(res.surfaceChartApac48hEntry, 'VZSF61'),
+        ]);
+      return {
+        regularXml: res,
+        surfaceChartApac,
+        surfaceChartApac24h,
+        surfaceChartApac48h,
+      };
+    }
+  );
+
   const [
     eqvolXml,
     extraXml,
-    regularXml,
+    { regularXml, surfaceChartApac, surfaceChartApac24h, surfaceChartApac48h },
+    archiveFeeds,
+    marineWarning,
     nowcastRes,
     liveWarningsRes,
     liveTyphoonsRes,
@@ -1195,7 +1560,9 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
   ] = await Promise.all([
     fetchSingleJmaXmlFeed('eqvol'),
     fetchSingleJmaXmlFeed('extra'),
-    fetchSingleJmaXmlFeed('regular'),
+    regularBundlePromise,
+    fetchArchiveSurfaceChartFeedsIfStale(),
+    fetchLatestMarineWarningOverlay(),
     fetchNowcastAndLightning(),
     fetchLiveJmaWarnings(),
     fetchLiveJmaTyphoons(),
@@ -1205,6 +1572,12 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     fetchLiveJmaForecasts(),
     fetchJmaOverviewForecast(),
   ]);
+
+  const surfaceChartApacHistory = await resolveSurfaceChartHistory24h(
+    surfaceChartApac,
+    marineWarning,
+    archiveFeeds
+  );
 
   const liveXmlEntries = [
     ...eqvolXml.entries,
@@ -1290,6 +1663,11 @@ export async function fetchMonitorDataBundle(): Promise<MonitorDataBundle> {
     tsunamiStations: INITIAL_TSUNAMI_STATIONS,
     tsunamiForecast: tsunamiRes.tsunami ?? INITIAL_TSUNAMI_FORECAST,
     forecasts,
+    surfaceChartApac,
+    surfaceChartApac24h,
+    surfaceChartApac48h,
+    surfaceChartApacHistory,
+    marineWarning,
     earthquakes: quakeRes.earthquakes,
     lastXmlFetchTime: `${hh}:${mm}:${ss}`,
     dataSourceStatus: {

@@ -13,6 +13,12 @@ import {
   RegionConfig,
   RegionalWarningItem,
   SceneId,
+  MarineWarningKind,
+  MarineWarningOverlay,
+  SurfaceChartMode,
+  SurfaceChartPressureCenter,
+  SurfaceFrontKind,
+  SurfaceWeatherChartData,
   TsunamiForecastReport,
   TsunamiStationItem,
   TsunamiForecastArea,
@@ -45,6 +51,7 @@ import {
   renderBroadcastWeatherSvg,
   resolveWarningDivision,
   selectNonOverlappingAmedasStations,
+  toHalfWidthAscii,
   WARNING_DIVISIONS,
   WarningMapZoomTier,
 } from '../utils/jmaParser';
@@ -77,6 +84,7 @@ import {
   getSafeViewportPadding,
   getScaledMaxZoom,
 } from '../utils/responsiveLayout';
+import { fetchSharedJmaTopoFile } from '../utils/municipalityLookup';
 
 let cachedJmaTopology: JmaTopology | null = null;
 let cachedClass20GeoJson: any = null;
@@ -149,11 +157,9 @@ function loadJmaMunicipalityGeoJson(): Promise<{
     });
   }
   if (class20FetchPromise) return class20FetchPromise;
-  class20FetchPromise = fetch(
-    `${import.meta.env.BASE_URL}geo/jma-class20-topo.json`
-  )
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+  class20FetchPromise = fetchSharedJmaTopoFile()
     .then((file) => {
+      if (!file) throw new Error('missing topo');
       const topo = decodeJmaTopology(file);
       for (const sh of topo.shapes) {
         if (sh.id && sh.labelPoint) cachedClass20LabelPoints[sh.id] = sh.labelPoint;
@@ -304,6 +310,1896 @@ function projectLatLonToWorldPx(
 ): { x: number; y: number } {
   const { normX, normY } = latLonToNormMercator(lat, lon);
   return { x: normX * scale, y: normY * scale };
+}
+
+interface CompiledSurfaceWindSector {
+  kind: MarineWarningKind;
+  badge: string;
+  normPts: Float64Array;
+  labelNx: number;
+  labelNy: number;
+}
+
+interface CompiledSurfaceForecastCircle {
+  badge: string;
+  centerNx: number;
+  centerNy: number;
+  normPts: Float64Array;
+}
+
+interface CompiledSurfaceBecomingBadge {
+  kind: MarineWarningKind;
+  badge: string;
+  nx: number;
+  ny: number;
+}
+
+interface CompiledSurfaceFogPolygon {
+  label: string;
+  normPts: Float64Array;
+  centerNx: number;
+  centerNy: number;
+}
+
+interface CompiledSurfaceWindPoint {
+  nx: number;
+  ny: number;
+  windDeg?: number;
+  windSpeedKt?: number;
+}
+
+interface CompiledSurfaceGroupedSeaAlert {
+  areaName: string;
+  nx: number;
+  ny: number;
+  badges: Array<{ kind: MarineWarningKind; badge: string }>;
+}
+
+interface CompiledSurfaceSevereWeather {
+  seaIceCells: Float64Array;
+  icingCells: Float64Array;
+  seaIceClusterLabels: Array<{ nx: number; ny: number }>;
+  icingClusterLabels: Array<{ nx: number; ny: number }>;
+  windSectors: CompiledSurfaceWindSector[];
+  forecastCircles: CompiledSurfaceForecastCircle[];
+  becomingBadges: CompiledSurfaceBecomingBadge[];
+  fogPolygons: CompiledSurfaceFogPolygon[];
+  windPoints: CompiledSurfaceWindPoint[];
+  seaAreaAlerts: CompiledSurfaceGroupedSeaAlert[];
+}
+
+const COMPASS_DIR_AZIMUTH_DEG: Record<string, number> = {
+  北: 0,
+  北北東: 22.5,
+  北東: 45,
+  東北東: 67.5,
+  東: 90,
+  東南東: 112.5,
+  南東: 135,
+  南南東: 157.5,
+  南: 180,
+  南南西: 202.5,
+  南西: 225,
+  西南西: 247.5,
+  西: 270,
+  西北西: 292.5,
+  北西: 315,
+  北北西: 337.5,
+};
+
+function offsetLatLonByNm(
+  lat: number,
+  lon: number,
+  azimuthDeg: number,
+  radiusNm: number
+): [number, number] {
+  const rad = azimuthDeg * DEG_TO_RAD;
+  const dLat = (radiusNm / 60) * Math.cos(rad);
+  const cosLat = Math.max(0.15, Math.cos(lat * DEG_TO_RAD));
+  const dLon = (radiusNm / (60 * cosLat)) * Math.sin(rad);
+  return [Math.max(-80, Math.min(82, lat + dLat)), lon + dLon];
+}
+
+function buildWarningSectorPolygon(
+  lat: number,
+  lon: number,
+  axes: Array<{ direction8: string; radiusNm: number }>
+): { normPts: Float64Array; labelNx: number; labelNy: number } {
+  const baseLon = lon < -20 ? lon + 360 : lon;
+  const resolvedAxes = axes.map((a) => ({
+    az: COMPASS_DIR_AZIMUTH_DEG[a.direction8.replace(/\s+/g, '')],
+    radiusNm: a.radiusNm,
+  }));
+  const isFullCircle =
+    resolvedAxes.length === 1 && resolvedAxes[0].az === undefined;
+
+  const sampleAngles: number[] = [];
+  for (let deg = 0; deg < 360; deg += 5) {
+    sampleAngles.push(deg);
+  }
+
+  let maxR = 0;
+  let bestAz = 135;
+  const radiusForAngle = (azDeg: number): number => {
+    if (isFullCircle) return resolvedAxes[0].radiusNm;
+    const defined = resolvedAxes.filter(
+      (a): a is { az: number; radiusNm: number } => a.az !== undefined
+    );
+    if (defined.length === 0) return axes[0]?.radiusNm ?? 200;
+    let bestAxis = defined[0];
+    let bestDot = -Infinity;
+    for (const ax of defined) {
+      const dot = Math.cos((azDeg - ax.az) * DEG_TO_RAD);
+      if (dot > bestDot) {
+        bestDot = dot;
+        bestAxis = ax;
+      }
+    }
+    if (defined.length === 1 && bestDot < -0.001) {
+      return Math.min(bestAxis.radiusNm * 0.45, 180);
+    }
+    return bestAxis.radiusNm;
+  };
+
+  for (const ax of resolvedAxes) {
+    if (ax.radiusNm > maxR) {
+      maxR = ax.radiusNm;
+      bestAz = ax.az ?? 135;
+    }
+  }
+
+  const pts = new Float64Array(sampleAngles.length * 2);
+  for (let i = 0; i < sampleAngles.length; i++) {
+    const deg = sampleAngles[i];
+    const r = radiusForAngle(deg);
+    const [pLat, pLon] = offsetLatLonByNm(lat, baseLon, deg, r);
+    const { normX, normY } = latLonToNormMercator(pLat, pLon);
+    pts[i * 2] = normX;
+    pts[i * 2 + 1] = normY;
+  }
+
+  const [lblLat, lblLon] = offsetLatLonByNm(
+    lat,
+    baseLon,
+    bestAz,
+    Math.max(80, maxR * 0.88)
+  );
+  const lblNorm = latLonToNormMercator(lblLat, lblLon);
+  return { normPts: pts, labelNx: lblNorm.normX, labelNy: lblNorm.normY };
+}
+
+function buildCirclePolygon(
+  lat: number,
+  lon: number,
+  radiusNm: number
+): Float64Array {
+  const baseLon = lon < -20 ? lon + 360 : lon;
+  const steps = 48;
+  const pts = new Float64Array(steps * 2);
+  for (let i = 0; i < steps; i++) {
+    const deg = (i / steps) * 360;
+    const [pLat, pLon] = offsetLatLonByNm(lat, baseLon, deg, radiusNm);
+    const { normX, normY } = latLonToNormMercator(pLat, pLon);
+    pts[i * 2] = normX;
+    pts[i * 2 + 1] = normY;
+  }
+  return pts;
+}
+
+function encodeHalfDegGridCells(
+  points: [number, number][] | undefined
+): { cells: Float64Array; clusters: Array<{ nx: number; ny: number }> } {
+  if (!points || points.length === 0) {
+    return { cells: new Float64Array(0), clusters: [] };
+  }
+  const cells = new Float64Array(points.length * 4);
+  const clusters: Array<{ nx: number; ny: number; lat: number; lon: number }> = [];
+  for (let i = 0; i < points.length; i++) {
+    const [lat, rawLon] = points[i];
+    const lon = rawLon < -20 ? rawLon + 360 : rawLon;
+    const tl = latLonToNormMercator(Math.min(82, lat + 0.25), lon - 0.25);
+    const br = latLonToNormMercator(Math.max(-80, lat - 0.25), lon + 0.25);
+    cells[i * 4] = tl.normX;
+    cells[i * 4 + 1] = tl.normY;
+    cells[i * 4 + 2] = br.normX;
+    cells[i * 4 + 3] = br.normY;
+  }
+  // Compute up to 2 well-separated representative label centers for large grid regions
+  if (points.length >= 6) {
+    const sorted = [...points].sort((a, b) => a[1] - b[1]);
+    const mid = sorted[Math.floor(sorted.length * 0.5)];
+    const mNorm = latLonToNormMercator(mid[0], mid[1] < -20 ? mid[1] + 360 : mid[1]);
+    clusters.push({ nx: mNorm.normX, ny: mNorm.normY, lat: mid[0], lon: mid[1] });
+  }
+  return {
+    cells,
+    clusters: clusters.map(({ nx, ny }) => ({ nx, ny })),
+  };
+}
+
+function compileSurfaceSevereWeather(
+  chart: SurfaceWeatherChartData,
+  marineWarning: MarineWarningOverlay | null | undefined
+): CompiledSurfaceSevereWeather | undefined {
+  const seaIce = encodeHalfDegGridCells(chart.seaIcePoints);
+  const icing = encodeHalfDegGridCells(chart.icingPoints);
+
+  const windSectors: CompiledSurfaceWindSector[] = [];
+  const forecastCircles: CompiledSurfaceForecastCircle[] = [];
+  const becomingBadges: CompiledSurfaceBecomingBadge[] = [];
+
+  if (marineWarning) {
+    for (const w of marineWarning.windWarnings) {
+      if (w.isForecastOnly) {
+        const radius = w.forecastProbRadiusNm ?? 80;
+        const { normX, normY } = latLonToNormMercator(
+          w.lat,
+          w.lon < -20 ? w.lon + 360 : w.lon
+        );
+        forecastCircles.push({
+          badge: w.badge,
+          centerNx: normX,
+          centerNy: normY,
+          normPts: buildCirclePolygon(w.lat, w.lon, radius),
+        });
+      } else if (w.isBecoming || w.axes.length === 0) {
+        const { normX, normY } = latLonToNormMercator(
+          w.lat,
+          w.lon < -20 ? w.lon + 360 : w.lon
+        );
+        becomingBadges.push({
+          kind: w.kind,
+          badge: w.badge,
+          nx: normX,
+          ny: normY,
+        });
+      } else {
+        const sector = buildWarningSectorPolygon(w.lat, w.lon, w.axes);
+        windSectors.push({
+          kind: w.kind,
+          badge: w.badge,
+          normPts: sector.normPts,
+          labelNx: sector.labelNx,
+          labelNy: sector.labelNy,
+        });
+      }
+    }
+  }
+
+  const rawFogPolys = [
+    ...(chart.fogPolygons ?? []),
+    ...(marineWarning?.fogPolygons ?? []),
+  ];
+  const fogPolygons: CompiledSurfaceFogPolygon[] = [];
+  for (const fp of rawFogPolys) {
+    if (fp.points.length < 3) continue;
+    // Strip duplicate closing vertex if present for smooth closed ring drawing
+    const last = fp.points[fp.points.length - 1];
+    const first = fp.points[0];
+    const uniquePts =
+      fp.points.length > 3 &&
+      Math.abs(last[0] - first[0]) < 1e-4 &&
+      Math.abs(last[1] - first[1]) < 1e-4
+        ? fp.points.slice(0, -1)
+        : fp.points;
+    const normPts = new Float64Array(uniquePts.length * 2);
+    let sumX = 0;
+    let sumY = 0;
+    for (let i = 0; i < uniquePts.length; i++) {
+      const uLon = uniquePts[i][1] < -20 ? uniquePts[i][1] + 360 : uniquePts[i][1];
+      const { normX, normY } = latLonToNormMercator(uniquePts[i][0], uLon);
+      normPts[i * 2] = normX;
+      normPts[i * 2 + 1] = normY;
+      sumX += normX;
+      sumY += normY;
+    }
+    fogPolygons.push({
+      label: fp.label,
+      normPts,
+      centerNx: sumX / uniquePts.length,
+      centerNy: sumY / uniquePts.length,
+    });
+  }
+
+  const windPoints: CompiledSurfaceWindPoint[] = (chart.windPoints ?? []).map(
+    (wp) => {
+      const { normX, normY } = latLonToNormMercator(
+        wp.lat,
+        wp.lon < -20 ? wp.lon + 360 : wp.lon
+      );
+      return {
+        nx: normX,
+        ny: normY,
+        windDeg: wp.windDeg,
+        windSpeedKt: wp.windSpeedKt,
+      };
+    }
+  );
+
+  const groupedAlertMap = new Map<string, CompiledSurfaceGroupedSeaAlert>();
+  const combinedAlerts = [
+    ...(chart.seaAreaAlerts ?? []),
+    ...(marineWarning?.seaAreaAlerts ?? []),
+  ];
+  for (const alert of combinedAlerts) {
+    const key = alert.areaCode || alert.areaName;
+    let entry = groupedAlertMap.get(key);
+    if (!entry) {
+      const { normX, normY } = latLonToNormMercator(
+        alert.lat,
+        alert.lon < -20 ? alert.lon + 360 : alert.lon
+      );
+      entry = {
+        areaName: alert.areaName,
+        nx: normX,
+        ny: normY,
+        badges: [],
+      };
+      groupedAlertMap.set(key, entry);
+    }
+    if (!entry.badges.some((b) => b.badge === alert.badge)) {
+      entry.badges.push({ kind: alert.kind, badge: alert.badge });
+    }
+  }
+  const seaAreaAlerts = Array.from(groupedAlertMap.values());
+
+  if (
+    seaIce.cells.length === 0 &&
+    icing.cells.length === 0 &&
+    windSectors.length === 0 &&
+    forecastCircles.length === 0 &&
+    becomingBadges.length === 0 &&
+    fogPolygons.length === 0 &&
+    windPoints.length === 0 &&
+    seaAreaAlerts.length === 0
+  ) {
+    return undefined;
+  }
+
+  return {
+    seaIceCells: seaIce.cells,
+    icingCells: icing.cells,
+    seaIceClusterLabels: seaIce.clusters,
+    icingClusterLabels: icing.clusters,
+    windSectors,
+    forecastCircles,
+    becomingBadges,
+    fogPolygons,
+    windPoints,
+    seaAreaAlerts,
+  };
+}
+
+const surfaceGridPatternCache = new WeakMap<
+  CanvasRenderingContext2D,
+  { sea_ice?: CanvasPattern | null; icing?: CanvasPattern | null }
+>();
+
+function getSurfaceGridPattern(
+  ctx: CanvasRenderingContext2D,
+  kind: 'sea_ice' | 'icing'
+): CanvasPattern | null {
+  let cache = surfaceGridPatternCache.get(ctx);
+  if (cache && cache[kind] !== undefined) {
+    return cache[kind] ?? null;
+  }
+  if (typeof document === 'undefined') return null;
+  const tile = document.createElement('canvas');
+  tile.width = 10;
+  tile.height = 10;
+  const tctx = tile.getContext('2d');
+  if (!tctx) return null;
+  if (!cache) {
+    cache = {};
+    surfaceGridPatternCache.set(ctx, cache);
+  }
+
+  if (kind === 'sea_ice') {
+    tctx.fillStyle = 'rgba(14, 165, 233, 0.14)';
+    tctx.fillRect(0, 0, 10, 10);
+    tctx.fillStyle = 'rgba(125, 211, 252, 0.72)';
+    tctx.beginPath();
+    tctx.arc(2.5, 2.5, 1.25, 0, Math.PI * 2);
+    tctx.arc(7.5, 7.5, 1.25, 0, Math.PI * 2);
+    tctx.fill();
+    cache.sea_ice = ctx.createPattern(tile, 'repeat');
+    return cache.sea_ice;
+  }
+
+  tctx.fillStyle = 'rgba(99, 102, 241, 0.12)';
+  tctx.fillRect(0, 0, 10, 10);
+  tctx.strokeStyle = 'rgba(165, 180, 252, 0.70)';
+  tctx.lineWidth = 1.25;
+  tctx.beginPath();
+  tctx.moveTo(-2, 10);
+  tctx.lineTo(10, -2);
+  tctx.moveTo(0, 12);
+  tctx.lineTo(12, 0);
+  tctx.stroke();
+  cache.icing = ctx.createPattern(tile, 'repeat');
+  return cache.icing;
+}
+
+const WIND_WARNING_COLORS: Record<
+  MarineWarningKind,
+  { stroke: string; fill: string; badgeBg: string; badgeText: string }
+> = {
+  typhoon: {
+    stroke: '#EF4444',
+    fill: 'rgba(239, 68, 68, 0.09)',
+    badgeBg: 'rgba(127, 29, 29, 0.92)',
+    badgeText: '#FCA5A5',
+  },
+  storm: {
+    stroke: '#F97316',
+    fill: 'rgba(249, 115, 22, 0.08)',
+    badgeBg: 'rgba(124, 45, 18, 0.92)',
+    badgeText: '#FDBA74',
+  },
+  gale: {
+    stroke: '#F59E0B',
+    fill: 'rgba(245, 158, 11, 0.06)',
+    badgeBg: 'rgba(120, 53, 15, 0.90)',
+    badgeText: '#FDE68A',
+  },
+  near_gale: {
+    stroke: '#EAB308',
+    fill: 'rgba(234, 179, 8, 0.05)',
+    badgeBg: 'rgba(113, 63, 18, 0.90)',
+    badgeText: '#FEF08A',
+  },
+  fog: {
+    stroke: '#A3B830',
+    fill: 'rgba(163, 184, 48, 0.14)',
+    badgeBg: 'rgba(63, 98, 18, 0.88)',
+    badgeText: '#ECFCCB',
+  },
+  icing: {
+    stroke: '#38BDF8',
+    fill: 'rgba(56, 189, 248, 0.14)',
+    badgeBg: 'rgba(12, 74, 110, 0.88)',
+    badgeText: '#BAE6FD',
+  },
+};
+
+function drawScallopedFogPolygon(
+  ctx: CanvasRenderingContext2D,
+  screenPts: Float64Array,
+  overlayScale: number
+): void {
+  const n = screenPts.length / 2;
+  if (n < 3) return;
+
+  // Compute signed area to orient scallop bulges outward consistently
+  let signedArea = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    signedArea +=
+      screenPts[i * 2] * screenPts[j * 2 + 1] -
+      screenPts[j * 2] * screenPts[i * 2 + 1];
+  }
+  // Positive signed area in screen Y-down means clockwise visual ring; right-hand normal points inward, left-hand points outward
+  const outwardSign = signedArea >= 0 ? 1 : -1;
+
+  // Soft interior fill first
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(screenPts[0], screenPts[1]);
+  for (let i = 1; i < n; i++) {
+    ctx.lineTo(screenPts[i * 2], screenPts[i * 2 + 1]);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(163, 184, 48, 0.13)';
+  ctx.fill();
+
+  // Resample perimeter into even arc steps for classic meteorological scalloped arcs
+  const cumLen = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const dx = screenPts[j * 2] - screenPts[i * 2];
+    const dy = screenPts[j * 2 + 1] - screenPts[i * 2 + 1];
+    cumLen[i + 1] = cumLen[i] + Math.hypot(dx, dy);
+  }
+  const totalLen = cumLen[n];
+  if (totalLen < 12) {
+    ctx.restore();
+    return;
+  }
+
+  const targetStep = Math.max(8, 11 * overlayScale);
+  const scallopCount = Math.max(6, Math.round(totalLen / targetStep));
+  const stepLen = totalLen / scallopCount;
+  const bulge = stepLen * 0.44;
+
+  const sampleAt = (d: number): [number, number] => {
+    const wrapped = ((d % totalLen) + totalLen) % totalLen;
+    let idx = 0;
+    while (idx < n - 1 && cumLen[idx + 1] < wrapped) {
+      idx++;
+    }
+    const segLen = Math.max(1e-6, cumLen[idx + 1] - cumLen[idx]);
+    const t = (wrapped - cumLen[idx]) / segLen;
+    const j = (idx + 1) % n;
+    return [
+      screenPts[idx * 2] + (screenPts[j * 2] - screenPts[idx * 2]) * t,
+      screenPts[idx * 2 + 1] +
+        (screenPts[j * 2 + 1] - screenPts[idx * 2 + 1]) * t,
+    ];
+  };
+
+  ctx.beginPath();
+  const [startX, startY] = sampleAt(0);
+  ctx.moveTo(startX, startY);
+  let prevX = startX;
+  let prevY = startY;
+  for (let k = 1; k <= scallopCount; k++) {
+    const [nextX, nextY] = sampleAt(k * stepLen);
+    const dx = nextX - prevX;
+    const dy = nextY - prevY;
+    const len = Math.max(1e-6, Math.hypot(dx, dy));
+    // Left-hand normal in screen coords is (dy/len, -dx/len); outward when outwardSign > 0
+    const nx = (dy / len) * outwardSign;
+    const ny = (-dx / len) * outwardSign;
+    const cx = (prevX + nextX) * 0.5 + nx * bulge;
+    const cy = (prevY + nextY) * 0.5 + ny * bulge;
+    ctx.quadraticCurveTo(cx, cy, nextX, nextY);
+    prevX = nextX;
+    prevY = nextY;
+  }
+  ctx.closePath();
+
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(8, 11, 15, 0.72)';
+  ctx.lineWidth = 3.2 * overlayScale;
+  ctx.stroke();
+  ctx.strokeStyle = '#B8CE3A';
+  ctx.lineWidth = 1.65 * overlayScale;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawMeteorologicalWindBarb(
+  ctx: CanvasRenderingContext2D,
+  sx: number,
+  sy: number,
+  windDeg: number,
+  windSpeedKt: number,
+  overlayScale: number
+): void {
+  const rad = windDeg * DEG_TO_RAD;
+  // Meteorological wind direction is FROM azimuth; shaft points into incoming wind
+  const ux = Math.sin(rad);
+  const uy = -Math.cos(rad);
+  // Northern hemisphere feathers project clockwise (right side looking toward wind origin)
+  const rx = -uy;
+  const ry = ux;
+  const tickDirX = ux * 0.30 + rx * 0.95;
+  const tickDirY = uy * 0.30 + ry * 0.95;
+
+  const shaftLen = 22 * overlayScale;
+  const tickLen = 9.5 * overlayScale;
+  const halfTickLen = 5.5 * overlayScale;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const roundedKt = Math.max(5, Math.round(windSpeedKt / 5) * 5);
+  let rem = roundedKt;
+  const pennants = Math.floor(rem / 50);
+  rem %= 50;
+  const fullTicks = Math.floor(rem / 10);
+  rem %= 10;
+  const halfTick = rem >= 5 ? 1 : 0;
+
+  const drawBarbShape = (strokeColor: string, lineWidth: number, dotFill: string) => {
+    ctx.strokeStyle = strokeColor;
+    ctx.fillStyle = strokeColor;
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + ux * shaftLen, sy + uy * shaftLen);
+    ctx.stroke();
+
+    let pos = shaftLen;
+    const step = 3.8 * overlayScale;
+
+    for (let p = 0; p < pennants; p++) {
+      const p0x = sx + ux * pos;
+      const p0y = sy + uy * pos;
+      const tipX = sx + ux * (pos - step * 0.7) + tickDirX * tickLen;
+      const tipY = sy + uy * (pos - step * 0.7) + tickDirY * tickLen;
+      const basePos = Math.max(step, pos - step * 1.6);
+      const p1x = sx + ux * basePos;
+      const p1y = sy + uy * basePos;
+      ctx.beginPath();
+      ctx.moveTo(p0x, p0y);
+      ctx.lineTo(tipX, tipY);
+      ctx.lineTo(p1x, p1y);
+      ctx.closePath();
+      ctx.fill();
+      pos = basePos - step * 0.5;
+    }
+
+    for (let f = 0; f < fullTicks; f++) {
+      const bx = sx + ux * pos;
+      const by = sy + uy * pos;
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.lineTo(bx + tickDirX * tickLen, by + tickDirY * tickLen);
+      ctx.stroke();
+      pos -= step;
+    }
+
+    if (halfTick > 0) {
+      const hPos = pennants === 0 && fullTicks === 0 ? shaftLen * 0.78 : pos;
+      const bx = sx + ux * hPos;
+      const by = sy + uy * hPos;
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.lineTo(bx + tickDirX * halfTickLen, by + tickDirY * halfTickLen);
+      ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.arc(sx, sy, 2.5 * overlayScale, 0, Math.PI * 2);
+    ctx.fillStyle = dotFill;
+    ctx.fill();
+  };
+
+  drawBarbShape('#0B0D12', 3.4 * overlayScale, '#0B0D12');
+  drawBarbShape('#BAE6FD', 1.65 * overlayScale, '#E0F2FE');
+  ctx.restore();
+}
+
+function drawSurfaceSevereUnderlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  toScreenX: (nx: number) => number,
+  toScreenY: (ny: number) => number,
+  overlayScale: number,
+  compiled: CompiledSurfaceChart
+): void {
+  const severe = compiled.severe;
+  if (!severe) return;
+
+  // 1) Sea Ice (stipple) & Hull Icing (diagonal hatch) 0.5° grid regions
+  const drawGridLayer = (cells: Float64Array, kind: 'sea_ice' | 'icing') => {
+    if (cells.length === 0) return;
+    const pattern = getSurfaceGridPattern(ctx, kind);
+    ctx.save();
+    ctx.fillStyle =
+      pattern ??
+      (kind === 'sea_ice'
+        ? 'rgba(56, 189, 248, 0.24)'
+        : 'rgba(129, 140, 248, 0.22)');
+    ctx.beginPath();
+    const count = cells.length / 4;
+    for (let i = 0; i < count; i++) {
+      const x1 = toScreenX(cells[i * 4]) - 0.5;
+      const y1 = toScreenY(cells[i * 4 + 1]) - 0.5;
+      const x2 = toScreenX(cells[i * 4 + 2]) + 0.5;
+      const y2 = toScreenY(cells[i * 4 + 3]) + 0.5;
+      if (x2 < -10 || x1 > width + 10 || y2 < -10 || y1 > height + 10) continue;
+      ctx.rect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
+    }
+    ctx.fill();
+    ctx.restore();
+  };
+
+  drawGridLayer(severe.seaIceCells, 'sea_ice');
+  drawGridLayer(severe.icingCells, 'icing');
+
+  // 2) Marine Gale / Storm / Typhoon Warning Sectors ([GW]/[SW]/[TW])
+  for (const sector of severe.windSectors) {
+    const count = sector.normPts.length / 2;
+    if (count < 3) continue;
+    const style = WIND_WARNING_COLORS[sector.kind];
+    ctx.save();
+    ctx.beginPath();
+    let anyVisible = false;
+    for (let j = 0; j < count; j++) {
+      const sx = toScreenX(sector.normPts[j * 2]);
+      const sy = toScreenY(sector.normPts[j * 2 + 1]);
+      if (j === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+      if (sx >= -60 && sx <= width + 60 && sy >= -60 && sy <= height + 60) {
+        anyVisible = true;
+      }
+    }
+    ctx.closePath();
+    if (!anyVisible) {
+      ctx.restore();
+      continue;
+    }
+    ctx.fillStyle = style.fill;
+    ctx.fill();
+    ctx.setLineDash([7 * overlayScale, 4.5 * overlayScale]);
+    ctx.strokeStyle = 'rgba(8, 11, 15, 0.72)';
+    ctx.lineWidth = 3.2 * overlayScale;
+    ctx.stroke();
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = 1.65 * overlayScale;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 3) Forecast formation probability circles (発生予想 e.g. 80NM -> New L)
+  for (const circle of severe.forecastCircles) {
+    const count = circle.normPts.length / 2;
+    if (count < 3) continue;
+    ctx.save();
+    ctx.beginPath();
+    for (let j = 0; j < count; j++) {
+      const sx = toScreenX(circle.normPts[j * 2]);
+      const sy = toScreenY(circle.normPts[j * 2 + 1]);
+      if (j === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.06)';
+    ctx.fill();
+    ctx.setLineDash([5 * overlayScale, 4 * overlayScale]);
+    ctx.strokeStyle = 'rgba(8, 11, 15, 0.75)';
+    ctx.lineWidth = 3.0 * overlayScale;
+    ctx.stroke();
+    ctx.strokeStyle = '#FBBF24';
+    ctx.lineWidth = 1.55 * overlayScale;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 4) Dense fog scalloped polygons (FOG [W] / FOG)
+  for (const fog of severe.fogPolygons) {
+    const n = fog.normPts.length / 2;
+    if (n < 3) continue;
+    const screenPts = new Float64Array(n * 2);
+    let anyVisible = false;
+    for (let i = 0; i < n; i++) {
+      const sx = toScreenX(fog.normPts[i * 2]);
+      const sy = toScreenY(fog.normPts[i * 2 + 1]);
+      screenPts[i * 2] = sx;
+      screenPts[i * 2 + 1] = sy;
+      if (sx >= -60 && sx <= width + 60 && sy >= -60 && sy <= height + 60) {
+        anyVisible = true;
+      }
+    }
+    if (!anyVisible) continue;
+    drawScallopedFogPolygon(ctx, screenPts, overlayScale);
+  }
+}
+
+function drawSurfaceSevereLabels(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  toScreenX: (nx: number) => number,
+  toScreenY: (ny: number) => number,
+  overlayScale: number,
+  compiled: CompiledSurfaceChart,
+  placedBoxes: SynopticBox[]
+): void {
+  const severe = compiled.severe;
+  if (!severe) return;
+
+  const drawUnboxedHaloTag = (
+    text: string,
+    cx: number,
+    cy: number,
+    color: string,
+    fontPx: number,
+    bgTint?: string,
+    forceVisible = false
+  ) => {
+    if (cx < -40 || cx > width + 40 || cy < -20 || cy > height + 20) return false;
+    ctx.font = `800 ${fontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
+    const m = ctx.measureText(text);
+    const w = m.width + (bgTint ? 8 * overlayScale : 2 * overlayScale);
+    const h = fontPx + (bgTint ? 5 * overlayScale : 2 * overlayScale);
+    const s = overlayScale;
+    const offsets: Array<[number, number]> = [
+      [0, 0],
+      [0, -16 * s],
+      [0, 16 * s],
+      [28 * s, 0],
+      [-28 * s, 0],
+      [24 * s, -16 * s],
+      [-24 * s, -16 * s],
+      [24 * s, 16 * s],
+      [-24 * s, 16 * s],
+      [0, -28 * s],
+      [0, 28 * s],
+    ];
+    let chosenX: number | null = null;
+    let chosenY: number | null = null;
+    for (const [dx, dy] of offsets) {
+      const x = cx + dx;
+      const y = cy + dy;
+      const box: SynopticBox = { x, y, w, h };
+      if (!overlapsAnySynopticBox(box, placedBoxes, 1.5 * s)) {
+        chosenX = x;
+        chosenY = y;
+        break;
+      }
+    }
+    if (chosenX === null || chosenY === null) {
+      if (!forceVisible) return false;
+      chosenX = cx;
+      chosenY = cy - 16 * s;
+    }
+    placedBoxes.push({ x: chosenX, y: chosenY, w, h });
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (bgTint) {
+      ctx.fillStyle = bgTint;
+      ctx.beginPath();
+      ctx.roundRect(chosenX - w / 2, chosenY - h / 2, w, h, 3 * s);
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.0 * s;
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = 'rgba(8, 10, 14, 0.92)';
+      ctx.lineWidth = 3.2 * s;
+      ctx.lineJoin = 'round';
+      ctx.strokeText(text, chosenX, chosenY);
+    }
+    ctx.fillStyle = color;
+    ctx.fillText(text, chosenX, chosenY);
+    ctx.restore();
+    return true;
+  };
+
+  // 1) Gale wind barbs + kt labels (forecast charts)
+  const barbFontPx = Math.max(9, Math.round(9.5 * overlayScale));
+  for (const wp of severe.windPoints) {
+    const sx = toScreenX(wp.nx);
+    const sy = toScreenY(wp.ny);
+    if (sx < -30 || sx > width + 30 || sy < -30 || sy > height + 30) continue;
+    if (wp.windDeg !== undefined && wp.windSpeedKt !== undefined) {
+      drawMeteorologicalWindBarb(ctx, sx, sy, wp.windDeg, wp.windSpeedKt, overlayScale);
+    }
+    if (wp.windSpeedKt !== undefined) {
+      drawUnboxedHaloTag(
+        `${Math.round(wp.windSpeedKt)}kt`,
+        sx,
+        sy + 11 * overlayScale,
+        '#7DD3FC',
+        barbFontPx
+      );
+    }
+  }
+
+  // 2) Active sector badges ([GW]/[SW]/[TW]), Becoming [GW], and New L probability circles
+  const badgeFontPx = Math.max(9.5, Math.round(10.5 * overlayScale));
+  for (const sec of severe.windSectors) {
+    const sx = toScreenX(sec.labelNx);
+    const sy = toScreenY(sec.labelNy);
+    const style = WIND_WARNING_COLORS[sec.kind];
+    drawUnboxedHaloTag(
+      sec.badge,
+      sx,
+      sy,
+      style.badgeText,
+      badgeFontPx,
+      style.badgeBg,
+      true
+    );
+  }
+
+  for (const bec of severe.becomingBadges) {
+    const sx = toScreenX(bec.nx);
+    const sy = toScreenY(bec.ny);
+    const style = WIND_WARNING_COLORS[bec.kind];
+    drawUnboxedHaloTag(
+      bec.badge,
+      sx + 26 * overlayScale,
+      sy - 12 * overlayScale,
+      style.badgeText,
+      badgeFontPx,
+      style.badgeBg,
+      true
+    );
+  }
+
+  for (const fc of severe.forecastCircles) {
+    const sx = toScreenX(fc.centerNx);
+    const sy = toScreenY(fc.centerNy);
+    if (sx >= -30 && sx <= width + 30 && sy >= -30 && sy <= height + 30) {
+      ctx.save();
+      ctx.fillStyle = '#FBBF24';
+      ctx.strokeStyle = '#0B0D12';
+      ctx.lineWidth = 2.0 * overlayScale;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 3.0 * overlayScale, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fill();
+      ctx.restore();
+      drawUnboxedHaloTag(
+        `New L ${fc.badge}`,
+        sx,
+        sy - 14 * overlayScale,
+        '#FDE68A',
+        badgeFontPx,
+        'rgba(120, 53, 15, 0.90)',
+        true
+      );
+    }
+  }
+
+  // 3) Fog polygon centroids & sea-ice/icing cluster labels
+  for (const fog of severe.fogPolygons) {
+    const sx = toScreenX(fog.centerNx);
+    const sy = toScreenY(fog.centerNy);
+    const isWarn = fog.label.includes('[W]');
+    drawUnboxedHaloTag(
+      fog.label,
+      sx,
+      sy,
+      '#ECFCCB',
+      badgeFontPx,
+      isWarn ? 'rgba(63, 98, 18, 0.88)' : 'rgba(54, 83, 20, 0.78)',
+      true
+    );
+  }
+  for (const lbl of severe.seaIceClusterLabels) {
+    drawUnboxedHaloTag(
+      '海氷',
+      toScreenX(lbl.nx),
+      toScreenY(lbl.ny),
+      '#BAE6FD',
+      Math.max(9, Math.round(9.5 * overlayScale))
+    );
+  }
+  for (const lbl of severe.icingClusterLabels) {
+    drawUnboxedHaloTag(
+      '船体着氷',
+      toScreenX(lbl.nx),
+      toScreenY(lbl.ny),
+      '#C7D2FE',
+      Math.max(9, Math.round(9.5 * overlayScale))
+    );
+  }
+
+  // 4) Grouped named sea-region alerts (e.g. オホーツク海: FOG [W] + 着氷 [W])
+  const seaFontPx = Math.max(8.5, Math.round(9.2 * overlayScale));
+  const pillFontPx = Math.max(8.5, Math.round(9.0 * overlayScale));
+  for (const sea of severe.seaAreaAlerts) {
+    const sx = toScreenX(sea.nx);
+    const sy = toScreenY(sea.ny);
+    if (sx < -60 || sx > width + 60 || sy < -30 || sy > height + 30) continue;
+
+    ctx.font = `700 ${seaFontPx}px "Noto Sans JP", sans-serif`;
+    const nameW = ctx.measureText(sea.areaName).width;
+    ctx.font = `800 ${pillFontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
+    let pillsW = 0;
+    const pillWidths = sea.badges.map((b) => {
+      const pw = ctx.measureText(b.badge).width + 8 * overlayScale;
+      pillsW += pw;
+      return pw;
+    });
+    const gap = 3 * overlayScale;
+    if (sea.badges.length > 1) pillsW += gap * (sea.badges.length - 1);
+
+    const totalW = Math.max(nameW, pillsW) + 6 * overlayScale;
+    const pillH = pillFontPx + 4 * overlayScale;
+    const totalH = seaFontPx + 3 * overlayScale + pillH;
+
+    const s = overlayScale;
+    const tryOffsets: Array<[number, number]> = [
+      [0, 0],
+      [0, -16 * s],
+      [0, 16 * s],
+      [24 * s, 0],
+      [-24 * s, 0],
+      [0, -28 * s],
+      [0, 28 * s],
+    ];
+    for (const [dx, dy] of tryOffsets) {
+      const cx = sx + dx;
+      const cy = sy + dy;
+      const box: SynopticBox = { x: cx, y: cy, w: totalW, h: totalH };
+      if (overlapsAnySynopticBox(box, placedBoxes, 1.5 * s)) continue;
+      placedBoxes.push(box);
+
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `700 ${seaFontPx}px "Noto Sans JP", sans-serif`;
+      const topY = cy - totalH / 2;
+      const nameY = topY + seaFontPx * 0.52;
+      ctx.strokeStyle = 'rgba(8, 10, 14, 0.92)';
+      ctx.lineWidth = 3.0 * overlayScale;
+      ctx.lineJoin = 'round';
+      ctx.strokeText(sea.areaName, cx, nameY);
+      ctx.fillStyle = '#CBD5E1';
+      ctx.fillText(sea.areaName, cx, nameY);
+
+      let px = cx - pillsW / 2;
+      const py = topY + seaFontPx + 3 * overlayScale;
+      ctx.font = `800 ${pillFontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
+      for (let i = 0; i < sea.badges.length; i++) {
+        const b = sea.badges[i];
+        const pw = pillWidths[i];
+        const st = WIND_WARNING_COLORS[b.kind] || WIND_WARNING_COLORS.fog;
+        ctx.fillStyle = st.badgeBg;
+        ctx.beginPath();
+        ctx.roundRect(px, py, pw, pillH, 3 * overlayScale);
+        ctx.fill();
+        ctx.strokeStyle = st.stroke;
+        ctx.lineWidth = 0.9 * overlayScale;
+        ctx.stroke();
+        ctx.fillStyle = st.badgeText;
+        ctx.fillText(b.badge, px + pw / 2, py + pillH / 2 + 0.3 * overlayScale);
+        px += pw + gap;
+      }
+      ctx.restore();
+      break;
+    }
+  }
+}
+
+interface CompiledSurfaceIsobar {
+  pressureHpa: number;
+  isMajor: boolean;
+  isAuxiliary: boolean;
+  normPts: Float64Array;
+}
+
+interface CompiledSurfaceFront {
+  kind: SurfaceFrontKind;
+  normPts: Float64Array;
+}
+
+interface CompiledSurfaceCenter {
+  center: SurfaceChartPressureCenter;
+  normX: number;
+  normY: number;
+}
+
+interface CompiledSurfaceChart {
+  chart: SurfaceWeatherChartData;
+  isobars: CompiledSurfaceIsobar[];
+  fronts: CompiledSurfaceFront[];
+  centers: CompiledSurfaceCenter[];
+  severe?: CompiledSurfaceSevereWeather;
+}
+
+interface SynopticBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function overlapsAnySynopticBox(
+  box: SynopticBox,
+  placed: SynopticBox[],
+  gap = 4
+): boolean {
+  for (let i = 0; i < placed.length; i++) {
+    const b = placed[i];
+    if (
+      Math.abs(box.x - b.x) < (box.w + b.w) / 2 + gap &&
+      Math.abs(box.y - b.y) < (box.h + b.h) / 2 + gap
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function compileSurfaceChart(
+  chart: SurfaceWeatherChartData | null | undefined,
+  marineWarning?: MarineWarningOverlay | null,
+  includeSevere = true
+): CompiledSurfaceChart | null {
+  if (!chart) return null;
+  const encodeNormPts = (points: [number, number][]): Float64Array => {
+    const arr = new Float64Array(points.length * 2);
+    for (let i = 0; i < points.length; i++) {
+      const { normX, normY } = latLonToNormMercator(points[i][0], points[i][1]);
+      arr[i * 2] = normX;
+      arr[i * 2 + 1] = normY;
+    }
+    return arr;
+  };
+  return {
+    chart,
+    isobars: chart.isobars.map((iso) => ({
+      pressureHpa: iso.pressureHpa,
+      isMajor: iso.isMajor,
+      isAuxiliary: iso.isAuxiliary,
+      normPts: encodeNormPts(iso.points),
+    })),
+    fronts: chart.fronts.map((fr) => ({
+      kind: fr.kind,
+      normPts: encodeNormPts(fr.points),
+    })),
+    centers: chart.centers.map((c) => {
+      const { normX, normY } = latLonToNormMercator(c.lat, c.lon);
+      return { center: c, normX, normY };
+    }),
+    severe: includeSevere
+      ? compileSurfaceSevereWeather(chart, marineWarning)
+      : undefined,
+  };
+}
+
+function drawSynopticGraticule(
+  bCtx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  worldScale: number,
+  originX: number,
+  originY: number,
+  overlayScale: number
+) {
+  const { lat: topLatRaw, lon: leftLonRaw } = normMercatorToLatLon(
+    originX / worldScale,
+    originY / worldScale
+  );
+  const { lat: botLatRaw, lon: rightLonRaw } = normMercatorToLatLon(
+    (originX + width) / worldScale,
+    (originY + height) / worldScale
+  );
+
+  const minLat = Math.max(-60, Math.floor(Math.min(topLatRaw, botLatRaw) / 10) * 10);
+  const maxLat = Math.min(80, Math.ceil(Math.max(topLatRaw, botLatRaw) / 10) * 10);
+  const minLon = Math.floor(leftLonRaw / 20) * 20;
+  const maxLon = Math.ceil(rightLonRaw / 20) * 20;
+
+  bCtx.save();
+  bCtx.strokeStyle = 'rgba(148, 163, 184, 0.17)';
+  bCtx.lineWidth = 0.9;
+  bCtx.beginPath();
+  for (let lat = minLat; lat <= maxLat; lat += 10) {
+    const { normY } = latLonToNormMercator(lat, 140);
+    const y = normY * worldScale - originY;
+    if (y >= -2 && y <= height + 2) {
+      bCtx.moveTo(0, y);
+      bCtx.lineTo(width, y);
+    }
+  }
+  for (let lon = minLon; lon <= maxLon; lon += 20) {
+    const { normX } = latLonToNormMercator(0, lon);
+    const x = normX * worldScale - originX;
+    if (x >= -2 && x <= width + 2) {
+      bCtx.moveTo(x, 0);
+      bCtx.lineTo(x, height);
+    }
+  }
+  bCtx.stroke();
+
+  // Subtle coordinate ticks along top/left safe frame
+  const fontPx = Math.round(9.5 * overlayScale);
+  bCtx.font = `600 ${fontPx}px "JetBrains Mono", monospace`;
+  bCtx.fillStyle = 'rgba(148, 163, 184, 0.48)';
+  bCtx.textBaseline = 'middle';
+  bCtx.textAlign = 'left';
+  for (let lat = minLat; lat <= maxLat; lat += 10) {
+    if (lat === 0) continue;
+    const { normY } = latLonToNormMercator(lat, 140);
+    const y = normY * worldScale - originY;
+    if (y > 42 * overlayScale && y < height - 24 * overlayScale) {
+      bCtx.fillText(`${Math.abs(lat)}°${lat > 0 ? 'N' : 'S'}`, 8 * overlayScale, y);
+    }
+  }
+  bCtx.textAlign = 'center';
+  bCtx.textBaseline = 'bottom';
+  for (let lon = minLon; lon <= maxLon; lon += 20) {
+    const { normX } = latLonToNormMercator(0, lon);
+    const x = normX * worldScale - originX;
+    if (x > 48 * overlayScale && x < width - 48 * overlayScale) {
+      const normLon = ((((lon + 180) % 360) + 360) % 360) - 180;
+      const lbl =
+        normLon === 180 || normLon === -180
+          ? '180°'
+          : normLon === 0
+            ? '0°'
+            : `${Math.abs(normLon)}°${normLon > 0 ? 'E' : 'W'}`;
+      bCtx.fillText(lbl, x, height - 10 * overlayScale);
+    }
+  }
+  bCtx.restore();
+}
+
+function drawFrontSymbolTriangle(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  tx: number,
+  ty: number,
+  nx: number,
+  ny: number,
+  halfBase: number,
+  height: number,
+  fill: string
+) {
+  ctx.beginPath();
+  ctx.moveTo(px - tx * halfBase, py - ty * halfBase);
+  ctx.lineTo(px + tx * halfBase, py + ty * halfBase);
+  ctx.lineTo(px + nx * height, py + ny * height);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(6, 10, 17, 0.85)';
+  ctx.lineWidth = 0.9;
+  ctx.stroke();
+}
+
+function drawFrontSymbolSemicircle(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  tx: number,
+  ty: number,
+  sideSign: 1 | -1,
+  radius: number,
+  fill: string
+) {
+  const ang = Math.atan2(ty, tx);
+  ctx.beginPath();
+  if (sideSign === -1) {
+    // Bulge toward Left normal (ty, -tx), which sits at ang - PI/2
+    ctx.arc(px, py, radius, ang - Math.PI, ang, false);
+  } else {
+    // Bulge toward Right normal (-ty, tx), which sits at ang + PI/2
+    ctx.arc(px, py, radius, ang, ang + Math.PI, false);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(6, 10, 17, 0.85)';
+  ctx.lineWidth = 0.9;
+  ctx.stroke();
+}
+
+function samplePolylinePointAtArc(
+  sx: Float64Array,
+  sy: Float64Array,
+  cumLen: Float64Array,
+  n: number,
+  s: number
+): { px: number; py: number; tx: number; ty: number } {
+  let lo = 0;
+  let hi = n - 2;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cumLen[mid + 1] < s) lo = mid + 1;
+    else hi = mid;
+  }
+  const segStart = cumLen[lo];
+  const segLen = Math.max(1e-6, cumLen[lo + 1] - segStart);
+  const t = Math.max(0, Math.min(1, (s - segStart) / segLen));
+  const px = sx[lo] + (sx[lo + 1] - sx[lo]) * t;
+  const py = sy[lo] + (sy[lo + 1] - sy[lo]) * t;
+
+  // Smooth tangent using neighboring span across at least ~2 vertices
+  const backIdx = Math.max(0, lo - 1);
+  const fwdIdx = Math.min(n - 1, lo + 2);
+  let dx = sx[fwdIdx] - sx[backIdx];
+  let dy = sy[fwdIdx] - sy[backIdx];
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-4) {
+    dx = sx[lo + 1] - sx[lo];
+    dy = sy[lo + 1] - sy[lo];
+    const sLen = Math.hypot(dx, dy) || 1;
+    return { px, py, tx: dx / sLen, ty: dy / sLen };
+  }
+  return { px, py, tx: dx / len, ty: dy / len };
+}
+
+function drawSynopticSurfaceChart(
+  ctx: CanvasRenderingContext2D,
+  compiled: CompiledSurfaceChart,
+  width: number,
+  height: number,
+  worldScale: number,
+  originX: number,
+  originY: number,
+  overlayScale: number,
+  wrapOffsetNormX: number
+) {
+  const toScreenX = (normX: number) =>
+    (normX + wrapOffsetNormX) * worldScale - originX;
+  const toScreenY = (normY: number) => normY * worldScale - originY;
+
+  const placedBoxes: SynopticBox[] = [];
+
+  // 1. Pre-compute pressure center candidate boxes & reserve center crosshair zones
+  //    so isobar labels never collide with High/Low center marks.
+  const centerDrawQueue: Array<{
+    center: SurfaceChartPressureCenter;
+    cx: number;
+    cy: number;
+    markColor: string;
+    pressureText: string;
+    motionText: string;
+    boxX: number;
+    boxY: number;
+    boxW: number;
+    boxH: number;
+    hasDirArrow: boolean;
+  }> = [];
+
+  const markFontPx = Math.round(15 * overlayScale);
+  const presFontPx = Math.round(12.5 * overlayScale);
+  const motionFontPx = Math.round(10 * overlayScale);
+
+  for (let i = 0; i < compiled.centers.length; i++) {
+    const item = compiled.centers[i];
+    const cx = toScreenX(item.normX);
+    const cy = toScreenY(item.normY);
+    if (
+      cx < -72 * overlayScale ||
+      cx > width + 72 * overlayScale ||
+      cy < -72 * overlayScale ||
+      cy > height + 72 * overlayScale
+    ) {
+      continue;
+    }
+
+    const { center } = item;
+    // Reserve the crosshair core immediately (arm = 4.5 => half-extent 5)
+    placedBoxes.push({
+      x: cx,
+      y: cy,
+      w: 10 * overlayScale,
+      h: 10 * overlayScale,
+    });
+
+    const markColor =
+      center.kind === 'High'
+        ? '#38BDF8'
+        : center.kind === 'Low'
+          ? '#F87171'
+          : center.kind === 'TropicalDepression'
+            ? '#FB923C'
+            : '#FACC15';
+
+    const pressureText =
+      center.pressureHpa !== undefined ? String(center.pressureHpa) : '';
+    const spdClean =
+      center.speedKmh !== undefined && Number.isFinite(center.speedKmh)
+        ? `${center.speedKmh}km/h`
+        : center.speedDesc
+          ? toHalfWidthAscii(center.speedDesc).includes('停滞')
+            ? '停滞'
+            : toHalfWidthAscii(center.speedDesc).includes('ゆっくり')
+              ? 'ゆっくり'
+              : toHalfWidthAscii(center.speedDesc)
+          : '';
+    const motionText = spdClean;
+    const hasDirArrow =
+      center.directionDeg !== undefined && Number.isFinite(center.directionDeg);
+
+    ctx.font = `900 ${markFontPx}px "Noto Sans JP", sans-serif`;
+    const markW = ctx.measureText(center.shortMark).width;
+    ctx.font = `800 ${presFontPx}px "JetBrains Mono", monospace`;
+    const presW = pressureText ? ctx.measureText(pressureText).width : 0;
+    ctx.font = `700 ${motionFontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
+    const motW =
+      (hasDirArrow ? 13 * overlayScale : 0) +
+      (motionText ? ctx.measureText(motionText).width : 0);
+
+    const row1W = markW + (presW > 0 ? 3.5 * overlayScale + presW : 0);
+    const boxW = Math.max(row1W, motW) + 8 * overlayScale;
+    const hasRow2 = hasDirArrow || motionText.length > 0;
+    const boxH = (hasRow2 ? 30 : 17) * overlayScale;
+
+    // Place unboxed label block directly underneath `×` first; nudge only if colliding or near viewport bounds
+    const candidateOffsets: [number, number][] = [
+      [0, boxH / 2 + 10.5 * overlayScale],
+      [boxW / 2 + 10.5 * overlayScale, 0],
+      [-(boxW / 2 + 10.5 * overlayScale), 0],
+      [0, -(boxH / 2 + 10.5 * overlayScale)],
+    ];
+
+    let chosenX = cx;
+    let chosenY = cy + (boxH / 2 + 10.5 * overlayScale);
+    for (let cIdx = 0; cIdx < candidateOffsets.length; cIdx++) {
+      const cand: SynopticBox = {
+        x: cx + candidateOffsets[cIdx][0],
+        y: cy + candidateOffsets[cIdx][1],
+        w: boxW,
+        h: boxH,
+      };
+      if (
+        cand.x - cand.w / 2 >= 8 &&
+        cand.x + cand.w / 2 <= width - 8 &&
+        cand.y - cand.h / 2 >= 8 &&
+        cand.y + cand.h / 2 <= height - 18 * overlayScale &&
+        !overlapsAnySynopticBox(cand, placedBoxes, 4 * overlayScale)
+      ) {
+        chosenX = cand.x;
+        chosenY = cand.y;
+        break;
+      }
+    }
+
+    placedBoxes.push({ x: chosenX, y: chosenY, w: boxW, h: boxH });
+    centerDrawQueue.push({
+      center,
+      cx,
+      cy,
+      markColor,
+      pressureText,
+      motionText,
+      boxX: chosenX,
+      boxY: chosenY,
+      boxW,
+      boxH,
+      hasDirArrow,
+    });
+  }
+
+  // 2. Isobars (draw 2hPa/4hPa first, then 20hPa major contours on top; place non-overlapping hPa numbers)
+  const isoLabelQueue: Array<{ pressureText: string; isMajor: boolean; x: number; y: number }> = [];
+  drawSurfaceSevereUnderlay(
+    ctx,
+    width,
+    height,
+    toScreenX,
+    toScreenY,
+    overlayScale,
+    compiled
+  );
+
+  const isoFontPx = Math.round(10.5 * overlayScale);
+  ctx.font = `800 ${isoFontPx}px "JetBrains Mono", monospace`;
+
+  const passIsobars = (majorPass: boolean) => {
+    for (let i = 0; i < compiled.isobars.length; i++) {
+      const iso = compiled.isobars[i];
+      if (iso.isMajor !== majorPass) continue;
+      const pts = iso.normPts;
+      const count = pts.length / 2;
+      if (count < 2) continue;
+
+      ctx.save();
+      ctx.beginPath();
+      let sx0 = toScreenX(pts[0]);
+      let sy0 = toScreenY(pts[1]);
+      ctx.moveTo(sx0, sy0);
+      let anyInBounds =
+        sx0 >= -80 && sx0 <= width + 80 && sy0 >= -80 && sy0 <= height + 80;
+      for (let j = 1; j < count; j++) {
+        const sx = toScreenX(pts[j * 2]);
+        const sy = toScreenY(pts[j * 2 + 1]);
+        ctx.lineTo(sx, sy);
+        if (
+          !anyInBounds &&
+          sx >= -40 &&
+          sx <= width + 40 &&
+          sy >= -40 &&
+          sy <= height + 40
+        ) {
+          anyInBounds = true;
+        }
+      }
+      if (!anyInBounds) {
+        ctx.restore();
+        continue;
+      }
+
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      if (iso.isMajor) {
+        ctx.strokeStyle = 'rgba(6, 10, 17, 0.85)';
+        ctx.lineWidth = 3.6;
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(241, 245, 249, 0.92)';
+        ctx.lineWidth = 2.05;
+        ctx.stroke();
+      } else if (iso.isAuxiliary) {
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.68)';
+        ctx.lineWidth = 1.05;
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = 'rgba(203, 213, 225, 0.78)';
+        ctx.lineWidth = 1.25;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Label placement along non-auxiliary isobars (and closed loops of any pressure)
+      if (!iso.isAuxiliary || count >= 18) {
+        const label = String(iso.pressureHpa);
+        const labelW = ctx.measureText(label).width + 8 * overlayScale;
+        const labelH = 14 * overlayScale;
+        const fractions = count > 90 ? [0.28, 0.72, 0.5] : [0.5, 0.28, 0.72];
+        let labelsPlacedForLine = 0;
+        const maxLabelsForLine = count > 110 ? 2 : 1;
+
+        for (let fIdx = 0; fIdx < fractions.length; fIdx++) {
+          if (labelsPlacedForLine >= maxLabelsForLine) break;
+          const vIdx = Math.max(
+            1,
+            Math.min(count - 2, Math.floor(count * fractions[fIdx]))
+          );
+          const lx = toScreenX(pts[vIdx * 2]);
+          const ly = toScreenY(pts[vIdx * 2 + 1]);
+          if (
+            lx < 48 * overlayScale ||
+            lx > width - 48 * overlayScale ||
+            ly < 28 * overlayScale ||
+            ly > height - 38 * overlayScale
+          ) {
+            continue;
+          }
+          const candBox: SynopticBox = { x: lx, y: ly, w: labelW, h: labelH };
+          const tooCloseSamePressure = isoLabelQueue.some(
+            (existing) =>
+              existing.pressureText === label &&
+              Math.hypot(existing.x - lx, existing.y - ly) < 95 * overlayScale
+          );
+          if (
+            !tooCloseSamePressure &&
+            !overlapsAnySynopticBox(candBox, placedBoxes, 10 * overlayScale)
+          ) {
+            placedBoxes.push(candBox);
+            isoLabelQueue.push({
+              pressureText: label,
+              isMajor: iso.isMajor,
+              x: lx,
+              y: ly,
+            });
+            labelsPlacedForLine++;
+          }
+        }
+      }
+    }
+  };
+
+  passIsobars(false);
+  passIsobars(true);
+
+  // Render broken-isobar style pressure badges cleanly over contours
+  ctx.save();
+  ctx.font = `800 ${isoFontPx}px "JetBrains Mono", monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < isoLabelQueue.length; i++) {
+    const lbl = isoLabelQueue[i];
+    const w = ctx.measureText(lbl.pressureText).width + 6 * overlayScale;
+    const h = 13 * overlayScale;
+    ctx.fillStyle = 'rgba(12, 17, 27, 0.90)';
+    ctx.fillRect(lbl.x - w / 2, lbl.y - h / 2, w, h);
+    ctx.fillStyle = lbl.isMajor ? '#F8FAFC' : '#CBD5E1';
+    ctx.fillText(lbl.pressureText, lbl.x, lbl.y + 0.5 * overlayScale);
+  }
+  ctx.restore();
+
+  // 3. Synoptic Fronts (寒冷前線 / 温暖前線 / 閉塞前線 / 停滞前線)
+  const symbolStepPx = 28 * overlayScale;
+  const triHalfBase = 4.6 * overlayScale;
+  const triHeight = 8.4 * overlayScale;
+  const semiRadius = 5.0 * overlayScale;
+
+  for (let f = 0; f < compiled.fronts.length; f++) {
+    const front = compiled.fronts[f];
+    const pts = front.normPts;
+    const n = pts.length / 2;
+    if (n < 2) continue;
+
+    const sx = new Float64Array(n);
+    const sy = new Float64Array(n);
+    const cumLen = new Float64Array(n);
+    let anyVisible = false;
+    for (let i = 0; i < n; i++) {
+      sx[i] = toScreenX(pts[i * 2]);
+      sy[i] = toScreenY(pts[i * 2 + 1]);
+      if (
+        !anyVisible &&
+        sx[i] >= -60 &&
+        sx[i] <= width + 60 &&
+        sy[i] >= -60 &&
+        sy[i] <= height + 60
+      ) {
+        anyVisible = true;
+      }
+      if (i > 0) {
+        cumLen[i] = cumLen[i - 1] + Math.hypot(sx[i] - sx[i - 1], sy[i] - sy[i - 1]);
+      }
+    }
+    if (!anyVisible) continue;
+    const totalLen = cumLen[n - 1];
+    if (totalLen < 3) continue;
+
+    // Dark casing behind all front lines for high contrast
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(sx[0], sy[0]);
+    for (let i = 1; i < n; i++) ctx.lineTo(sx[i], sy[i]);
+    ctx.strokeStyle = 'rgba(6, 10, 17, 0.88)';
+    ctx.lineWidth = 4.5;
+    ctx.stroke();
+
+    if (front.kind === 'stationary') {
+      // Alternate red & blue segments along the stationary front per symbol cadence
+      let curBand = 0;
+      ctx.beginPath();
+      ctx.moveTo(sx[0], sy[0]);
+      for (let i = 1; i < n; i++) {
+        const band = Math.floor(cumLen[i] / symbolStepPx) % 2;
+        if (band !== curBand) {
+          ctx.strokeStyle = curBand === 0 ? '#38BDF8' : '#FB7185';
+          ctx.lineWidth = 2.6;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(sx[i - 1], sy[i - 1]);
+          curBand = band;
+        }
+        ctx.lineTo(sx[i], sy[i]);
+      }
+      ctx.strokeStyle = curBand === 0 ? '#38BDF8' : '#FB7185';
+      ctx.lineWidth = 2.6;
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle =
+        front.kind === 'cold'
+          ? '#38BDF8'
+          : front.kind === 'warm'
+            ? '#FB7185'
+            : '#C084FC';
+      ctx.lineWidth = 2.6;
+      ctx.stroke();
+    }
+
+    // Draw standard JMA frontal triangles and semicircles parameterized by arc length:
+    // JMA XML front polylines always have Cold Air on the LEFT side (ty, -tx) and Warm Air on the RIGHT side (-ty, tx).
+    const samples: number[] = [];
+    if (totalLen < symbolStepPx * 1.4) {
+      samples.push(totalLen * 0.5);
+    } else {
+      const startS = Math.min(symbolStepPx * 0.6, totalLen * 0.25);
+      for (let s = startS; s <= totalLen - 6 * overlayScale; s += symbolStepPx) {
+        samples.push(s);
+      }
+    }
+
+    for (let k = 0; k < samples.length; k++) {
+      const { px, py, tx, ty } = samplePolylinePointAtArc(
+        sx,
+        sy,
+        cumLen,
+        n,
+        samples[k]
+      );
+      if (px < -24 || px > width + 24 || py < -24 || py > height + 24) continue;
+      const leftNx = ty;
+      const leftNy = -tx;
+      const rightNx = -ty;
+      const rightNy = tx;
+
+      if (front.kind === 'cold') {
+        drawFrontSymbolTriangle(
+          ctx,
+          px,
+          py,
+          tx,
+          ty,
+          rightNx,
+          rightNy,
+          triHalfBase,
+          triHeight,
+          '#38BDF8'
+        );
+      } else if (front.kind === 'warm') {
+        drawFrontSymbolSemicircle(
+          ctx,
+          px,
+          py,
+          tx,
+          ty,
+          -1,
+          semiRadius,
+          '#FB7185'
+        );
+      } else if (front.kind === 'occluded') {
+        if (k % 2 === 0) {
+          drawFrontSymbolTriangle(
+            ctx,
+            px,
+            py,
+            tx,
+            ty,
+            leftNx,
+            leftNy,
+            triHalfBase,
+            triHeight,
+            '#C084FC'
+          );
+        } else {
+          drawFrontSymbolSemicircle(
+            ctx,
+            px,
+            py,
+            tx,
+            ty,
+            -1,
+            semiRadius,
+            '#C084FC'
+          );
+        }
+      } else {
+        // Stationary: alternate blue triangle into warm side (RIGHT) & red semicircle into cold side (LEFT)
+        if (k % 2 === 0) {
+          drawFrontSymbolTriangle(
+            ctx,
+            px,
+            py,
+            tx,
+            ty,
+            rightNx,
+            rightNy,
+            triHalfBase,
+            triHeight,
+            '#38BDF8'
+          );
+        } else {
+          drawFrontSymbolSemicircle(
+            ctx,
+            px,
+            py,
+            tx,
+            ty,
+            -1,
+            semiRadius,
+            '#FB7185'
+          );
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  // 4. Pressure Centers (`高`, `低`, `熱低`, `台`), center crosshairs, central hPa, and movement vectors
+  for (let i = 0; i < centerDrawQueue.length; i++) {
+    const c = centerDrawQueue[i];
+    const arm = 4.5 * overlayScale;
+
+    // Exact center `×` crosshair
+    ctx.save();
+    ctx.lineCap = 'square';
+    ctx.beginPath();
+    ctx.moveTo(c.cx - arm, c.cy - arm);
+    ctx.lineTo(c.cx + arm, c.cy + arm);
+    ctx.moveTo(c.cx + arm, c.cy - arm);
+    ctx.lineTo(c.cx - arm, c.cy + arm);
+    ctx.strokeStyle = '#060A11';
+    ctx.lineWidth = 4.2 * overlayScale;
+    ctx.stroke();
+    ctx.strokeStyle = c.markColor;
+    ctx.lineWidth = 2.0 * overlayScale;
+    ctx.stroke();
+
+    // Unboxed label layout directly below center crosshair (crisp dark halo stroke + fill)
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+
+    // Row 1: Type emblem (`高` / `低` / `熱低` / `台`) + Pressure (`994`)
+    ctx.font = `900 ${markFontPx}px "Noto Sans JP", sans-serif`;
+    const markW = ctx.measureText(c.center.shortMark).width;
+    ctx.font = `800 ${presFontPx}px "JetBrains Mono", monospace`;
+    const presW = c.pressureText ? ctx.measureText(c.pressureText).width : 0;
+    const row1W = markW + (presW > 0 ? 3.5 * overlayScale + presW : 0);
+    const hasRow2 = c.hasDirArrow || c.motionText.length > 0;
+    const row1Y = hasRow2 ? c.boxY - 6.5 * overlayScale : c.boxY;
+    const row1StartX = c.boxX - row1W / 2;
+
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `900 ${markFontPx}px "Noto Sans JP", sans-serif`;
+    ctx.strokeStyle = 'rgba(6, 10, 17, 0.94)';
+    ctx.lineWidth = 4.2 * overlayScale;
+    ctx.strokeText(c.center.shortMark, row1StartX, row1Y);
+    ctx.fillStyle = c.markColor;
+    ctx.fillText(c.center.shortMark, row1StartX, row1Y);
+
+    if (c.pressureText) {
+      ctx.font = `800 ${presFontPx}px "JetBrains Mono", monospace`;
+      ctx.strokeStyle = 'rgba(6, 10, 17, 0.94)';
+      ctx.lineWidth = 4.2 * overlayScale;
+      ctx.strokeText(
+        c.pressureText,
+        row1StartX + markW + 3.5 * overlayScale,
+        row1Y + 0.5 * overlayScale
+      );
+      ctx.fillStyle = '#F8FAFC';
+      ctx.fillText(
+        c.pressureText,
+        row1StartX + markW + 3.5 * overlayScale,
+        row1Y + 0.5 * overlayScale
+      );
+    }
+
+    // Row 2: Movement arrow + speed/status directly underneath Row 1
+    if (hasRow2) {
+      const row2Y = c.boxY + 7.5 * overlayScale;
+      ctx.font = `700 ${motionFontPx}px "JetBrains Mono", "Noto Sans JP", sans-serif`;
+      const motTextW = c.motionText ? ctx.measureText(c.motionText).width : 0;
+      const arrowSpan = c.hasDirArrow ? 12 * overlayScale : 0;
+      const row2TotalW =
+        arrowSpan +
+        (c.hasDirArrow && motTextW > 0 ? 3.5 * overlayScale : 0) +
+        motTextW;
+      let curX = c.boxX - row2TotalW / 2;
+
+      if (c.hasDirArrow && c.center.directionDeg !== undefined) {
+        const rad = (c.center.directionDeg * Math.PI) / 180;
+        const ax = Math.sin(rad);
+        const ay = -Math.cos(rad);
+        const midX = curX + arrowSpan / 2;
+        const halfLen = 5.0 * overlayScale;
+        const x1 = midX - ax * halfLen;
+        const y1 = row2Y - ay * halfLen;
+        const x2 = midX + ax * halfLen;
+        const y2 = row2Y + ay * halfLen;
+        const headLen = 3.6 * overlayScale;
+        const angle = Math.atan2(ay, ax);
+
+        // Halo behind arrow
+        ctx.strokeStyle = 'rgba(6, 10, 17, 0.94)';
+        ctx.lineWidth = 3.4 * overlayScale;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        ctx.strokeStyle = c.markColor;
+        ctx.fillStyle = c.markColor;
+        ctx.lineWidth = 1.6 * overlayScale;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(x2, y2);
+        ctx.lineTo(
+          x2 - headLen * Math.cos(angle - Math.PI / 6),
+          y2 - headLen * Math.sin(angle - Math.PI / 6)
+        );
+        ctx.lineTo(
+          x2 - headLen * Math.cos(angle + Math.PI / 6),
+          y2 - headLen * Math.sin(angle + Math.PI / 6)
+        );
+        ctx.closePath();
+        ctx.fill();
+        curX += arrowSpan + 3.5 * overlayScale;
+      }
+
+      if (c.motionText) {
+        ctx.strokeStyle = 'rgba(6, 10, 17, 0.94)';
+        ctx.lineWidth = 3.6 * overlayScale;
+        ctx.textAlign = 'left';
+        ctx.strokeText(c.motionText, curX, row2Y + 0.5 * overlayScale);
+        ctx.fillStyle = '#E2E8F0';
+        ctx.fillText(c.motionText, curX, row2Y + 0.5 * overlayScale);
+      }
+    }
+
+    ctx.restore();
+  }
+
+  drawSurfaceSevereLabels(
+    ctx,
+    width,
+    height,
+    toScreenX,
+    toScreenY,
+    overlayScale,
+    compiled,
+    placedBoxes
+  );
 }
 
 interface CompiledGeoRing {
@@ -504,6 +2400,12 @@ interface MonitorMapProps {
   onChangeForecastViewMode?: (mode: ForecastViewMode) => void;
   forecast3hIndex?: number;
   onChangeForecast3hIndex?: (idx: number) => void;
+  surfaceChartMode?: SurfaceChartMode;
+  onChangeSurfaceChartMode?: (mode: SurfaceChartMode) => void;
+  surfaceChartPass?: 0 | 1;
+  onChangeSurfaceChartPass?: (pass: 0 | 1) => void;
+  surfaceChartHistoryIndex?: number | null;
+  onChangeSurfaceChartHistoryIndex?: (idx: number | null) => void;
   onViewportChange?: (viewport: MapViewportState) => void;
   interruptKind: InterruptKind;
   isLoopPaused: boolean;
@@ -685,6 +2587,7 @@ const SCENE_CAMERA_TARGETS: Record<
   weather_info: NATIONAL_CAMERA_VIEW,
   amedas: { center: [37.5, 137.5], zoom: 5.2 },
   forecast: { center: [35.5, 137.0], zoom: 4.8 },
+  apac_analysis: { center: [38.0, 136.0], zoom: 2.5 },
   volcano: { center: [31.585, 130.657], zoom: 9 },
   tsunami: { center: [36.8, 137.5], zoom: 5.2 },
   earthquake: { center: [36.4, 140.8], zoom: 7 },
@@ -728,6 +2631,12 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
   onChangeForecastViewMode,
   forecast3hIndex = 2,
   onChangeForecast3hIndex,
+  surfaceChartMode = 'analysis',
+  onChangeSurfaceChartMode,
+  surfaceChartPass = 0,
+  onChangeSurfaceChartPass,
+  surfaceChartHistoryIndex = null,
+  onChangeSurfaceChartHistoryIndex,
   onViewportChange,
   interruptKind,
   isLoopPaused,
@@ -1568,6 +3477,71 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       });
   }, [effectiveScene, data.typhoons, selectedTyphoon]);
 
+  const activeHistoryFrame = useMemo(() => {
+    if (
+      effectiveScene !== 'apac_analysis' ||
+      surfaceChartMode !== 'analysis' ||
+      surfaceChartHistoryIndex === null
+    ) {
+      return null;
+    }
+    return data.surfaceChartApacHistory?.[surfaceChartHistoryIndex] ?? null;
+  }, [
+    effectiveScene,
+    surfaceChartMode,
+    surfaceChartHistoryIndex,
+    data.surfaceChartApacHistory,
+  ]);
+
+  const activeSurfaceChart = useMemo(() => {
+    if (effectiveScene !== 'apac_analysis') return null;
+    if (surfaceChartMode === 'forecast48') {
+      return (
+        data.surfaceChartApac48h ||
+        data.surfaceChartApac24h ||
+        data.surfaceChartApac ||
+        null
+      );
+    }
+    if (surfaceChartMode === 'forecast24') {
+      return data.surfaceChartApac24h || data.surfaceChartApac || null;
+    }
+    return activeHistoryFrame?.chart || data.surfaceChartApac || null;
+  }, [
+    effectiveScene,
+    surfaceChartMode,
+    activeHistoryFrame,
+    data.surfaceChartApac,
+    data.surfaceChartApac24h,
+    data.surfaceChartApac48h,
+  ]);
+
+  const preCompiledSurfaceChart = useMemo(() => {
+    if (effectiveScene !== 'apac_analysis') {
+      return null;
+    }
+    const includeSevere = surfaceChartPass === 1;
+    const activeMarineWarning = includeSevere
+      ? activeHistoryFrame
+        ? activeHistoryFrame.marineWarning ?? null
+        : surfaceChartMode === 'analysis'
+          ? data.marineWarning
+          : null
+      : null;
+    return compileSurfaceChart(
+      activeSurfaceChart,
+      activeMarineWarning,
+      includeSevere
+    );
+  }, [
+    effectiveScene,
+    activeSurfaceChart,
+    activeHistoryFrame,
+    surfaceChartMode,
+    surfaceChartPass,
+    data.marineWarning,
+  ]);
+
   const prevFocusedDivCodeRef = useRef<string | null>(
     activeWarningDivision?.divisionCode || null
   );
@@ -1764,12 +3738,13 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
             );
           };
 
-          // 1. World Countries Silhouette (`#1B1F28` fill, `#384152` crisp outline)
+          // 1. World Countries Silhouette (`#1B1F28` fill, `#384152` crisp outline; slightly brighter outline on synoptic charts)
+          const isSynopticScene = effectiveScene === 'apac_analysis';
           const worldShapes = worldCompiledRef.current;
           if (worldShapes.length > 0) {
             bCtx.fillStyle = '#1B1F28';
-            bCtx.strokeStyle = '#384152';
-            bCtx.lineWidth = currentZoom >= 6 ? 1.0 : 0.75;
+            bCtx.strokeStyle = isSynopticScene ? '#475569' : '#384152';
+            bCtx.lineWidth = currentZoom >= 6 ? 1.0 : isSynopticScene ? 0.9 : 0.75;
             for (const wrapX of [0, -1, 1]) {
               if (
                 wrapX !== 0 &&
@@ -1791,6 +3766,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 if (!moving) bCtx.stroke();
               }
             }
+          }
+
+          if (isSynopticScene) {
+            drawSynopticGraticule(
+              bCtx,
+              width,
+              height,
+              worldScale,
+              originX,
+              originY,
+              overlayScale
+            );
           }
 
           const divShapes =
@@ -1990,9 +3977,15 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
                 }
               }
               strokeArcKinds(
-                ['coast', 'pref', 'division'],
-                isTsunami ? (hasTsunamiWithEew ? '#4B5563' : '#151922') : '#4B5563',
-                currentZoom >= 7 ? 1.3 : 1.0
+                isSynopticScene ? ['coast'] : ['coast', 'pref', 'division'],
+                isTsunami
+                  ? hasTsunamiWithEew
+                    ? '#4B5563'
+                    : '#151922'
+                  : isSynopticScene
+                    ? '#475569'
+                    : '#4B5563',
+                isSynopticScene ? 0.9 : currentZoom >= 7 ? 1.3 : 1.0
               );
               delete baseCanvas.dataset.focusedDivisionCode;
               delete baseCanvas.dataset.focusedDivisionBlueBorder;
@@ -2184,8 +4177,18 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
               // Crisp Blank Map (`白地図`) for `radar`, `amedas`, `typhoon`, `forecast`, `earthquake`, `volcano`, `tsunami`
               const isTsunami = effectiveScene === 'tsunami';
               const fillCol = isTsunami ? '#28303D' : '#232731';
-              const borderCol = isTsunami ? (hasTsunamiWithEew ? '#4B5563' : '#151922') : '#4B5563';
-              const borderW = currentZoom >= 7 ? 1.3 : 1.0;
+              const borderCol = isTsunami
+                ? hasTsunamiWithEew
+                  ? '#4B5563'
+                  : '#151922'
+                : isSynopticScene
+                  ? '#475569'
+                  : '#4B5563';
+              const borderW = isSynopticScene
+                ? 0.9
+                : currentZoom >= 7
+                  ? 1.3
+                  : 1.0;
 
               bCtx.beginPath();
               for (let i = 0; i < divShapes.length; i++) {
@@ -3149,6 +5152,24 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
         }
       }
 
+      // 5. APAC Surface Weather Chart (VZSA60) 60fps Isobars, Fronts, and Pressure Centers
+      if (effectiveScene === 'apac_analysis' && preCompiledSurfaceChart) {
+        const viewCenterNormX = (viewMinNormX + viewMaxNormX) / 2;
+        const wrapOffsetNormX =
+          viewCenterNormX < 0.3 ? -1 : viewCenterNormX > 1.3 ? 1 : 0;
+        drawSynopticSurfaceChart(
+          ctx,
+          preCompiledSurfaceChart,
+          width,
+          height,
+          worldScale,
+          originX,
+          originY,
+          overlayScale,
+          wrapOffsetNormX
+        );
+      }
+
       ctx.restore();
     };
 
@@ -3159,6 +5180,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     preCompiledWarningShapes,
     preCompiledMunicipalityLabelsByDiv,
     preCompiledTyphoons,
+    preCompiledSurfaceChart,
     isSingleTyphoonMode,
     selectedTyphoon?.id,
     divHasActiveWarningMap,
@@ -4125,6 +6147,9 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
       }
       return fitLatLonBoundsToSafeViewport(30.0, 45.5, 128.8, 145.8, 5.1, 3.0);
     }
+    if (effectiveScene === 'apac_analysis') {
+      return fitLatLonBoundsToSafeViewport(8.0, 68.0, 76.0, 196.0, 3.8, 2.0);
+    }
     if (effectiveScene === 'warnings' && activeWarningDivision) {
       // Find bounding box of the active division to center it perfectly in the unobstructed viewport
       let minX = Infinity;
@@ -4256,6 +6281,7 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
     selectedEarthquake.id,
     selectedEarthquake.lat,
     selectedEarthquake.lon,
+    selectedEarthquake.reportKey,
     selectedTyphoon?.id,
     data.typhoons.length,
     isSingleTyphoonMode,
@@ -4880,6 +6906,139 @@ export const MonitorMap: React.FC<MonitorMapProps> = React.memo(({
           )}
         </div>
       )}
+
+      {/* Asia-Pacific Surface Chart Mode Switcher (2-Pass: 1周目 天気図のみ -> 2周目 ＋悪天情報, plus Past 24h sequence) */}
+      {effectiveScene === 'apac_analysis' && (() => {
+        const historyFrames = data.surfaceChartApacHistory ?? [];
+        const hasHistoryFrames = historyFrames.length > 0;
+        return (
+          <div
+            data-testid="surface-chart-mode-bar"
+            className={`z-[400] bg-[#111318]/94 flex items-center gap-1.5 whitespace-nowrap overflow-x-auto ${
+              isMobilePortrait
+                ? 'shrink-0 w-full border-t border-neutral-700/80 px-2 py-1'
+                : 'absolute bottom-3 left-3 max-w-[calc(100%-17.5rem)] border border-neutral-700/80 px-2.5 py-1 shadow-md rounded-xs'
+            }`}
+          >
+            <button
+              type="button"
+              data-testid="surface-chart-pass-toggle-btn"
+              onClick={() => onChangeSurfaceChartPass?.(surfaceChartPass === 0 ? 1 : 0)}
+              className={`px-2 py-0.5 text-[0.625rem] font-mono font-bold border rounded-xs transition-colors cursor-pointer shrink-0 ${
+                surfaceChartPass === 1
+                  ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                  : 'bg-cyan-500/20 border-cyan-500/70 text-cyan-200'
+              }`}
+            >
+              {isMobilePortrait
+                ? surfaceChartPass === 0
+                  ? '1周:通常'
+                  : '2周:悪天'
+                : surfaceChartPass === 0
+                  ? '1周目: 天気図のみ'
+                  : '2周目: ＋悪天・海上警報'}
+            </button>
+            {!isMobilePortrait && (
+              <span className="text-[0.6875rem] font-mono text-neutral-300 font-bold mr-0.5 shrink-0">
+                天気図:
+              </span>
+            )}
+            {historyFrames.map((frame, idx) => {
+              const isActive =
+                surfaceChartMode === 'analysis' &&
+                surfaceChartHistoryIndex === idx;
+              const offsetLabel =
+                typeof frame.offsetHours === 'number' && frame.offsetHours < 0
+                  ? `${frame.offsetHours}h`
+                  : `過去${idx + 1}`;
+              return (
+                <button
+                  key={`${frame.chart.targetTime || frame.chart.validTimeLabel}-${idx}`}
+                  type="button"
+                  data-testid={`surface-chart-history-btn-${idx}`}
+                  title={frame.chart.validTimeLabel || offsetLabel}
+                  onClick={() => {
+                    onChangeSurfaceChartHistoryIndex?.(idx);
+                    onChangeSurfaceChartMode?.('analysis');
+                  }}
+                  className={`py-0.5 px-2 text-[0.6875rem] font-mono font-bold transition-colors border rounded-xs shrink-0 cursor-pointer ${
+                    isActive
+                      ? 'bg-teal-600 border-teal-300 text-white shadow-sm'
+                      : 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white'
+                  }`}
+                >
+                  {offsetLabel}
+                </button>
+              );
+            })}
+            {(
+              [
+                {
+                  id: 'analysis',
+                  label: '実況',
+                  chart: data.surfaceChartApac,
+                },
+                {
+                  id: 'forecast24',
+                  label: '24時間予想',
+                  chart: data.surfaceChartApac24h,
+                },
+                {
+                  id: 'forecast48',
+                  label: '48時間予想',
+                  chart: data.surfaceChartApac48h,
+                },
+              ] as Array<{
+                id: SurfaceChartMode;
+                label: string;
+                chart?: SurfaceWeatherChartData | null;
+              }>
+            ).map((item) => {
+              const isActive =
+                surfaceChartMode === item.id &&
+                (item.id !== 'analysis' || surfaceChartHistoryIndex === null);
+              const isAvailable = item.id === 'analysis' || Boolean(item.chart);
+              const compactValid = item.chart?.validTimeLabel
+                ? item.chart.validTimeLabel.replace(/\s+(?:実況|予想)$/, '')
+                : '';
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  data-testid={`surface-chart-mode-btn-${item.id}`}
+                  disabled={!isAvailable}
+                  onClick={() => {
+                    onChangeSurfaceChartHistoryIndex?.(null);
+                    onChangeSurfaceChartMode?.(item.id);
+                  }}
+                  className={`py-0.5 text-[0.6875rem] font-bold transition-colors border rounded-xs flex items-center justify-center gap-1.5 ${
+                    isMobilePortrait && !hasHistoryFrames
+                      ? 'flex-1 px-2 min-w-0'
+                      : 'px-2.5 shrink-0'
+                  } ${
+                    isActive
+                      ? 'bg-sky-600 border-sky-300 text-white shadow-sm cursor-pointer'
+                      : isAvailable
+                        ? 'bg-neutral-900 border-neutral-700 text-neutral-300 hover:text-white cursor-pointer'
+                        : 'bg-neutral-950 border-neutral-800 text-neutral-600 opacity-55 cursor-not-allowed'
+                  }`}
+                >
+                  <span>{item.label}</span>
+                  {!isMobilePortrait && compactValid && (
+                    <span
+                      className={`text-[0.625rem] font-mono ${
+                        isActive ? 'text-sky-100' : 'text-neutral-400'
+                      }`}
+                    >
+                      {compactValid}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {/* TV Broadcast Nationwide Weather Mode Switcher, 3h Scrubber & Legend */}
       {effectiveScene === 'forecast' && (

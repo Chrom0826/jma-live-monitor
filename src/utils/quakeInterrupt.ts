@@ -1,5 +1,6 @@
 import {
   EarthquakeReport,
+  EewReport,
   InterruptKind,
   SceneId,
 } from '../types/jma';
@@ -7,6 +8,10 @@ import {
   decideIncomingEarthquake,
   earthquakeEventTimeMs,
 } from './jmaParser';
+import {
+  doesEarthquakeMatchEew,
+  isEewWarning,
+} from './eewTsunami';
 
 export const DEFAULT_QUAKE_FRESH_WINDOW_MS = 60 * 60 * 1000;
 export const DEFAULT_STARTUP_UNCONFIRMED_WINDOW_MS = 15 * 60 * 1000;
@@ -483,4 +488,54 @@ export function resolveEffectiveEnabledScenes(options: {
     return [...baseScenes, 'tsunami'];
   }
   return baseScenes.filter((s) => s !== 'tsunami');
+}
+
+/**
+ * Finds an observed earthquake intensity report matching an active EEW Forecast
+ * (`緊急地震速報（予報）`, i.e., `isWarning === false`) when intensity observations
+ * (`maxScaleCode >= 10` or reported station intensities) have arrived.
+ * EEW Warnings (`警報`) and Special Warnings (`特別警報`) are never cleared by this check.
+ */
+export function findMatchingIntensityEarthquakeForEewForecast(
+  eew: EewReport | null | undefined,
+  earthquakes: EarthquakeReport[]
+): EarthquakeReport | null {
+  if (!eew || eew.isCancelled || isEewWarning(eew)) return null;
+  if (!Array.isArray(earthquakes) || earthquakes.length === 0) return null;
+  for (const eq of earthquakes) {
+    if (!eq) continue;
+    const hasObservedIntensity =
+      eq.maxScaleCode >= 10 ||
+      (Array.isArray(eq.stations) && eq.stations.some((s) => s.scaleCode >= 10));
+    if (!hasObservedIntensity) continue;
+    if (doesEarthquakeMatchEew(eq, eew)) {
+      return eq;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolves the post-clear `interruptKind` when an active EEW Forecast is cleared by a
+ * matching seismic intensity report: transitions `'eew'` to `'earthquake'` (while leaving
+ * `'tsunami'` or unrelated interrupts intact).
+ */
+export function resolveInterruptKindOnEewForecastCleared(
+  prev: InterruptKind,
+  matchedEarthquake: EarthquakeReport,
+  nowMs: number = Date.now(),
+  freshWindowMs: number = DEFAULT_QUAKE_FRESH_WINDOW_MS
+): InterruptKind {
+  if (prev === 'tsunami') return 'tsunami';
+  const eqMs = earthquakeEventTimeMs(matchedEarthquake);
+  if (
+    isEarthquakeAwaitingDetail(matchedEarthquake) ||
+    (eqMs > 0 && nowMs - eqMs <= freshWindowMs)
+  ) {
+    return 'earthquake';
+  }
+  if (prev === 'eew') {
+    return eqMs <= 0 ? 'earthquake' : 'none';
+  }
+  return prev;
 }

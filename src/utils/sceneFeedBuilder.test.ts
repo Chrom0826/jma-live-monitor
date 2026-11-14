@@ -851,3 +851,103 @@ test('buildBottomFlipFeed: amedas displays 8 major cities with dynamic paginatio
   assert.equal(widePages.length, 1);
   assert.equal(widePages[0].length, 8);
 });
+
+test('apac_analysis displays pure JMA meteorological commentary text without flip cards or synthetic analysis text', () => {
+  const nowMs = Date.parse('2026-11-14T12:00:00+09:00');
+  const sampleChart60 = {
+    code: 'VZSA60' as const,
+    title: 'アジア太平洋地上実況図',
+    reportTime: '2026-11-14T11:37:00+09:00',
+    targetTime: '2026-11-14T09:00:00+09:00',
+    validTimeLabel: '11/14 09:00 実況',
+    isobars: [
+      { pressureHpa: 1020, isMajor: true, isAuxiliary: false, points: [[34, 140], [35, 142]] as [number, number][], closed: false },
+    ],
+    centers: [
+      {
+        kind: 'Low' as const,
+        typeLabel: '低気圧',
+        shortMark: '低',
+        lat: 53.65,
+        lon: 168.96,
+        pressureHpa: 994,
+        directionDeg: 90,
+        speedKmh: 55,
+        speedKnots: 30,
+        areaLabel: 'カムチャツカの東',
+      },
+    ],
+    fronts: [
+      { kind: 'cold' as const, typeLabel: '寒冷前線', points: [[44, 160], [52.5, 171.6]] as [number, number][] },
+    ],
+  };
+
+  const freshVpz51 = {
+    id: 'https://www.data.jma.go.jp/developer/xml/data/20261114020000_0_VPZJ51_010000.xml',
+    title: '全般気象解説情報',
+    updated: '2026-11-14T11:00:00+09:00',
+    author: '気象庁',
+    content: '【全般気象解説情報】千島近海の低気圧は発達しながら東へ進んでいます。',
+    link: 'https://www.data.jma.go.jp/developer/xml/data/20261114020000_0_VPZJ51_010000.xml',
+    category: 'weather_info' as const,
+    feedType: 'extra' as const,
+    dataCode: 'VPZJ51',
+    officeCode: '010000',
+  };
+
+  const chartBundle: MonitorDataBundle = {
+    ...mockBundle,
+    xmlEntries: [freshVpz51],
+    surfaceChartApac: sampleChart60,
+  };
+
+  // Bottom bar should scroll JMA commentary text rather than flip cards during normal patrol
+  const flipNormal = buildBottomFlipFeed({
+    effectiveScene: 'apac_analysis',
+    data: chartBundle,
+    activeEew: null,
+  });
+  assert.equal(flipNormal, null);
+
+  const feedWithCommentary = buildSceneFeed({
+    effectiveScene: 'apac_analysis',
+    data: chartBundle,
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+    nowMs,
+  });
+  assert.equal(feedWithCommentary.sceneId, 'apac_analysis');
+  assert.equal(feedWithCommentary.badgeLabel, '気象解説情報');
+  assert.equal(feedWithCommentary.title, '全般気象解説情報');
+  assert.equal(feedWithCommentary.items.length, 1);
+  assert.equal(feedWithCommentary.items[0].prefix, undefined);
+  assert.equal(
+    feedWithCommentary.items[0].text,
+    '千島近海の低気圧は発達しながら東へ進んでいます。'
+  );
+  assert.ok(!feedWithCommentary.items[0].text.includes('高気圧'));
+
+  const feedEmpty = buildSceneFeed({
+    effectiveScene: 'apac_analysis',
+    data: { ...mockBundle, xmlEntries: [], surfaceChartApac: sampleChart60 },
+    activeEew: null,
+    selectedEarthquake: null,
+    pinnedEarthquakeId: null,
+    activeWarningDivision: null,
+    selectedTyphoon: null,
+    activeVolcano: null,
+    amedasMetric: 'temp',
+    nowMs,
+  });
+  assert.equal(feedEmpty.items.length, 1);
+  assert.equal(feedEmpty.items[0].prefix, undefined);
+  assert.equal(
+    feedEmpty.items[0].text,
+    '24時間以内に気象解説情報は発表されていません'
+  );
+});

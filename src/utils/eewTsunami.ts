@@ -1056,7 +1056,29 @@ export function doesEarthquakeMatchEew(
   const eqMs = parseJstDateTimeMs(eq.occurrenceTime);
   const eewOriginMs = parseJstDateTimeMs(eew.originTime || eew.issueTime);
   if (!Number.isNaN(eqMs) && !Number.isNaN(eewOriginMs)) {
-    return Math.abs(eqMs - eewOriginMs) <= 5 * 60 * 1000;
+    if (Math.abs(eqMs - eewOriginMs) > 5 * 60 * 1000) return false;
+    // Guard against conflating two distinct simultaneous earthquakes far apart
+    if (
+      !eq.hypocenterUnknown &&
+      eq.hypocenterName &&
+      eq.hypocenterName !== '震源調査中' &&
+      eew.hypocenterName &&
+      eew.hypocenterName !== '震源調査中' &&
+      Number.isFinite(eq.lat) &&
+      Number.isFinite(eq.lon) &&
+      Number.isFinite(eew.lat) &&
+      Number.isFinite(eew.lon)
+    ) {
+      const distDeg = Math.hypot(eq.lat - eew.lat, eq.lon - eew.lon);
+      const namesOverlap =
+        eq.hypocenterName === eew.hypocenterName ||
+        eq.hypocenterName.includes(eew.hypocenterName) ||
+        eew.hypocenterName.includes(eq.hypocenterName);
+      if (distDeg > 5.0 && !namesOverlap) {
+        return false;
+      }
+    }
+    return true;
   }
   return Boolean(
     eq.hypocenterName &&
@@ -1098,7 +1120,12 @@ const HOKKAIDO_ALL_CODES = [
  * EEW 電文の府県名（pref）と細分区域名（name）から
  * 気象庁震度細分区域コード（100〜790番台）を照合・取得する
  */
-export function findSubdivisionAreaCodes(pref: string, name: string): string[] {
+export function findSubdivisionAreaCodes(
+  pref: string,
+  name: string,
+  options?: { allowPrefectureFallback?: boolean }
+): string[] {
+  const allowPrefectureFallback = options?.allowPrefectureFallback ?? true;
   const normPref = (pref || '').replace(/(都|府|県)$/, '').trim();
   const rawCleanName = (name || '')
     .replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xfee0))
@@ -1126,6 +1153,7 @@ export function findSubdivisionAreaCodes(pref: string, name: string): string[] {
     (Boolean(normPref) && rawCleanName === '北海道');
 
   if (isWholePrefecture) {
+    if (!allowPrefectureFallback) return [];
     if (normPref === '北海道') return [...HOKKAIDO_ALL_CODES];
     const list: string[] = [];
     for (const [code, fullName] of Object.entries(JMA_SUBDIVISION_AREAS)) {
@@ -1179,6 +1207,10 @@ export function findSubdivisionAreaCodes(pref: string, name: string): string[] {
   }
 
   if (matches.length > 0) return matches;
+
+  if (!allowPrefectureFallback) {
+    return [];
+  }
 
   // 3. 固有の細分区域にヒットしなかった場合のフォールバック（都道府県全域）
   if (normPref === '北海道') return [...HOKKAIDO_ALL_CODES];

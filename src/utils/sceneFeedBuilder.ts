@@ -252,7 +252,7 @@ export function splitJmaBracketHeadline(
 }
 
 function buildSharedCommentaryResult(
-  sceneId: 'radar' | 'warnings',
+  sceneId: 'radar' | 'warnings' | 'apac_analysis',
   xmlEntries: JmaXmlEntry[],
   nowMs: number,
   defaultTimeLabel: string,
@@ -918,6 +918,22 @@ export function buildSceneFeed(options: BuildSceneFeedOptions): SceneFeedData {
     };
   }
 
+  // ==================== 8. APAC SURFACE ANALYSIS SCENE ====================
+  if (effectiveScene === 'apac_analysis') {
+    return buildSharedCommentaryResult(
+      'apac_analysis',
+      data.xmlEntries,
+      nowMs,
+      defaultTimeLabel,
+      {
+        badgeLabel: '気象解説情報',
+        badgeSub: 'アジア太平洋実況図',
+        accentColor: '#38BDF8',
+        defaultTitle: '気象解説情報（気象庁発表）',
+      }
+    );
+  }
+
   // ==================== DEFAULT / FALLBACK (weather_info) ====================
   return {
     sceneId: effectiveScene,
@@ -1138,7 +1154,7 @@ export function buildBottomFlipFeed(
   // Determine whether Flip Feed should be active:
   // 1) When Tsunami Advisory or Warning is active (ALWAYS on regardless of scene!)
   // 2) When EEW is active (in earthquake/eew or normal loop)
-  // 3) When viewing earthquake, tsunami, or amedas scene
+  // 3) When viewing earthquake, tsunami, amedas, or surface analysis charts
   // 4) When viewing typhoon scene with no active typhoon (shows empty-state message cleanly)
   const shouldActivateFlip =
     isTsunamiAlertActive ||

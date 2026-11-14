@@ -34,6 +34,7 @@ import {
   AMEDAS_PATROL_STOPS,
   AUTO_PATROL_SEQUENCE,
   buildCity3HourlySlots,
+  buildSurfaceChartHistoryFrames,
   classifyJmaWeatherDescriptor,
   decideIncomingEarthquake,
   extractJmaXmlDataCode,
@@ -59,22 +60,29 @@ import {
   getAmedasPointRadiusForZoom,
   getAmedasTempGradientColor,
   getAmedasWindArrowSizeForZoom,
+  getInitialSurfaceChartStep,
   getNextAmedasMetric,
   getNextPatrolStep,
   getNextSceneId,
+  getNextSurfaceChartStep,
   getNextSubRegion,
   getWarningMapZoomTier,
   getWindDirectionRotationDeg,
   interpolateArchipelagoSweepPosition,
   isExtratropicalCyclone,
   MAJOR_FORECAST_CITY_TARGETS,
+  matchMarineWarningForTimestamp,
   mergeProgressiveEarthquakeReports,
   parseJmaAmedasNationwide,
   parseJmaAtomXml,
   parseJmaCityForecastJson,
+  parseJmaCoordinateString,
   parseJmaIntensityString,
   parseJmaIsoCoordinate,
   parseJmaQuakeDetailJson,
+  parseMarineWarningXml,
+  parseSurfaceWeatherChartXml,
+  formatPressureCenterMotion,
   renderBroadcastWeatherSvg,
   parseJmaTyphoonSpecifications,
   parseJmaWarningMapData,
@@ -83,6 +91,12 @@ import {
   selectNonOverlappingAmedasStations,
   WARNING_DIVISIONS,
 } from './jmaParser';
+import { convertP2PQuakeItem } from '../services/jmaClient';
+import {
+  registerMunicipalityEntries,
+  resetMunicipalityLookupForTest,
+} from './municipalityLookup';
+import { MarineWarningOverlay, SurfaceWeatherChartData } from '../types/jma';
 
 test('formatSeismicScale maps numeric codes to JMA intensity labels', () => {
   assert.equal(formatSeismicScale(10), '1');
@@ -155,8 +169,10 @@ test('DEFAULT_NORMAL_LOOP_SCENES includes typhoon and earthquake and excludes we
   assert.equal(DEFAULT_NORMAL_LOOP_SCENES.includes('tsunami'), false);
   assert.equal(getNextSceneId('warnings', DEFAULT_NORMAL_LOOP_SCENES), 'typhoon');
   assert.equal(getNextSceneId('typhoon', DEFAULT_NORMAL_LOOP_SCENES), 'amedas');
-  assert.equal(getNextSceneId('forecast', DEFAULT_NORMAL_LOOP_SCENES), 'earthquake');
+  assert.equal(getNextSceneId('forecast', DEFAULT_NORMAL_LOOP_SCENES), 'apac_analysis');
+  assert.equal(getNextSceneId('apac_analysis', DEFAULT_NORMAL_LOOP_SCENES), 'earthquake');
   assert.equal(getNextSceneId('earthquake', DEFAULT_NORMAL_LOOP_SCENES), 'radar');
+  assert.equal((DEFAULT_NORMAL_LOOP_SCENES as string[]).includes('surface_analysis'), false);
 });
 
 test('parseJmaTyphoonSpecifications parses JMA specifications.json and computeTyphoonConeEnvelope generates cone', () => {
@@ -2225,4 +2241,633 @@ test('parseVpws50SummaryMap extracts R06 active warning names keyed by JMA divis
   const parsed = parseVpws50SummaryMap(sampleVpws50);
   assert.deepEqual(parsed['170000'], ['大雨警報', '雷注意報']);
   assert.deepEqual(parsed['012000'], ['暴風警報']);
+});
+
+test('parseSurfaceWeatherChartXml extracts isobars, unwrapped dateline fronts, and pressure centers cleanly', () => {
+  const sampleChartXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Report xmlns="http://xml.kishou.go.jp/jmaxml1/" xmlns:jmx_eb="http://xml.kishou.go.jp/jmaxml1/elementBasis1/">
+  <Head>
+    <Title>アジア太平洋地上実況図</Title>
+    <ReportDateTime>2026-11-14T11:37:56+09:00</ReportDateTime>
+    <TargetDateTime>2026-11-14T09:00:00+09:00</TargetDateTime>
+  </Head>
+  <Body>
+    <MeteorologicalInfos type="天気図情報">
+      <MeteorologicalInfo>
+        <DateTime>2026-11-14T09:00:00+09:00</DateTime>
+        <Item>
+          <Kind><Property><Type>等圧線</Type><IsobarPart>
+            <jmx_eb:Pressure type="気圧" unit="hPa">1020</jmx_eb:Pressure>
+            <jmx_eb:Line type="位置（度）">+34.00+140.00/+34.50+141.00/+34.00+140.00/</jmx_eb:Line>
+          </IsobarPart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>等圧線</Type><IsobarPart>
+            <jmx_eb:Pressure type="気圧" unit="hPa">1018</jmx_eb:Pressure>
+            <jmx_eb:Line type="位置（度）">+33.00+179.00/+32.50-179.50/</jmx_eb:Line>
+          </IsobarPart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>低気圧</Type><CenterPart>
+            <jmx_eb:Coordinate type="中心位置（度）">+53.65+168.96/</jmx_eb:Coordinate>
+            <jmx_eb:Direction type="移動方向" unit="度（真方位）">90</jmx_eb:Direction>
+            <jmx_eb:Speed description="５５ｋｍ／ｈ" type="移動速度" unit="km/h">55</jmx_eb:Speed>
+            <jmx_eb:Speed description="３０ＫＴ" type="移動速度" unit="ノット">30</jmx_eb:Speed>
+            <jmx_eb:Pressure type="中心気圧" unit="hPa">994</jmx_eb:Pressure>
+          </CenterPart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>高気圧</Type><CenterPart>
+            <jmx_eb:Coordinate type="中心位置（度）">+49.85+098.23/</jmx_eb:Coordinate>
+            <jmx_eb:Direction type="移動方向" unit="度（真方位）">120</jmx_eb:Direction>
+            <jmx_eb:Speed description="ゆっくり" type="移動速度" unit="km/h"></jmx_eb:Speed>
+            <jmx_eb:Pressure type="中心気圧" unit="hPa">1044</jmx_eb:Pressure>
+          </CenterPart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>低気圧</Type><CenterPart>
+            <jmx_eb:Coordinate type="中心位置（度）">+67.90-172.39/</jmx_eb:Coordinate>
+            <jmx_eb:Direction condition="不定" type="移動方向" unit="度（真方位）"></jmx_eb:Direction>
+            <jmx_eb:Speed description="ほとんど停滞" type="移動速度" unit="km/h"></jmx_eb:Speed>
+            <jmx_eb:Pressure type="中心気圧" unit="hPa">998</jmx_eb:Pressure>
+          </CenterPart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>寒冷前線</Type><CoordinatePart>
+            <jmx_eb:Line type="前線（度）">+31.25+179.00/+32.66-175.00/+34.49-160.00/</jmx_eb:Line>
+          </CoordinatePart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>温暖前線</Type><CoordinatePart>
+            <jmx_eb:Line type="前線（度）">+52.53+171.65/+47.15+175.26/</jmx_eb:Line>
+          </CoordinatePart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>閉塞前線</Type><CoordinatePart>
+            <jmx_eb:Line type="前線（度）">+53.65+168.96/+52.53+171.65/</jmx_eb:Line>
+          </CoordinatePart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>停滞前線</Type><CoordinatePart>
+            <jmx_eb:Line type="前線（度）">+25.41+156.88/+31.25-169.78/</jmx_eb:Line>
+          </CoordinatePart></Property></Kind>
+        </Item>
+      </MeteorologicalInfo>
+    </MeteorologicalInfos>
+  </Body>
+</Report>`;
+
+  const chart = parseSurfaceWeatherChartXml(sampleChartXml, 'VZSA60');
+  assert.ok(chart);
+  assert.equal(chart.code, 'VZSA60');
+  assert.equal(chart.validTimeLabel, '11/14 09:00 実況');
+
+  assert.equal(chart.isobars.length, 2);
+  assert.equal(chart.isobars[0].isMajor, true);
+  assert.equal(chart.isobars[0].isAuxiliary, false);
+  assert.equal(chart.isobars[0].closed, true);
+  assert.equal(chart.isobars[1].isMajor, false);
+  assert.equal(chart.isobars[1].isAuxiliary, true);
+  // Antimeridian unwrap across 179E -> -179.5W => 180.5E
+  assert.deepEqual(chart.isobars[1].points[1], [32.5, 180.5]);
+
+  assert.equal(chart.centers.length, 3);
+  assert.equal(chart.centers[0].shortMark, '低');
+  assert.equal(chart.centers[0].pressureHpa, 994);
+  assert.equal(formatPressureCenterMotion(chart.centers[0]), '東 55km/h (30kt)');
+  assert.equal(chart.centers[1].shortMark, '高');
+  assert.equal(formatPressureCenterMotion(chart.centers[1]), '東南東 ゆっくり');
+  assert.equal(chart.centers[2].lon, 187.61); // -172.39 unwrapped to +187.61
+  assert.equal(formatPressureCenterMotion(chart.centers[2]), 'ほとんど停滞');
+
+  assert.equal(chart.fronts.length, 4);
+  assert.deepEqual(
+    chart.fronts.map((f) => f.kind),
+    ['cold', 'warm', 'occluded', 'stationary']
+  );
+  // Check continuous unwrapping across 180 on cold front
+  assert.deepEqual(chart.fronts[0].points[1], [32.66, 185]);
+  assert.deepEqual(chart.fronts[0].points[2], [34.49, 200]);
+
+  // Helper coordinate string parser
+  const parsedPts = parseJmaCoordinateString('+25.41+156.88/+31.25-169.78/');
+  assert.deepEqual(parsedPts, [
+    [25.41, 156.88],
+    [31.25, 190.22],
+  ]);
+});
+
+test('parseSurfaceWeatherChartXml parses VZSF60 and VZSF61 forecast charts using 天気図情報 valid datetime and ignores 悪天情報', () => {
+  const sampleForecast24Xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Report>
+  <Control><Title>アジア太平洋海上悪天２４時間予想図</Title></Control>
+  <Head>
+    <Title>アジア太平洋海上悪天２４時間予想図</Title>
+    <ReportDateTime>2026-11-13T23:55:00+09:00</ReportDateTime>
+    <TargetDateTime>2026-11-13T21:00:00+09:00</TargetDateTime>
+  </Head>
+  <Body>
+    <MeteorologicalInfos type="天気図情報">
+      <MeteorologicalInfo>
+        <DateTime type="予想　２４時間後">2026-11-14T21:00:00+09:00</DateTime>
+        <Item>
+          <Kind><Property><Type>等圧線</Type><IsobarPart>
+            <jmx_eb:Pressure type="気圧" unit="hPa">1004</jmx_eb:Pressure>
+            <jmx_eb:Line type="等圧線（度）">+40.0+150.0/+42.0+160.0/</jmx_eb:Line>
+          </IsobarPart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>低圧部</Type><CenterPart>
+            <jmx_eb:Coordinate type="中心位置（度）">+38.5+154.2/</jmx_eb:Coordinate>
+            <jmx_eb:Direction type="移動方向" unit="漢字"></jmx_eb:Direction>
+            <jmx_eb:Speed type="移動速度" unit="ノット"></jmx_eb:Speed>
+            <jmx_eb:Pressure type="中心気圧" unit="hPa">1010</jmx_eb:Pressure>
+          </CenterPart></Property></Kind>
+        </Item>
+        <Item>
+          <Kind><Property><Type>寒冷前線</Type><CoordinatePart>
+            <jmx_eb:Line type="前線（度）">+38.5+154.2/+31.0+146.0/</jmx_eb:Line>
+          </CoordinatePart></Property></Kind>
+        </Item>
+      </MeteorologicalInfo>
+    </MeteorologicalInfos>
+    <MeteorologicalInfos type="悪天情報">
+      <MeteorologicalInfo>
+        <Item>
+          <Kind><Property><Type>悪天情報（強風）</Type><CenterPart>
+            <jmx_eb:Coordinate type="中心位置（度）">+52.3+176.9/</jmx_eb:Coordinate>
+          </CenterPart></Property></Kind>
+        </Item>
+      </MeteorologicalInfo>
+    </MeteorologicalInfos>
+  </Body>
+</Report>`;
+
+  const fc24 = parseSurfaceWeatherChartXml(sampleForecast24Xml, 'VZSF60');
+  assert.ok(fc24);
+  assert.equal(fc24.code, 'VZSF60');
+  assert.equal(fc24.forecastHour, 24);
+  assert.equal(fc24.targetTime, '2026-11-14T21:00:00+09:00');
+  assert.equal(fc24.validTimeLabel, '11/14 21:00 予想');
+  assert.equal(fc24.isobars.length, 1);
+  assert.equal(fc24.centers.length, 1);
+  assert.equal(fc24.centers[0].shortMark, '低');
+  assert.equal(fc24.centers[0].pressureHpa, 1010);
+  assert.equal(formatPressureCenterMotion(fc24.centers[0]), '');
+  assert.equal(fc24.fronts.length, 1);
+
+  const sampleForecast48Xml = sampleForecast24Xml
+    .replaceAll('２４時間予想図', '４８時間予想図')
+    .replace('予想　２４時間後', '予想　４８時間後')
+    .replace('2026-11-14T21:00:00+09:00', '2026-11-15T21:00:00+09:00');
+
+  const fc48 = parseSurfaceWeatherChartXml(sampleForecast48Xml);
+  assert.ok(fc48);
+  assert.equal(fc48.code, 'VZSF61');
+  assert.equal(fc48.forecastHour, 48);
+  assert.equal(fc48.validTimeLabel, '11/15 21:00 予想');
+});
+
+test('parseSurfaceWeatherChartXml parses VZSF60 悪天情報 (Fog, SeaIce, Icing, Wind)', () => {
+  const sampleSevereChartXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Report xmlns="http://xml.kishou.go.jp/jmaxml1/" xmlns:jmx="http://xml.kishou.go.jp/jmaxml1/informationBasis1/" xmlns:jmx_eb="http://xml.kishou.go.jp/jmaxml1/elementBasis1/">
+  <Control><Title>アジア太平洋海上悪天２４時間予想図</Title></Control>
+  <Head>
+    <Title>アジア太平洋海上悪天２４時間予想図</Title>
+    <ReportDateTime>2026-11-14T00:00:00+09:00</ReportDateTime>
+    <TargetDateTime>2026-11-14T21:00:00+09:00</TargetDateTime>
+    <InfoType>発表</InfoType>
+  </Head>
+  <Body xmlns="http://xml.kishou.go.jp/jmaxml1/body/meteorology1/">
+    <MeteorologicalInfos type="天気図情報">
+      <MeteorologicalInfo>
+        <Item>
+          <Kind><Name>低気圧</Name><Property><Type>気圧</Type><CenterPart><jmx_eb:Pressure unit="hPa">988</jmx_eb:Pressure><jmx_eb:Coordinate type="中心位置（度）">+44.0+156.0/</jmx_eb:Coordinate></CenterPart></Property></Kind>
+        </Item>
+      </MeteorologicalInfo>
+    </MeteorologicalInfos>
+    <MeteorologicalInfos type="悪天情報">
+      <MeteorologicalInfo>
+        <Item>
+          <Kind><Name>悪天情報（霧）</Name></Kind>
+          <Area><Name>霧域</Name><jmx_eb:Polygon type="位置（度）">+37+141/+39+144/+36+145/+37+141/</jmx_eb:Polygon></Area>
+          <Area codeType="全般海上海域名"><Name>日本海</Name><Code>9010</Code></Area>
+        </Item>
+        <Item>
+          <Kind><Name>悪天情報（海氷）</Name></Kind>
+          <Area><Name>海氷域</Name><jmx_eb:Coordinate type="領域（度）">+60.0+154.5/+60.0-175.0/</jmx_eb:Coordinate></Area>
+        </Item>
+        <Item>
+          <Kind><Name>悪天情報（船体着氷）</Name></Kind>
+          <Area><Name>船体着氷域</Name><jmx_eb:Coordinate type="領域（度）">+58.0+150.0/+58.5+150.5/</jmx_eb:Coordinate></Area>
+        </Item>
+        <Item>
+          <Kind>
+            <Name>悪天情報（強風）</Name>
+            <Property>
+              <Type>風</Type>
+              <WindPart>
+                <jmx_eb:WindDegree>230</jmx_eb:WindDegree>
+                <jmx_eb:WindSpeed unit="ノット">30</jmx_eb:WindSpeed>
+              </WindPart>
+            </Property>
+          </Kind>
+          <Area><Name>強風域</Name><jmx_eb:Coordinate type="位置（度）">+52.3+176.9/</jmx_eb:Coordinate></Area>
+        </Item>
+      </MeteorologicalInfo>
+    </MeteorologicalInfos>
+  </Body>
+</Report>`;
+
+  const parsed = parseSurfaceWeatherChartXml(sampleSevereChartXml, 'VZSF60');
+  assert.ok(parsed);
+  assert.equal(parsed.fogPolygons?.length, 1);
+  assert.equal(parsed.fogPolygons?.[0].label, 'FOG');
+  assert.equal(parsed.fogPolygons?.[0].points.length, 4);
+
+  assert.equal(parsed.seaAreaAlerts?.length, 1);
+  assert.equal(parsed.seaAreaAlerts?.[0].areaCode, '9010');
+  assert.equal(parsed.seaAreaAlerts?.[0].badge, 'FOG');
+
+  assert.equal(parsed.seaIcePoints?.length, 2);
+  assert.deepEqual(parsed.seaIcePoints?.[1], [60.0, 185.0]);
+
+  assert.equal(parsed.icingPoints?.length, 2);
+  assert.deepEqual(parsed.icingPoints?.[0], [58.0, 150.0]);
+
+  assert.equal(parsed.windPoints?.length, 1);
+  assert.equal(parsed.windPoints?.[0].windDeg, 230);
+  assert.equal(parsed.windPoints?.[0].windSpeedKt, 30);
+});
+
+test('parseMarineWarningXml parses VPZU54 wind sectors, Becoming, ProbabilityCircle, fog polygons, and merged sea alerts without Headline duplication', () => {
+  const sampleVpzu54Xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Report xmlns="http://xml.kishou.go.jp/jmaxml1/" xmlns:jmx="http://xml.kishou.go.jp/jmaxml1/informationBasis1/" xmlns:jmx_eb="http://xml.kishou.go.jp/jmaxml1/elementBasis1/">
+  <Control><Title>全般海上警報</Title></Control>
+  <Head>
+    <Title>全般海上警報</Title>
+    <ReportDateTime>2026-11-14T06:00:00+09:00</ReportDateTime>
+    <TargetDateTime>2026-11-14T09:00:00+09:00</TargetDateTime>
+    <Headline>
+      <Information type="全般海上警報">
+        <Item>
+          <Kind><Name>海上強風警報</Name><Code>21</Code></Kind>
+          <Area><Name>オホーツク海</Name><Code>9050</Code></Area>
+        </Item>
+      </Information>
+    </Headline>
+  </Head>
+  <Body xmlns="http://xml.kishou.go.jp/jmaxml1/body/meteorology1/">
+    <MeteorologicalInfos type="全般海上警報">
+      <MeteorologicalInfo>
+        <Item>
+          <Kind>
+            <Name>海上強風警報</Name><Code>21</Code>
+            <Property><Type>風</Type><WindPart><jmx_eb:WindSpeed unit="ノット">40</jmx_eb:WindSpeed></WindPart></Property>
+            <Property><Type>風</Type><WindPart><Becoming><TimeModifier>今後２４時間以内は</TimeModifier><jmx_eb:WindSpeed unit="ノット">45</jmx_eb:WindSpeed></Becoming></WindPart></Property>
+          </Kind>
+          <Area>
+            <Name>発達中の低気圧</Name>
+            <jmx_eb:Circle type="影響範囲">
+              <jmx_eb:BasePoint type="実況位置（度）">+45+165/</jmx_eb:BasePoint>
+              <jmx_eb:Axes>
+                <jmx_eb:Axis><jmx_eb:Direction>南東</jmx_eb:Direction><jmx_eb:Radius unit="海里">600</jmx_eb:Radius></jmx_eb:Axis>
+                <jmx_eb:Axis><jmx_eb:Direction>北西</jmx_eb:Direction><jmx_eb:Radius unit="海里">300</jmx_eb:Radius></jmx_eb:Axis>
+              </jmx_eb:Axes>
+            </jmx_eb:Circle>
+            <jmx_eb:Circle type="影響範囲">
+              <jmx_eb:BasePoint type="２４時間後位置（度）">+50+175/</jmx_eb:BasePoint>
+              <jmx_eb:Axes>
+                <jmx_eb:Axis><jmx_eb:Direction>全域</jmx_eb:Direction><jmx_eb:Radius unit="海里">900</jmx_eb:Radius></jmx_eb:Axis>
+              </jmx_eb:Axes>
+            </jmx_eb:Circle>
+          </Area>
+        </Item>
+        <Item>
+          <Kind>
+            <Name>海上強風警報</Name><Code>21</Code>
+            <Property><Type>風</Type><WindPart><Becoming /></WindPart></Property>
+          </Kind>
+          <Area>
+            <Name>低気圧</Name>
+            <jmx_eb:Circle type="影響範囲">
+              <jmx_eb:BasePoint type="実況位置（度）">+29+161/</jmx_eb:BasePoint>
+            </jmx_eb:Circle>
+            <jmx_eb:Circle type="影響範囲">
+              <jmx_eb:BasePoint type="２４時間後位置（度）">+33+168/</jmx_eb:BasePoint>
+              <jmx_eb:Axes>
+                <jmx_eb:Axis><jmx_eb:Direction>全域</jmx_eb:Direction><jmx_eb:Radius unit="海里">400</jmx_eb:Radius></jmx_eb:Axis>
+              </jmx_eb:Axes>
+            </jmx_eb:Circle>
+          </Area>
+        </Item>
+        <Item>
+          <Kind><Name>海上強風警報</Name><Code>21</Code><Condition>発生予想</Condition></Kind>
+          <Area>
+            <Name>低気圧</Name>
+            <ProbabilityCircle type="予報円">
+              <jmx_eb:BasePoint type="中心位置（度）">+32+132/</jmx_eb:BasePoint>
+              <jmx_eb:Axes><jmx_eb:Axis><jmx_eb:Radius unit="海里">80</jmx_eb:Radius></jmx_eb:Axis></jmx_eb:Axes>
+            </ProbabilityCircle>
+          </Area>
+        </Item>
+        <Item>
+          <Kind><Name>海上濃霧警報</Name><Code>11</Code></Kind>
+          <Area><Name>濃霧域</Name><jmx_eb:Polygon type="位置（度）">+40+145/+42+148/+39+149/+40+145/</jmx_eb:Polygon></Area>
+          <Area codeType="全般海上海域名"><Name>オホーツク海</Name><Code>9050</Code></Area>
+        </Item>
+        <Item>
+          <Kind><Name>海上着氷警報</Name><Code>10</Code></Kind>
+          <Area codeType="全般海上海域名"><Name>オホーツク海</Name><Code>9050</Code></Area>
+        </Item>
+      </MeteorologicalInfo>
+    </MeteorologicalInfos>
+  </Body>
+</Report>`;
+
+  const parsed = parseMarineWarningXml(sampleVpzu54Xml, 'https://example.test/vpzu54.xml');
+  assert.ok(parsed);
+  assert.equal(parsed.windWarnings.length, 3);
+
+  const active = parsed.windWarnings[0];
+  assert.equal(active.badge, '[GW]');
+  assert.equal(active.isBecoming, false);
+  assert.equal(active.isForecastOnly, false);
+  assert.equal(active.axes.length, 2);
+  assert.equal(active.axes[0].radiusNm, 600);
+  assert.equal(active.maxWindKt, 40);
+
+  const becoming = parsed.windWarnings[1];
+  assert.equal(becoming.badge, '[GW]');
+  assert.equal(becoming.isBecoming, true);
+  assert.equal(becoming.axes.length, 0);
+
+  const forecast = parsed.windWarnings[2];
+  assert.equal(forecast.badge, '[GW]');
+  assert.equal(forecast.isForecastOnly, true);
+  assert.equal(forecast.forecastProbRadiusNm, 80);
+
+  assert.equal(parsed.fogPolygons.length, 1);
+  assert.equal(parsed.fogPolygons[0].label, 'FOG [W]');
+  assert.equal(parsed.seaAreaAlerts.length, 2);
+  assert.deepEqual(
+    parsed.seaAreaAlerts.map((a) => a.badge),
+    ['FOG [W]', '着氷 [W]']
+  );
+});
+
+test('getNextSurfaceChartStep steps through Pass 0 (without severe weather) then Pass 1 (with severe weather)', () => {
+  const fullSteps: Array<{
+    pass: 0 | 1;
+    mode: 'analysis' | 'forecast24' | 'forecast48';
+    historyIndex: number | null;
+    sequenceDone: boolean;
+  }> = [];
+  let pass: 0 | 1 = 0;
+  let mode: 'analysis' | 'forecast24' | 'forecast48' = 'analysis';
+  let historyIndex: number | null = null;
+  for (let i = 0; i < 6; i++) {
+    const next = getNextSurfaceChartStep({
+      pass,
+      mode,
+      hasForecast24: true,
+      hasForecast48: true,
+      historyCount: 0,
+      historyIndex,
+    });
+    fullSteps.push(next);
+    pass = next.pass;
+    mode = next.mode;
+    historyIndex = next.historyIndex;
+  }
+  assert.deepEqual(fullSteps, [
+    { pass: 0, mode: 'forecast24', historyIndex: null, sequenceDone: false },
+    { pass: 0, mode: 'forecast48', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'analysis', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'forecast24', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'forecast48', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'forecast48', historyIndex: null, sequenceDone: true },
+  ]);
+
+  // Without 24h & 48h charts: switches Pass 0 -> Pass 1 cleanly on analysis
+  const s1 = getNextSurfaceChartStep({
+    pass: 0,
+    mode: 'analysis',
+    hasForecast24: false,
+    hasForecast48: false,
+    historyCount: 0,
+    historyIndex: null,
+  });
+  assert.deepEqual(s1, {
+    pass: 1,
+    mode: 'analysis',
+    historyIndex: null,
+    sequenceDone: false,
+  });
+  const s2 = getNextSurfaceChartStep({
+    pass: s1.pass,
+    mode: s1.mode,
+    hasForecast24: false,
+    hasForecast48: false,
+    historyCount: 0,
+    historyIndex: s1.historyIndex,
+  });
+  assert.deepEqual(s2, {
+    pass: 1,
+    mode: 'analysis',
+    historyIndex: null,
+    sequenceDone: true,
+  });
+
+  // With past 24h historyCount = 2: walks 0 -> 1 -> null(live) -> 24h -> 48h across Pass 0 -> Pass 1
+  const initWithHist = getInitialSurfaceChartStep(2);
+  assert.deepEqual(initWithHist, {
+    pass: 0,
+    mode: 'analysis',
+    historyIndex: 0,
+  });
+  const histSequence: Array<{
+    pass: 0 | 1;
+    mode: 'analysis' | 'forecast24' | 'forecast48';
+    historyIndex: number | null;
+    sequenceDone: boolean;
+  }> = [];
+  let hPass = initWithHist.pass;
+  let hMode = initWithHist.mode;
+  let hIdx: number | null = initWithHist.historyIndex;
+  for (let i = 0; i < 10; i++) {
+    const step = getNextSurfaceChartStep({
+      pass: hPass,
+      mode: hMode,
+      hasForecast24: true,
+      hasForecast48: true,
+      historyCount: 2,
+      historyIndex: hIdx,
+    });
+    histSequence.push(step);
+    hPass = step.pass;
+    hMode = step.mode;
+    hIdx = step.historyIndex;
+  }
+  assert.deepEqual(histSequence, [
+    { pass: 0, mode: 'analysis', historyIndex: 1, sequenceDone: false },
+    { pass: 0, mode: 'analysis', historyIndex: null, sequenceDone: false },
+    { pass: 0, mode: 'forecast24', historyIndex: null, sequenceDone: false },
+    { pass: 0, mode: 'forecast48', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'analysis', historyIndex: 0, sequenceDone: false },
+    { pass: 1, mode: 'analysis', historyIndex: 1, sequenceDone: false },
+    { pass: 1, mode: 'analysis', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'forecast24', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'forecast48', historyIndex: null, sequenceDone: false },
+    { pass: 1, mode: 'forecast48', historyIndex: null, sequenceDone: true },
+  ]);
+});
+
+test('buildSurfaceChartHistoryFrames pairs past 6h..24h VZSA60 charts with nearest VPZU54 marine warnings chronologically', () => {
+  const mkChart = (utcIso: string): SurfaceWeatherChartData => ({
+    code: 'VZSA60',
+    title: 'アジア太平洋地上天気図',
+    reportTime: utcIso,
+    targetTime: utcIso,
+    validTimeLabel: utcIso,
+    forecastHour: 0,
+    isobars: [],
+    fronts: [],
+    centers: [],
+  });
+  const mkOverlay = (utcIso: string, tag: string): MarineWarningOverlay => ({
+    reportTime: utcIso,
+    targetTime: utcIso,
+    fogPolygons: [],
+    windWarnings: [],
+    seaAreaAlerts: [
+      {
+        areaName: tag,
+        areaCode: '0000',
+        kind: 'gale',
+        badge: '[GW]',
+        lat: 35,
+        lon: 145,
+      },
+    ],
+    xmlUrl: 'VPZU54_test.xml',
+  });
+
+  const latest = mkChart('2026-11-14T06:00:00Z');
+  const pastCharts = [
+    mkChart('2026-11-13T00:00:00Z'), // -30h (excluded, >24h old)
+    mkChart('2026-11-13T06:00:00Z'), // -24h
+    mkChart('2026-11-13T12:00:00Z'), // -18h
+    mkChart('2026-11-13T18:00:00Z'), // -12h
+    mkChart('2026-11-14T00:00:00Z'), // -6h
+    mkChart('2026-11-14T04:00:00Z'), // -2h (excluded, <3h close to latest)
+    latest, // exact duplicate of latest (excluded)
+  ];
+  const overlays = [
+    mkOverlay('2026-11-13T05:30:00Z', 'W-24'),
+    mkOverlay('2026-11-13T18:10:00Z', 'W-12'),
+    mkOverlay('2026-11-14T00:05:00Z', 'W-6'),
+  ];
+
+  const frames = buildSurfaceChartHistoryFrames(latest, pastCharts, overlays);
+  assert.equal(frames.length, 4);
+  assert.deepEqual(
+    frames.map((f) => f.offsetHours),
+    [-24, -18, -12, -6]
+  );
+  assert.equal(frames[0].marineWarning?.seaAreaAlerts[0].areaName, 'W-24');
+  assert.equal(frames[1].marineWarning, null); // >2.5h tolerance from W-24 & W-12
+  assert.equal(frames[2].marineWarning?.seaAreaAlerts[0].areaName, 'W-12');
+  assert.equal(frames[3].marineWarning?.seaAreaAlerts[0].areaName, 'W-6');
+
+  assert.equal(
+    matchMarineWarningForTimestamp(Date.parse('2026-11-13T06:00:00Z'), overlays)?.seaAreaAlerts[0].areaName,
+    'W-24'
+  );
+});
+
+test('convertP2PQuakeItem resolves eastern Hokkaido P2P 551 municipalities accurately without Sapporo/all-Hokkaido pollution, and VXSE51 uses subdivision centers', () => {
+  try {
+    registerMunicipalityEntries([
+      { c: '0169300', n: '標津町', p: 1, l: [144.9702, 43.7338] },
+      { c: '0122300', n: '根室市', p: 1, l: [145.4556, 43.2587] },
+      { c: '0110000', n: '札幌市', p: 1, l: [141.2505, 42.9907] },
+    ]);
+
+    const item = {
+      id: 'p2p-nemuro-20261114',
+      time: '2026/11/14 15:43:00',
+      issue: {
+        source: '気象庁',
+        time: '2026/11/14 15:43:00',
+        type: 'DetailScale',
+      },
+      earthquake: {
+        time: '2026/11/14 15:39:00',
+        hypocenter: {
+          name: '根室半島南東沖',
+          latitude: 43.0,
+          longitude: 146.3,
+          depth: 30,
+          magnitude: 4.2,
+        },
+        maxScale: 10,
+        domesticTsunami: 'None',
+      },
+      points: [
+        { pref: '北海道', addr: '標津町北２条', isArea: false, scale: 10 },
+        { pref: '北海道', addr: '根室市牧の内', isArea: false, scale: 10 },
+        { pref: '北海道', addr: '根室市珸瑤瑁', isArea: false, scale: 10 },
+      ],
+    };
+
+    const report = convertP2PQuakeItem(item);
+    assert.ok(report);
+    assert.equal(report.stations.length, 3);
+    for (const st of report.stations) {
+      assert.ok(st.lon !== undefined && st.lon > 144.8, `Expected eastern Hokkaido lon, got ${st.lon}`);
+      assert.ok(st.lat !== undefined && st.lat > 43.0);
+    }
+    assert.deepEqual(Object.keys(report.cityMaxScales || {}).sort(), [
+      '0122300',
+      '0169300',
+    ]);
+    // Must NEVER fall back to all 28 Hokkaido subdivisions when DetailScale points are non-area stations
+    assert.equal(Object.keys(report.areaMaxScales || {}).length, 0);
+
+    // VXSE51 (`震度速報`) uses JMA_SUBDIVISION_CENTERS[areaCode] instead of dropping area coords or using Sapporo
+    const vxse51Report = parseJmaQuakeDetailJson({
+      Head: {
+        Title: '震度速報',
+        ReportDateTime: '2026-11-14T15:41:00+09:00',
+        TargetDateTime: '2026-11-14T15:39:00+09:00',
+        EventID: '20261114153900',
+        InfoKind: '震度速報',
+      },
+      Body: {
+        Intensity: {
+          Observation: {
+            MaxInt: '1',
+            Pref: [
+              {
+                Name: '北海道',
+                MaxInt: '1',
+                Area: [
+                  { Name: '根室地方南部', Code: '167', MaxInt: '1' },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    });
+    assert.ok(vxse51Report);
+    assert.equal(vxse51Report.stations.length, 1);
+    assert.equal(vxse51Report.stations[0].city, '根室地方南部');
+    assert.equal(vxse51Report.areaMaxScales?.['167']?.scaleCode, 10);
+    assert.ok((vxse51Report.stations[0].lon ?? 0) > 145.0);
+    assert.ok((vxse51Report.stations[0].lat ?? 0) > 43.0);
+  } finally {
+    resetMunicipalityLookupForTest();
+  }
 });

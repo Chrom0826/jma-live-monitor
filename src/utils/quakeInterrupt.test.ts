@@ -1,17 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EarthquakeReport } from '../types/jma';
-import { TEST_INTERRUPT_EARTHQUAKE } from '../data/fallbackData';
+import { EarthquakeReport, EewReport } from '../types/jma';
+import {
+  TEST_EEW_FORECAST_REPORT,
+  TEST_EEW_REPORTS,
+  TEST_INTERRUPT_EARTHQUAKE,
+} from '../data/fallbackData';
 import {
   areEarthquakeListsEquivalent,
   computeFlipCycleState,
   createInitialEarthquakeTrackerState,
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
+  findMatchingIntensityEarthquakeForEewForecast,
   isEarthquakeAwaitingDetail,
   resolveEffectiveEnabledScenes,
   resolveEffectiveScene,
   resolveInterruptKindOnEew,
+  resolveInterruptKindOnEewForecastCleared,
   resolveInterruptKindOnTsunami,
   resolveInterruptKindOnTsunamiChange,
   shouldBlockNormalPatrolAdvance,
@@ -591,5 +597,114 @@ test('resolveEffectiveEnabledScenes skips typhoon when inactive and includes it 
       hasActiveTyphoons: true,
     }),
     ['tsunami']
+  );
+});
+
+test('findMatchingIntensityEarthquakeForEewForecast clears EEW Forecast on matching observed intensity and preserves EEW Warning / unmatched quakes', () => {
+  const baseTime = '2026/11/14 15:39:00';
+  const forecastEew: EewReport = {
+    ...TEST_EEW_FORECAST_REPORT,
+    isDemo: false,
+    eventId: 'eew-nemuro-forecast-1',
+    isWarning: false,
+    isCancelled: false,
+    hypocenterName: '根室半島南東沖',
+    lat: 43.0,
+    lon: 146.3,
+    originTime: baseTime,
+    receivedAtMs: Date.parse('2026-11-14T15:39:05+09:00'),
+  };
+  const warningEew: EewReport = {
+    ...TEST_EEW_REPORTS[0],
+    isDemo: false,
+    eventId: 'eew-nemuro-warning-1',
+    isWarning: true,
+    isCancelled: false,
+    hypocenterName: '根室半島南東沖',
+    lat: 43.0,
+    lon: 146.3,
+    originTime: baseTime,
+    receivedAtMs: Date.parse('2026-11-14T15:39:05+09:00'),
+  };
+
+  // 1. Observed intensity report (震度速報 or 各地の震度) for matching quake clears EEW Forecast
+  const matchingIntensityEq = makeEq({
+    id: 'eq-nemuro-1',
+    hypocenterName: '根室半島南東沖',
+    lat: 43.0,
+    lon: 146.3,
+    occurrenceTime: '2026/11/14 15:38:55 頃発生',
+    issueTime: '2026/11/14 15:40:30 発表',
+    maxScaleCode: 10,
+    maxScaleLabel: '1',
+    issueTypeLabel: '震度速報',
+    isConfirmed: false,
+  });
+  const matched = findMatchingIntensityEarthquakeForEewForecast(forecastEew, [
+    matchingIntensityEq,
+  ]);
+  assert.equal(matched?.id, 'eq-nemuro-1');
+  assert.equal(
+    resolveInterruptKindOnEewForecastCleared(
+      'eew',
+      matchingIntensityEq,
+      Date.parse('2026-11-14T15:41:00+09:00')
+    ),
+    'earthquake'
+  );
+
+  // 2. Hypocenter-only report without intensity (maxScaleCode < 10) does NOT clear EEW Forecast
+  const hypocenterOnlyEq = makeEq({
+    ...matchingIntensityEq,
+    id: 'eq-nemuro-hypo',
+    maxScaleCode: 0,
+    maxScaleLabel: '-',
+    issueTypeLabel: '震源に関する情報',
+    stations: [],
+  });
+  assert.equal(
+    findMatchingIntensityEarthquakeForEewForecast(forecastEew, [hypocenterOnlyEq]),
+    null
+  );
+
+  // 3. EEW Warning (警報, isWarning: true) is NOT cleared even when observed intensity arrives
+  assert.equal(
+    findMatchingIntensityEarthquakeForEewForecast(warningEew, [
+      matchingIntensityEq,
+    ]),
+    null
+  );
+
+  // 4. Unrelated simultaneous distant earthquake does NOT clear EEW Forecast
+  const distantEq = makeEq({
+    id: 'eq-okinawa-1',
+    hypocenterName: '沖縄本島近海',
+    lat: 26.2,
+    lon: 127.7,
+    occurrenceTime: '2026/11/14 15:39:10 頃発生',
+    issueTime: '2026/11/14 15:40:30 発表',
+    maxScaleCode: 20,
+    maxScaleLabel: '2',
+  });
+  assert.equal(
+    findMatchingIntensityEarthquakeForEewForecast(forecastEew, [distantEq]),
+    null
+  );
+
+  // 5. Historical confirmed matching quake beyond fresh window releases to 'none' vs keeps 'earthquake'
+  const staleMatched = makeEq({
+    ...matchingIntensityEq,
+    isConfirmed: true,
+    issueTypeLabel: '各地の震度に関する情報',
+    occurrenceTime: '2026/11/14 10:00:00 頃発生',
+    issueTime: '2026/11/14 10:05:00 発表',
+  });
+  assert.equal(
+    resolveInterruptKindOnEewForecastCleared(
+      'eew',
+      staleMatched,
+      Date.parse('2026-11-14T15:45:00+09:00')
+    ),
+    'none'
   );
 });

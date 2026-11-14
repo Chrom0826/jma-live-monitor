@@ -7,6 +7,7 @@ export type SceneId =
   | 'volcano'
   | 'tsunami'
   | 'forecast'
+  | 'apac_analysis'
   | 'earthquake';
 
 export type RegionId =
@@ -408,6 +409,139 @@ export type InterruptKind =
   | 'tsunami'
   | 'typhoon';
 
+export type SurfacePressureCenterKind =
+  | 'High'
+  | 'Low'
+  | 'TropicalDepression'
+  | 'Typhoon';
+
+export type SurfaceFrontKind =
+  | 'cold'
+  | 'warm'
+  | 'stationary'
+  | 'occluded';
+
+export interface SurfaceChartIsobar {
+  pressureHpa: number;
+  /** True for 20 hPa major intervals (e.g. 980, 1000, 1020, 1040) */
+  isMajor: boolean;
+  /** True for intermediate 2 hPa contours (e.g. 994, 1014, 1022) */
+  isAuxiliary: boolean;
+  /** Polyline vertices as [lat, unwrappedEastAsiaLon] */
+  points: [number, number][];
+  closed: boolean;
+}
+
+export interface SurfaceChartPressureCenter {
+  kind: SurfacePressureCenterKind;
+  typeLabel: string;
+  shortMark: string;
+  lat: number;
+  lon: number;
+  pressureHpa?: number;
+  directionDeg?: number;
+  directionCondition?: string;
+  speedKmh?: number;
+  speedKnots?: number;
+  speedDesc?: string;
+  typhoonNumber?: string;
+  typhoonNameJp?: string;
+  areaLabel?: string;
+}
+
+export interface SurfaceChartFront {
+  kind: SurfaceFrontKind;
+  typeLabel: string;
+  /** Polyline vertices as [lat, unwrappedEastAsiaLon] ordered with cold air on LEFT and warm air on RIGHT */
+  points: [number, number][];
+}
+
+export type SurfaceChartCode = 'VZSA50' | 'VZSA60' | 'VZSF60' | 'VZSF61';
+
+export type SurfaceChartMode = 'analysis' | 'forecast24' | 'forecast48';
+
+export type MarineWarningKind =
+  | 'typhoon'
+  | 'storm'
+  | 'gale'
+  | 'near_gale'
+  | 'fog'
+  | 'icing';
+
+export interface SurfaceChartFogPolygon {
+  label: string;
+  /** Boundary vertices as [lat, unwrappedEastAsiaLon] */
+  points: [number, number][];
+}
+
+export interface SurfaceChartWindPoint {
+  lat: number;
+  lon: number;
+  windDeg?: number;
+  windSpeedKt?: number;
+}
+
+export interface SurfaceChartSeaAreaAlert {
+  kind: MarineWarningKind;
+  badge: string;
+  areaCode: string;
+  areaName: string;
+  lat: number;
+  lon: number;
+}
+
+export interface MarineWindWarningAxis {
+  direction8: string;
+  radiusNm: number;
+}
+
+export interface MarineWindWarningItem {
+  kind: 'typhoon' | 'storm' | 'gale' | 'near_gale';
+  badge: '[TW]' | '[SW]' | '[GW]' | '[W]';
+  name: string;
+  lat: number;
+  lon: number;
+  isForecastOnly: boolean;
+  isBecoming: boolean;
+  forecastProbRadiusNm?: number;
+  axes: MarineWindWarningAxis[];
+  maxWindKt?: number;
+}
+
+export interface MarineWarningOverlay {
+  reportTime: string;
+  targetTime: string;
+  windWarnings: MarineWindWarningItem[];
+  fogPolygons: SurfaceChartFogPolygon[];
+  seaAreaAlerts: SurfaceChartSeaAreaAlert[];
+  xmlUrl?: string;
+}
+
+export interface SurfaceWeatherChartData {
+  code: SurfaceChartCode;
+  title: string;
+  reportTime: string;
+  targetTime: string;
+  validTimeLabel: string;
+  forecastHour?: 0 | 24 | 48;
+  isobars: SurfaceChartIsobar[];
+  centers: SurfaceChartPressureCenter[];
+  fronts: SurfaceChartFront[];
+  fogPolygons?: SurfaceChartFogPolygon[];
+  seaIcePoints?: [number, number][];
+  icingPoints?: [number, number][];
+  windPoints?: SurfaceChartWindPoint[];
+  seaAreaAlerts?: SurfaceChartSeaAreaAlert[];
+  xmlUrl?: string;
+}
+
+export interface SurfaceChartHistoryFrame {
+  chart: SurfaceWeatherChartData;
+  marineWarning?: MarineWarningOverlay | null;
+  /** Offset in hours relative to the latest analysis (e.g. -24, -18, -12, -6). */
+  offsetHours?: number;
+}
+
 export interface MonitorDataBundle {
   xmlEntries: JmaXmlEntry[];
   nowcastTimes: NowcastTimeEntry[];
@@ -427,6 +561,16 @@ export interface MonitorDataBundle {
   /** 現在発表中の津波警報・注意報・予報（P2P code 552 / 気象庁 bosai tsunami）。発表なしは null */
   tsunamiForecast?: TsunamiForecastReport | null;
   forecasts: CityForecastItem[];
+  /** アジア太平洋地上実況図 (VZSA60) */
+  surfaceChartApac?: SurfaceWeatherChartData | null;
+  /** アジア太平洋海上悪天24時間予想図 (VZSF60) */
+  surfaceChartApac24h?: SurfaceWeatherChartData | null;
+  /** アジア太平洋海上悪天48時間予想図 (VZSF61) */
+  surfaceChartApac48h?: SurfaceWeatherChartData | null;
+  /** 過去24時間分のアジア太平洋地上実況図 (VZSA60) + 同時刻VPZU54 (古い順) */
+  surfaceChartApacHistory?: SurfaceChartHistoryFrame[];
+  /** 全般海上警報 (VPZU54 等): 実況図への [GW]/[SW]/[TW]・FOG [W]・着氷 [W] 重畳用 */
+  marineWarning?: MarineWarningOverlay | null;
   earthquakes: EarthquakeReport[];
   lastXmlFetchTime: string;
   dataSourceStatus: {

@@ -11,12 +11,30 @@ import {
   RegionalWarningItem,
   SceneId,
   SceneMetadata,
+  MarineWarningKind,
+  MarineWarningOverlay,
+  MarineWindWarningAxis,
+  MarineWindWarningItem,
+  SurfaceChartCode,
+  SurfaceChartFogPolygon,
+  SurfaceChartFront,
+  SurfaceChartHistoryFrame,
+  SurfaceChartIsobar,
+  SurfaceChartMode,
+  SurfaceChartPressureCenter,
+  SurfaceChartSeaAreaAlert,
+  SurfaceChartWindPoint,
+  SurfaceFrontKind,
+  SurfacePressureCenterKind,
+  SurfaceWeatherChartData,
   TyphoonReport,
   TyphoonTrackPoint,
   WarningBadgeItem,
   WarningSeverity,
   XmlFeedType,
 } from '../types/jma';
+import { JMA_SUBDIVISION_CENTERS } from '../data/jmaSubdivisionCenters';
+import { getMunicipalityCoordsByCode } from './municipalityLookup';
 
 export const SCENE_LIST: SceneMetadata[] = [
   {
@@ -60,8 +78,16 @@ export const SCENE_LIST: SceneMetadata[] = [
     xmlSource: 'regular.xml (府県天気予報・概況)',
   },
   {
-    id: 'earthquake',
+    id: 'apac_analysis',
     index: '06',
+    shortLabel: 'アジア太平洋実況図',
+    title: 'アジア太平洋実況図',
+    subtitle: '気象庁 定時XML（VZSA60 / VZSF60 / VZSF61）実況・24h・48h予想',
+    xmlSource: 'regular.xml (VZSA60 実況図 / VZSF60 24h予想 / VZSF61 48h予想)',
+  },
+  {
+    id: 'earthquake',
+    index: '07',
     shortLabel: '地震情報',
     title: '地震情報（震源・震度に関する情報）',
     subtitle: '直近の地震履歴・震源・各地の震度（新規地震発生時は緊急割り込み）',
@@ -69,7 +95,7 @@ export const SCENE_LIST: SceneMetadata[] = [
   },
   {
     id: 'volcano',
-    index: '07',
+    index: '08',
     shortLabel: '火山情報(変化時)',
     title: '噴火警報・噴火警戒レベル変化速報',
     subtitle: '噴火警戒レベル変化・噴火発生時のみ対象火山へズーム表示',
@@ -78,7 +104,7 @@ export const SCENE_LIST: SceneMetadata[] = [
   },
   {
     id: 'tsunami',
-    index: '08',
+    index: '09',
     shortLabel: '津波情報',
     title: '津波警報・注意報・予報',
     subtitle: '気象庁 津波警報・注意報・予報 ＆ 沿岸発表状況',
@@ -86,7 +112,7 @@ export const SCENE_LIST: SceneMetadata[] = [
   },
 ];
 
-// Normal everyday loop rotates through radar, warnings, typhoon, amedas, forecast, earthquake.
+// Normal everyday loop rotates through radar, warnings, typhoon, amedas, forecast, apac_analysis, earthquake.
 // Volcano and Tsunami only interrupt when a level change or abnormal tide occurs.
 export const DEFAULT_NORMAL_LOOP_SCENES: SceneId[] = [
   'radar',
@@ -94,6 +120,7 @@ export const DEFAULT_NORMAL_LOOP_SCENES: SceneId[] = [
   'typhoon',
   'amedas',
   'forecast',
+  'apac_analysis',
   'earthquake',
 ];
 
@@ -1564,6 +1591,7 @@ export function parseJmaQuakeDetailJson(
         const cities = Array.isArray(area?.City) ? area.City : [];
         if (cities.length === 0 && areaMaxIntStr) {
           // 震度速報 (VXSE51) has Pref -> Area with MaxInt, but no City or IntensityStation yet
+          const areaCenter = areaCode ? JMA_SUBDIVISION_CENTERS[areaCode] : undefined;
           const baseMeta = Object.values(PREFECTURE_NAMES).find(
             (m) => prefName.includes(m.name) || m.name.includes(prefName)
           );
@@ -1573,8 +1601,8 @@ export function parseJmaQuakeDetailJson(
             stationName: areaName,
             scaleCode: aInt.scaleCode,
             scaleLabel: aInt.scaleLabel,
-            lat: baseMeta?.lat,
-            lon: baseMeta?.lon,
+            lat: areaCenter ? areaCenter[1] : baseMeta?.lat,
+            lon: areaCenter ? areaCenter[0] : baseMeta?.lon,
           });
         }
         for (const city of cities) {
@@ -1590,12 +1618,15 @@ export function parseJmaQuakeDetailJson(
             : [];
           if (intensityStations.length === 0 && cityMaxIntStr) {
             const cInt = parseJmaIntensityString(cityMaxIntStr);
+            const muniCoords = cityCode ? getMunicipalityCoordsByCode(cityCode) : null;
             stations.push({
               prefecture: prefName,
               city: cityName,
               stationName: cityName,
               scaleCode: cInt.scaleCode,
               scaleLabel: cInt.scaleLabel,
+              lat: muniCoords?.lat,
+              lon: muniCoords?.lon,
             });
           }
           for (const st of intensityStations) {
@@ -4168,3 +4199,1046 @@ export function parseVpws50SummaryMap(
 
 
 
+
+const JMA_COORD_PAIR_RE = /([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)/g;
+
+const CARDINAL_16_JA = [
+  '北',
+  '北北東',
+  '北東',
+  '東北東',
+  '東',
+  '東南東',
+  '南東',
+  '南南東',
+  '南',
+  '南南西',
+  '南西',
+  '西南西',
+  '西',
+  '西北西',
+  '北西',
+  '北北西',
+] as const;
+
+/** Normalize full-width digits/slash/letters from JMA XML descriptions into ASCII. */
+export function toHalfWidthAscii(text: string): string {
+  return String(text || '')
+    .replace(/[０-９Ａ-Ｚａ-ｚ／．]/g, (ch) =>
+      String.fromCharCode(ch.charCodeAt(0) - 0xfee0)
+    )
+    .replace(/\u3000/g, ' ')
+    .trim();
+}
+
+/**
+ * Unwrap longitude into the continuous East Asia / North Pacific domain (`20°E .. 380°E`).
+ * Western Hemisphere values west of the antimeridian (e.g. `-169.78`) map to `+190.22`,
+ * and sequential polyline points stay continuous across the dateline.
+ */
+export function unwrapEastAsiaLongitude(lon: number, refLon?: number): number {
+  let v = lon;
+  if (refLon !== undefined && Number.isFinite(refLon)) {
+    while (v - refLon > 180) v -= 360;
+    while (refLon - v > 180) v += 360;
+    return v;
+  }
+  if (v < 20) v += 360;
+  return v;
+}
+
+/** Parse JMA `+lat+lon/+lat+lon/...` string into `[lat, unwrappedLon][]`. */
+export function parseJmaCoordinateString(lineText: string): [number, number][] {
+  const pts: [number, number][] = [];
+  if (!lineText) return pts;
+  JMA_COORD_PAIR_RE.lastIndex = 0;
+  let prevLon: number | undefined;
+  let m: RegExpExecArray | null;
+  while ((m = JMA_COORD_PAIR_RE.exec(lineText)) !== null) {
+    const lat = Number(m[1]);
+    const rawLon = Number(m[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(rawLon)) continue;
+    const lon = unwrapEastAsiaLongitude(rawLon, prevLon);
+    prevLon = lon;
+    pts.push([lat, lon]);
+  }
+  return pts;
+}
+
+/** Format an ISO8601 JMA timestamp (`2026-11-14T09:00:00+09:00`) as `11/14 09:00 実況` or `予想`. */
+export function formatIsoTargetToValidChartLabel(
+  isoStr: string,
+  suffix: '実況' | '予想' = '実況'
+): string {
+  const m = /(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(isoStr || '');
+  if (!m) return '';
+  return `${Number(m[2])}/${Number(m[3])} ${m[4]}:${m[5]} ${suffix}`;
+}
+
+export function formatBearingDegToJa16(deg?: number): string {
+  if (deg === undefined || !Number.isFinite(deg)) return '';
+  const idx = Math.round((((deg % 360) + 360) % 360) / 22.5) % 16;
+  return CARDINAL_16_JA[idx];
+}
+
+export function formatChartLatLonCompact(lat: number, lon: number): string {
+  const normLon = ((((lon + 180) % 360) + 360) % 360) - 180;
+  const ns = lat >= 0 ? 'N' : 'S';
+  const ew = normLon >= 0 ? 'E' : 'W';
+  return `${Math.abs(lat).toFixed(1)}°${ns} ${Math.abs(normLon).toFixed(1)}°${ew}`;
+}
+
+/**
+ * Coarse geographic label table for surface chart centers in East Asia & North Pacific.
+ * Evaluated in priority order from specific seas/archipelagos to broader continental regions.
+ */
+const SYNOPTIC_AREA_BOXES: ReadonlyArray<{
+  label: string;
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
+}> = [
+  { label: '北海道東方海上', minLat: 41.5, maxLat: 46.5, minLon: 144, maxLon: 152 },
+  { label: '千島近海', minLat: 44, maxLat: 51, minLon: 148, maxLon: 162 },
+  { label: 'カムチャツカの東', minLat: 49, maxLat: 60, minLon: 160, maxLon: 178 },
+  { label: 'オホーツク海', minLat: 45.5, maxLat: 62, minLon: 137, maxLon: 160 },
+  { label: 'サハリン付近', minLat: 45.5, maxLat: 54.5, minLon: 140, maxLon: 147 },
+  { label: '日本海', minLat: 35.5, maxLat: 45.5, minLon: 129, maxLon: 141 },
+  { label: '三陸沖', minLat: 36.5, maxLat: 42, minLon: 141, maxLon: 148 },
+  { label: '関東東方沖', minLat: 33.5, maxLat: 37, minLon: 140.5, maxLon: 150 },
+  { label: '伊豆・小笠原近海', minLat: 24, maxLat: 35, minLon: 138, maxLon: 146 },
+  { label: '日本の南海上', minLat: 24, maxLat: 34, minLon: 129, maxLon: 138.5 },
+  { label: '沖縄・先島諸島近海', minLat: 21, maxLat: 28, minLon: 122, maxLon: 130 },
+  { label: '朝鮮半島付近', minLat: 33, maxLat: 41, minLon: 124, maxLon: 129.5 },
+  { label: '黄海', minLat: 32, maxLat: 39.5, minLon: 119, maxLon: 126.5 },
+  { label: '東シナ海', minLat: 25, maxLat: 33.5, minLon: 120, maxLon: 129 },
+  { label: '日本の東', minLat: 33, maxLat: 47, minLon: 147, maxLon: 166 },
+  { label: '日本のはるか東', minLat: 22, maxLat: 47, minLon: 152, maxLon: 179.9 },
+  { label: 'アリューシャン近海', minLat: 47, maxLat: 60, minLon: 168, maxLon: 205 },
+  { label: 'ベーリング海・極東北部', minLat: 58, maxLat: 78, minLon: 165, maxLon: 205 },
+  { label: '東シベリア', minLat: 56, maxLat: 76, minLon: 110, maxLon: 165 },
+  { label: 'バイカル湖付近', minLat: 49, maxLat: 59, minLon: 95, maxLon: 124 },
+  { label: '中国東北区・沿海州', minLat: 40, maxLat: 52, minLon: 120, maxLon: 139 },
+  { label: 'モンゴル・中国北部', minLat: 36, maxLat: 52, minLon: 88, maxLon: 120 },
+  { label: '中央アジア', minLat: 38, maxLat: 62, minLon: 55, maxLon: 95 },
+  { label: '華中・華南', minLat: 21, maxLat: 36, minLon: 100, maxLon: 122 },
+  { label: 'フィリピン東海', minLat: 10, maxLat: 23, minLon: 122, maxLon: 142 },
+  { label: 'マリアナ・カロリン諸島', minLat: 2, maxLat: 22, minLon: 138, maxLon: 162 },
+  { label: '日付変更線付近の北太平洋', minLat: 22, maxLat: 52, minLon: 175, maxLon: 210 },
+  { label: '中部・熱帯太平洋', minLat: 0, maxLat: 23, minLon: 160, maxLon: 215 },
+];
+
+export function describeSynopticCoordinateArea(lat: number, lon: number): string {
+  const uLon = unwrapEastAsiaLongitude(lon);
+  for (const box of SYNOPTIC_AREA_BOXES) {
+    if (
+      lat >= box.minLat &&
+      lat <= box.maxLat &&
+      uLon >= box.minLon &&
+      uLon <= box.maxLon
+    ) {
+      return box.label;
+    }
+  }
+  return formatChartLatLonCompact(lat, uLon);
+}
+
+/** Format pressure center movement cleanly (e.g. `東 55km/h`, `東南東 ゆっくり`, `ほとんど停滞`). */
+export function formatPressureCenterMotion(
+  center: SurfaceChartPressureCenter
+): string {
+  const dir = formatBearingDegToJa16(center.directionDeg);
+  const spdDesc = toHalfWidthAscii(center.speedDesc || '');
+  if (center.speedKmh !== undefined && Number.isFinite(center.speedKmh)) {
+    const kmhStr = `${center.speedKmh}km/h`;
+    const ktStr =
+      center.speedKnots !== undefined && Number.isFinite(center.speedKnots)
+        ? ` (${center.speedKnots}kt)`
+        : '';
+    return dir ? `${dir} ${kmhStr}${ktStr}` : `${kmhStr}${ktStr}`;
+  }
+  if (spdDesc) {
+    if (spdDesc.includes('停滞') || spdDesc.includes('STNR')) {
+      return 'ほとんど停滞';
+    }
+    return dir ? `${dir} ${spdDesc}` : spdDesc;
+  }
+  if (dir) return `${dir}へ移動`;
+  if (center.directionCondition) return center.directionCondition;
+  return '';
+}
+
+const CENTER_TYPE_MAP: Record<
+  string,
+  { kind: SurfacePressureCenterKind; shortMark: string }
+> = {
+  高気圧: { kind: 'High', shortMark: '高' },
+  低気圧: { kind: 'Low', shortMark: '低' },
+  低圧部: { kind: 'Low', shortMark: '低' },
+  熱帯低気圧: { kind: 'TropicalDepression', shortMark: '熱低' },
+  台風: { kind: 'Typhoon', shortMark: '台' },
+};
+
+const FRONT_TYPE_MAP: Record<string, SurfaceFrontKind> = {
+  寒冷前線: 'cold',
+  温暖前線: 'warm',
+  停滞前線: 'stationary',
+  閉塞前線: 'occluded',
+};
+
+function extractXmlTagText(xml: string, tagName: string): string {
+  const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, 'i').exec(
+    xml
+  );
+  return m ? decodeXmlEntities(m[1].trim()) : '';
+}
+
+function extractXmlTagBlocks(xml: string, tagName: string): string[] {
+  const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, 'gi');
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    out.push(m[1]);
+  }
+  return out;
+}
+
+function extractXmlFullTags(xml: string, tagName: string): { attrs: string; body: string }[] {
+  const escaped = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`<${escaped}(\\b[^>]*)>([\\s\\S]*?)<\\/${escaped}>`, 'gi');
+  const out: { attrs: string; body: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    out.push({ attrs: m[1] || '', body: m[2] });
+  }
+  return out;
+}
+
+function extractXmlAttr(attrs: string, attrName: string): string {
+  const escaped = attrName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp(`\\b${escaped}=["']([^"']*)["']`, 'i').exec(attrs);
+  return m ? decodeXmlEntities(m[1]).trim() : '';
+}
+
+/**
+ * Parse ISO-6709 coordinate sequences (`/lat+lon/` or `+lat+lon/+lat+lon/`) into `[lat, lon]` tuples
+ * with longitudes unwrapped for continuous Asia-Pacific chart rendering across 180°.
+ */
+export function parseChartPolygonCoords(raw: string): [number, number][] {
+  if (!raw) return [];
+  const points: [number, number][] = [];
+  for (const token of raw.split('/')) {
+    const trimmed = token.trim();
+    if (!trimmed) continue;
+    const m = /^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)(?:[+-]\d+(?:\.\d+)?)?$/.exec(trimmed);
+    if (!m) continue;
+    const lat = Number.parseFloat(m[1]);
+    const rawLon = Number.parseFloat(m[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(rawLon)) continue;
+    points.push([lat, unwrapEastAsiaLongitude(rawLon)]);
+  }
+  return points;
+}
+
+/** Open-water center coordinates for JMA 全般海上海域名 codes (9010–9330). */
+export const JMA_MARINE_AREA_CENTERS: Record<
+  string,
+  { name: string; lat: number; lon: number }
+> = {
+  '9010': { name: '日本海', lat: 39.2, lon: 134.8 },
+  '9020': { name: 'ボッ海', lat: 39.2, lon: 119.5 },
+  '9030': { name: '黄海', lat: 35.5, lon: 123.5 },
+  '9040': { name: '東シナ海', lat: 29.0, lon: 125.0 },
+  '9050': { name: 'オホーツク海', lat: 51.5, lon: 148.5 },
+  '9060': { name: 'ベーリング海', lat: 58.5, lon: 182.0 },
+  '9070': { name: '南シナ海', lat: 15.0, lon: 114.5 },
+  '9080': { name: '日本の東', lat: 38.5, lon: 147.0 },
+  '9090': { name: '日本のはるか東', lat: 36.5, lon: 164.0 },
+  '9100': { name: '日本の南', lat: 30.0, lon: 136.5 },
+  '9120': { name: '沖縄の南', lat: 21.5, lon: 127.5 },
+  '9150': { name: 'トンキン湾', lat: 19.5, lon: 107.8 },
+  '9160': { name: '千島近海', lat: 46.5, lon: 151.5 },
+  '9170': { name: '千島の東', lat: 46.5, lon: 162.5 },
+  '9190': { name: 'アリューシャン近海', lat: 52.0, lon: 176.5 },
+  '9200': { name: 'アリューシャンの南', lat: 47.0, lon: 185.0 },
+  '9210': { name: 'カムチャツカの東', lat: 54.0, lon: 167.0 },
+  '9220': { name: 'フィリピンの東', lat: 17.0, lon: 132.0 },
+  '9230': { name: 'ミンダナオ島の東', lat: 8.0, lon: 133.5 },
+  '9240': { name: 'セレベス海', lat: 3.5, lon: 122.0 },
+  '9250': { name: 'スル海', lat: 8.5, lon: 120.5 },
+  '9260': { name: 'マーシャル諸島', lat: 9.5, lon: 169.5 },
+  '9270': { name: 'トラック諸島', lat: 7.5, lon: 151.8 },
+  '9280': { name: 'ミッドウェー諸島', lat: 29.0, lon: 183.0 },
+  '9290': { name: 'ウェーク島', lat: 19.3, lon: 166.6 },
+  '9300': { name: 'マリアナ諸島', lat: 16.5, lon: 145.5 },
+  '9310': { name: 'カロリン諸島', lat: 7.5, lon: 141.0 },
+  '9320': { name: '南鳥島', lat: 24.3, lon: 154.0 },
+  '9330': { name: '小笠原諸島', lat: 27.0, lon: 142.2 },
+};
+
+function resolveMarineAreaCenter(
+  areaCode: string,
+  areaName: string
+): { code: string; name: string; lat: number; lon: number } | null {
+  const cleanCode = toHalfWidthAscii(areaCode || '').trim();
+  if (cleanCode && JMA_MARINE_AREA_CENTERS[cleanCode]) {
+    const entry = JMA_MARINE_AREA_CENTERS[cleanCode];
+    return { code: cleanCode, name: areaName.trim() || entry.name, lat: entry.lat, lon: entry.lon };
+  }
+  const cleanName = areaName.replace(/\s+/g, '').trim();
+  if (cleanName) {
+    for (const [code, entry] of Object.entries(JMA_MARINE_AREA_CENTERS)) {
+      if (entry.name === cleanName) {
+        return { code, name: entry.name, lat: entry.lat, lon: entry.lon };
+      }
+    }
+  }
+  return null;
+}
+
+function pushUniqueSeaAlert(
+  list: SurfaceChartSeaAreaAlert[],
+  seen: Set<string>,
+  alert: SurfaceChartSeaAreaAlert
+): void {
+  const key = `${alert.areaCode || alert.areaName}::${alert.kind}::${alert.badge}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  list.push(alert);
+}
+
+/**
+ * Parse a JMA Surface Weather Chart XML (`VZSA50` 地上実況図 or `VZSA60` アジア太平洋地上実況図)
+ * into structured isobars, pressure centers, and frontal boundaries.
+ */
+function inferSurfaceChartCode(
+  expectedCode?: SurfaceChartCode,
+  xmlUrl?: string,
+  rawTitle?: string
+): SurfaceChartCode {
+  if (expectedCode) return expectedCode;
+  if (
+    xmlUrl?.includes('VZSF61') ||
+    rawTitle?.includes('４８時間予想') ||
+    rawTitle?.includes('48時間予想')
+  ) {
+    return 'VZSF61';
+  }
+  if (
+    xmlUrl?.includes('VZSF60') ||
+    rawTitle?.includes('２４時間予想') ||
+    rawTitle?.includes('24時間予想')
+  ) {
+    return 'VZSF60';
+  }
+  if (xmlUrl?.includes('VZSA60') || rawTitle?.includes('アジア太平洋')) {
+    return 'VZSA60';
+  }
+  return 'VZSA50';
+}
+
+export function parseSurfaceWeatherChartXml(
+  xmlText: string,
+  expectedCode?: SurfaceChartCode,
+  xmlUrl?: string
+): SurfaceWeatherChartData | null {
+  if (!xmlText || !xmlText.includes('<MeteorologicalInfos')) {
+    return null;
+  }
+
+  const rawTitle = extractXmlTagText(xmlText, 'Title');
+  const code = inferSurfaceChartCode(expectedCode, xmlUrl, rawTitle);
+  const forecastHour: 0 | 24 | 48 =
+    code === 'VZSF61' ? 48 : code === 'VZSF60' ? 24 : 0;
+  const chartInfosMatch =
+    /<MeteorologicalInfos[^>]*type=["']天気図情報["'][^>]*>([\s\S]*?)<\/MeteorologicalInfos>/i.exec(
+      xmlText
+    );
+  const chartXmlBody = chartInfosMatch ? chartInfosMatch[1] : xmlText;
+  const chartValidDateTime = extractXmlTagText(chartXmlBody, 'DateTime');
+  const headTargetTime =
+    extractXmlTagText(xmlText, 'TargetDateTime') ||
+    extractXmlTagText(xmlText, 'DateTime');
+  const targetTime =
+    forecastHour > 0
+      ? chartValidDateTime || headTargetTime
+      : headTargetTime || chartValidDateTime;
+  const reportTime = extractXmlTagText(xmlText, 'ReportDateTime');
+
+  const isobars: SurfaceChartIsobar[] = [];
+  const centers: SurfaceChartPressureCenter[] = [];
+  const fronts: SurfaceChartFront[] = [];
+
+  const itemRe = /<Item>([\s\S]*?)<\/Item>/gi;
+  let itemMatch: RegExpExecArray | null;
+  while ((itemMatch = itemRe.exec(chartXmlBody)) !== null) {
+    const itemXml = itemMatch[1];
+    const typeLabel = extractXmlTagText(itemXml, 'Type');
+    if (!typeLabel) continue;
+
+    if (typeLabel === '等圧線') {
+      const pressureStr = extractXmlTagText(itemXml, 'jmx_eb:Pressure');
+      const lineStr = extractXmlTagText(itemXml, 'jmx_eb:Line');
+      const pressureHpa = Number(pressureStr);
+      const points = parseJmaCoordinateString(lineStr);
+      if (!Number.isFinite(pressureHpa) || points.length < 2) continue;
+      const first = points[0];
+      const last = points[points.length - 1];
+      const closed = Math.hypot(first[0] - last[0], first[1] - last[1]) < 0.2;
+      isobars.push({
+        pressureHpa,
+        isMajor: pressureHpa % 20 === 0,
+        isAuxiliary: pressureHpa % 4 !== 0,
+        points,
+        closed,
+      });
+      continue;
+    }
+
+    const frontKind = FRONT_TYPE_MAP[typeLabel];
+    if (frontKind) {
+      const lineStr = extractXmlTagText(itemXml, 'jmx_eb:Line');
+      const points = parseJmaCoordinateString(lineStr);
+      if (points.length >= 2) {
+        fronts.push({
+          kind: frontKind,
+          typeLabel,
+          points,
+        });
+      }
+      continue;
+    }
+
+    const centerMeta = CENTER_TYPE_MAP[typeLabel];
+    if (centerMeta) {
+      const coordStr = extractXmlTagText(itemXml, 'jmx_eb:Coordinate');
+      const coords = parseJmaCoordinateString(coordStr);
+      if (coords.length === 0) continue;
+      const [lat, lon] = coords[0];
+
+      const pressureStr = extractXmlTagText(itemXml, 'jmx_eb:Pressure');
+      const pressureVal = Number(pressureStr);
+      const pressureHpa =
+        pressureStr !== '' && Number.isFinite(pressureVal)
+          ? pressureVal
+          : undefined;
+
+      const dirTagMatch =
+        /<jmx_eb:Direction([^>]*)>([^<]*)<\/jmx_eb:Direction>/i.exec(itemXml);
+      const dirRaw = dirTagMatch ? dirTagMatch[2].trim() : '';
+      const dirNum = Number(dirRaw);
+      const directionDeg =
+        dirRaw !== '' && Number.isFinite(dirNum) ? dirNum : undefined;
+      const dirCondMatch = dirTagMatch
+        ? /condition="([^"]+)"/i.exec(dirTagMatch[1])
+        : null;
+      const directionCondition = dirCondMatch ? dirCondMatch[1] : undefined;
+
+      let speedKmh: number | undefined;
+      let speedKnots: number | undefined;
+      let speedDesc: string | undefined;
+      const speedRe = /<jmx_eb:Speed([^>]*)>([^<]*)<\/jmx_eb:Speed>/gi;
+      let sm: RegExpExecArray | null;
+      while ((sm = speedRe.exec(itemXml)) !== null) {
+        const attrs = sm[1];
+        const valStr = sm[2].trim();
+        const num = valStr !== '' ? Number(valStr) : NaN;
+        const unitMatch = /unit="([^"]+)"/i.exec(attrs);
+        const unit = unitMatch ? unitMatch[1] : '';
+        const descMatch = /description="([^"]+)"/i.exec(attrs);
+        if (unit === 'km/h') {
+          if (Number.isFinite(num)) speedKmh = num;
+          if (descMatch && !speedDesc) speedDesc = decodeXmlEntities(descMatch[1]);
+        } else if (unit === 'ノット' || unit === 'kt') {
+          if (Number.isFinite(num)) speedKnots = num;
+          if (descMatch && !speedDesc) speedDesc = decodeXmlEntities(descMatch[1]);
+        } else if (!speedDesc && descMatch) {
+          speedDesc = decodeXmlEntities(descMatch[1]);
+        }
+      }
+
+      const typhoonNamePartMatch =
+        /<TyphoonNamePart>([\s\S]*?)<\/TyphoonNamePart>/i.exec(itemXml);
+      const typhoonNumber = typhoonNamePartMatch
+        ? extractXmlTagText(typhoonNamePartMatch[1], 'Number') || undefined
+        : undefined;
+      const typhoonNameJp = typhoonNamePartMatch
+        ? extractXmlTagText(typhoonNamePartMatch[1], 'NameKana') ||
+          extractXmlTagText(typhoonNamePartMatch[1], 'Name') ||
+          undefined
+        : undefined;
+
+      centers.push({
+        kind: centerMeta.kind,
+        typeLabel,
+        shortMark: centerMeta.shortMark,
+        lat,
+        lon,
+        pressureHpa,
+        directionDeg,
+        directionCondition,
+        speedKmh,
+        speedKnots,
+        speedDesc,
+        typhoonNumber,
+        typhoonNameJp,
+        areaLabel: describeSynopticCoordinateArea(lat, lon),
+      });
+    }
+  }
+
+  const fogPolygons: SurfaceChartFogPolygon[] = [];
+  const seaIcePoints: [number, number][] = [];
+  const icingPoints: [number, number][] = [];
+  const windPoints: SurfaceChartWindPoint[] = [];
+  const seaAreaAlerts: SurfaceChartSeaAreaAlert[] = [];
+  const seenSeaAlerts = new Set<string>();
+
+  for (const infosBlock of extractXmlFullTags(xmlText, 'MeteorologicalInfos')) {
+    if (extractXmlAttr(infosBlock.attrs, 'type') !== '悪天情報') continue;
+    for (const itemXml of extractXmlTagBlocks(infosBlock.body, 'Item')) {
+      const kindXml = extractXmlTagText(itemXml, 'Kind');
+      const kindName = extractXmlTagText(kindXml || itemXml, 'Name');
+      const windPartXml = extractXmlTagText(itemXml, 'WindPart');
+      const windDegRaw = extractXmlTagText(windPartXml, 'jmx_eb:WindDegree') || extractXmlTagText(windPartXml, 'WindDegree');
+      const windSpeedRaw = extractXmlTagText(windPartXml, 'jmx_eb:WindSpeed') || extractXmlTagText(windPartXml, 'WindSpeed');
+      const windDeg = windDegRaw ? Number.parseFloat(windDegRaw) : undefined;
+      const windSpeedKt = windSpeedRaw ? Number.parseFloat(windSpeedRaw) : undefined;
+
+      for (const areaBlock of extractXmlFullTags(itemXml, 'Area')) {
+        const areaName = extractXmlTagText(areaBlock.body, 'Name');
+        const areaCode = extractXmlTagText(areaBlock.body, 'Code');
+        const polys = extractXmlTagBlocks(areaBlock.body, 'jmx_eb:Polygon');
+        const coords = extractXmlTagBlocks(areaBlock.body, 'jmx_eb:Coordinate');
+
+        if (kindName.includes('霧')) {
+          for (const polyRaw of polys) {
+            const pts = parseChartPolygonCoords(polyRaw);
+            if (pts.length >= 3) {
+              fogPolygons.push({ label: 'FOG', points: pts });
+            }
+          }
+          if (areaCode || (areaName && !areaName.includes('霧域'))) {
+            const center = resolveMarineAreaCenter(areaCode, areaName);
+            if (center) {
+              pushUniqueSeaAlert(seaAreaAlerts, seenSeaAlerts, {
+                kind: 'fog',
+                badge: 'FOG',
+                areaCode: center.code,
+                areaName: center.name,
+                lat: center.lat,
+                lon: center.lon,
+              });
+            }
+          }
+        } else if (kindName.includes('海氷')) {
+          for (const coordRaw of coords) {
+            for (const pt of parseChartPolygonCoords(coordRaw)) {
+              seaIcePoints.push(pt);
+            }
+          }
+        } else if (kindName.includes('着氷')) {
+          let addedGrid = false;
+          for (const coordRaw of coords) {
+            for (const pt of parseChartPolygonCoords(coordRaw)) {
+              icingPoints.push(pt);
+              addedGrid = true;
+            }
+          }
+          if (!addedGrid && (areaCode || areaName)) {
+            const center = resolveMarineAreaCenter(areaCode, areaName);
+            if (center) {
+              pushUniqueSeaAlert(seaAreaAlerts, seenSeaAlerts, {
+                kind: 'icing',
+                badge: '着氷',
+                areaCode: center.code,
+                areaName: center.name,
+                lat: center.lat,
+                lon: center.lon,
+              });
+            }
+          }
+        } else if (kindName.includes('強風') || windPartXml) {
+          for (const coordRaw of coords) {
+            for (const [lat, lon] of parseChartPolygonCoords(coordRaw)) {
+              windPoints.push({
+                lat,
+                lon,
+                ...(windDeg !== undefined && Number.isFinite(windDeg) ? { windDeg } : {}),
+                ...(windSpeedKt !== undefined && Number.isFinite(windSpeedKt) ? { windSpeedKt } : {}),
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const defaultTitles: Record<SurfaceChartCode, string> = {
+    VZSA50: '地上実況図',
+    VZSA60: 'アジア太平洋地上実況図',
+    VZSF60: 'アジア太平洋海上悪天24時間予想図',
+    VZSF61: 'アジア太平洋海上悪天48時間予想図',
+  };
+  return {
+    code,
+    title: rawTitle || defaultTitles[code],
+    reportTime,
+    targetTime,
+    validTimeLabel:
+      formatIsoTargetToValidChartLabel(
+        targetTime || reportTime,
+        forecastHour > 0 ? '予想' : '実況'
+      ) || (forecastHour > 0 ? '最新予想図' : '最新解析実況'),
+    forecastHour,
+    isobars,
+    centers,
+    fronts,
+    ...(fogPolygons.length > 0 ? { fogPolygons } : {}),
+    ...(seaIcePoints.length > 0 ? { seaIcePoints } : {}),
+    ...(icingPoints.length > 0 ? { icingPoints } : {}),
+    ...(windPoints.length > 0 ? { windPoints } : {}),
+    ...(seaAreaAlerts.length > 0 ? { seaAreaAlerts } : {}),
+    xmlUrl,
+  };
+}
+
+const MARINE_WIND_KIND_PRIORITY: Record<
+  'typhoon' | 'storm' | 'gale' | 'near_gale',
+  { rank: number; badge: '[TW]' | '[SW]' | '[GW]' | '[W]' }
+> = {
+  typhoon: { rank: 4, badge: '[TW]' },
+  storm: { rank: 3, badge: '[SW]' },
+  gale: { rank: 2, badge: '[GW]' },
+  near_gale: { rank: 1, badge: '[W]' },
+};
+
+function classifyMarineWindKind(
+  name: string,
+  code: string
+): 'typhoon' | 'storm' | 'gale' | 'near_gale' | null {
+  const cleanCode = toHalfWidthAscii(code || '').trim();
+  if (name.includes('海上台風') || cleanCode === '23') return 'typhoon';
+  if (name.includes('海上暴風') || cleanCode === '22') return 'storm';
+  if (name.includes('海上強風') || cleanCode === '21') return 'gale';
+  if (name.includes('海上風') || cleanCode === '20') return 'near_gale';
+  return null;
+}
+
+/**
+ * Parse JMA VPZU54/VPZU55/VPZU52/VPZU53 (全般海上警報) XML for active analysis overlays:
+ * gale/storm/typhoon sectors & Becoming/forecast probability circles, fog polygons, and named sea alerts.
+ */
+export function parseMarineWarningXml(
+  xmlText: string,
+  xmlUrl?: string
+): MarineWarningOverlay | null {
+  if (!xmlText || !xmlText.includes('<Report')) return null;
+  const controlXml = extractXmlTagText(xmlText, 'Control');
+  const headXml = extractXmlTagText(xmlText, 'Head');
+  const bodyXml = extractXmlTagText(xmlText, 'Body');
+  const reportTime =
+    extractXmlTagText(headXml, 'ReportDateTime') ||
+    extractXmlTagText(controlXml, 'DateTime');
+  const targetTime = extractXmlTagText(headXml, 'TargetDateTime') || reportTime;
+
+  const bodyBlocks = extractXmlFullTags(bodyXml, 'MeteorologicalInfos').filter(
+    (b) => extractXmlAttr(b.attrs, 'type') === '全般海上警報'
+  );
+  const infoBlocks =
+    bodyBlocks.length > 0
+      ? bodyBlocks
+      : extractXmlFullTags(headXml, 'Information').filter(
+          (b) => extractXmlAttr(b.attrs, 'type') === '全般海上警報'
+        );
+
+  if (infoBlocks.length === 0) return null;
+
+  const windWarnings: MarineWindWarningItem[] = [];
+  const fogPolygons: SurfaceChartFogPolygon[] = [];
+  const seaAreaAlerts: SurfaceChartSeaAreaAlert[] = [];
+  const seenSeaAlerts = new Set<string>();
+  const seenWindKeys = new Set<string>();
+
+  for (const block of infoBlocks) {
+    for (const itemXml of extractXmlTagBlocks(block.body, 'Item')) {
+      const kindBlocks = extractXmlTagBlocks(itemXml, 'Kind');
+      let bestActiveWind: 'typhoon' | 'storm' | 'gale' | 'near_gale' | null = null;
+      let bestBecomingWind: 'typhoon' | 'storm' | 'gale' | 'near_gale' | null = null;
+      let hasFogKind = false;
+      let hasIcingKind = false;
+      let isForecastOnly = false;
+      let maxWindKt: number | undefined;
+
+      for (const kXml of kindBlocks) {
+        const kName = extractXmlTagText(kXml, 'Name');
+        const kCode = extractXmlTagText(kXml, 'Code');
+        const kCondition = extractXmlTagText(kXml, 'Condition');
+        if (kCondition.includes('発生予想')) {
+          isForecastOnly = true;
+        }
+        const windKind = classifyMarineWindKind(kName, kCode);
+        if (windKind) {
+          const propBlocks = extractXmlTagBlocks(kXml, 'Property');
+          const hasNonBecomingProp =
+            propBlocks.length === 0
+              ? !/<Becoming(?:\b|\/)/i.test(kXml)
+              : propBlocks.some((p) => !/<Becoming(?:\b|\/)/i.test(p));
+          if (!hasNonBecomingProp) {
+            if (
+              !bestBecomingWind ||
+              MARINE_WIND_KIND_PRIORITY[windKind].rank >
+                MARINE_WIND_KIND_PRIORITY[bestBecomingWind].rank
+            ) {
+              bestBecomingWind = windKind;
+            }
+          } else if (
+            !bestActiveWind ||
+            MARINE_WIND_KIND_PRIORITY[windKind].rank >
+              MARINE_WIND_KIND_PRIORITY[bestActiveWind].rank
+          ) {
+            bestActiveWind = windKind;
+          }
+          const speedSearchBlocks =
+            propBlocks.length > 0 && hasNonBecomingProp
+              ? propBlocks.filter((p) => !/<Becoming(?:\b|\/)/i.test(p))
+              : [kXml];
+          for (const sb of speedSearchBlocks) {
+            const windPartOnly = extractXmlTagText(sb, 'WindPart') || sb;
+            for (const wsBody of extractXmlFullTags(windPartOnly, 'jmx_eb:WindSpeed')) {
+              const unit = extractXmlAttr(wsBody.attrs, 'unit');
+              if (!unit || unit.includes('ノット') || unit.toLowerCase().includes('kt')) {
+                const spd = Number.parseFloat(decodeXmlEntities(wsBody.body).trim());
+                if (Number.isFinite(spd)) {
+                  maxWindKt = maxWindKt !== undefined ? Math.max(maxWindKt, spd) : spd;
+                }
+              }
+            }
+          }
+        } else if (kName.includes('濃霧') || kName.includes('霧') || kCode === '11') {
+          hasFogKind = true;
+        } else if (kName.includes('着氷') || kCode === '10') {
+          hasIcingKind = true;
+        }
+      }
+
+      const chosenWindKind = bestActiveWind || bestBecomingWind;
+      const isBecoming = !bestActiveWind && Boolean(bestBecomingWind);
+
+      if (chosenWindKind) {
+        const meta = MARINE_WIND_KIND_PRIORITY[chosenWindKind];
+        const areaTags = extractXmlFullTags(itemXml, 'Area');
+        const systemName =
+          (areaTags[0] ? extractXmlTagText(areaTags[0].body, 'Name') : '') ||
+          extractXmlTagText(kindBlocks[0] || '', 'Name');
+
+        const circles = extractXmlFullTags(itemXml, 'jmx_eb:Circle');
+        const probCircles = [
+          ...extractXmlFullTags(itemXml, 'ProbabilityCircle'),
+          ...extractXmlFullTags(itemXml, 'jmx_eb:ProbabilityCircle'),
+        ];
+
+        let analysisCircle: string | null = null;
+        for (const circle of circles) {
+          const basePoints = extractXmlFullTags(circle.body, 'jmx_eb:BasePoint');
+          const hasAnalysisPoint = basePoints.some((bp) => {
+            const t = extractXmlAttr(bp.attrs, 'type');
+            return t.includes('実況位置') || (!t.includes('24時間後') && !t.includes('２４時間後'));
+          });
+          if (hasAnalysisPoint) {
+            analysisCircle = circle.body;
+            break;
+          }
+        }
+
+        if (analysisCircle) {
+          const bpTags = extractXmlFullTags(analysisCircle, 'jmx_eb:BasePoint');
+          const analysisBp =
+            bpTags.find((bp) => extractXmlAttr(bp.attrs, 'type').includes('実況位置')) ||
+            bpTags[0];
+          const pts = analysisBp ? parseChartPolygonCoords(analysisBp.body) : [];
+          if (pts.length > 0) {
+            const [lat, lon] = pts[0];
+            const axes: MarineWindWarningAxis[] = [];
+            for (const axisXml of extractXmlTagBlocks(analysisCircle, 'jmx_eb:Axis')) {
+              const dirRaw = extractXmlTagText(axisXml, 'jmx_eb:Direction');
+              const radTags = extractXmlFullTags(axisXml, 'jmx_eb:Radius');
+              const nmTag =
+                radTags.find((r) => extractXmlAttr(r.attrs, 'unit').includes('海里')) ||
+                radTags[0];
+              const radiusNm = nmTag
+                ? Number.parseFloat(decodeXmlEntities(nmTag.body).trim())
+                : Number.NaN;
+              if (Number.isFinite(radiusNm) && radiusNm > 0) {
+                axes.push({ direction8: dirRaw.trim(), radiusNm });
+              }
+            }
+            const effectiveBecoming = isBecoming || (axes.length === 0 && !isForecastOnly);
+            const dedupKey = `${chosenWindKind}::${lat.toFixed(2)}::${lon.toFixed(2)}::${effectiveBecoming ? 'B' : 'A'}`;
+            if (!seenWindKeys.has(dedupKey)) {
+              seenWindKeys.add(dedupKey);
+              windWarnings.push({
+                kind: chosenWindKind,
+                badge: meta.badge,
+                name: systemName,
+                lat,
+                lon,
+                isForecastOnly: false,
+                isBecoming: effectiveBecoming,
+                axes: isBecoming ? [] : axes,
+                ...(maxWindKt !== undefined ? { maxWindKt } : {}),
+              });
+            }
+          }
+        } else if (probCircles.length > 0 || isForecastOnly) {
+          const pc = probCircles[0];
+          const bp = pc ? extractXmlFullTags(pc.body, 'jmx_eb:BasePoint')[0] : undefined;
+          const fallbackBp =
+            bp || extractXmlFullTags(itemXml, 'jmx_eb:BasePoint')[0];
+          const pts = fallbackBp ? parseChartPolygonCoords(fallbackBp.body) : [];
+          if (pts.length > 0) {
+            const [lat, lon] = pts[0];
+            let forecastProbRadiusNm: number | undefined;
+            if (pc) {
+              const radTags = extractXmlFullTags(pc.body, 'jmx_eb:Radius');
+              const nmTag =
+                radTags.find((r) => extractXmlAttr(r.attrs, 'unit').includes('海里')) ||
+                radTags[0];
+              const parsedR = nmTag
+                ? Number.parseFloat(decodeXmlEntities(nmTag.body).trim())
+                : Number.NaN;
+              if (Number.isFinite(parsedR) && parsedR > 0) {
+                forecastProbRadiusNm = parsedR;
+              }
+            }
+            const dedupKey = `${chosenWindKind}::${lat.toFixed(2)}::${lon.toFixed(2)}::F`;
+            if (!seenWindKeys.has(dedupKey)) {
+              seenWindKeys.add(dedupKey);
+              windWarnings.push({
+                kind: chosenWindKind,
+                badge: meta.badge,
+                name: systemName || '低気圧',
+                lat,
+                lon,
+                isForecastOnly: true,
+                isBecoming: false,
+                ...(forecastProbRadiusNm !== undefined ? { forecastProbRadiusNm } : {}),
+                axes: [],
+                ...(maxWindKt !== undefined ? { maxWindKt } : {}),
+              });
+            }
+          }
+        } else {
+          for (const areaBlock of areaTags) {
+            const areaCode = extractXmlTagText(areaBlock.body, 'Code');
+            const areaName = extractXmlTagText(areaBlock.body, 'Name');
+            const center = resolveMarineAreaCenter(areaCode, areaName);
+            if (center) {
+              pushUniqueSeaAlert(seaAreaAlerts, seenSeaAlerts, {
+                kind: chosenWindKind,
+                badge: meta.badge,
+                areaCode: center.code,
+                areaName: center.name,
+                lat: center.lat,
+                lon: center.lon,
+              });
+            }
+          }
+        }
+      } else if (hasFogKind || hasIcingKind) {
+        const alertKind: MarineWarningKind = hasFogKind ? 'fog' : 'icing';
+        const alertBadge = hasFogKind ? 'FOG [W]' : '着氷 [W]';
+        for (const areaBlock of extractXmlFullTags(itemXml, 'Area')) {
+          if (hasFogKind) {
+            for (const polyRaw of extractXmlTagBlocks(areaBlock.body, 'jmx_eb:Polygon')) {
+              const pts = parseChartPolygonCoords(polyRaw);
+              if (pts.length >= 3) {
+                fogPolygons.push({ label: 'FOG [W]', points: pts });
+              }
+            }
+          }
+          const areaCode = extractXmlTagText(areaBlock.body, 'Code');
+          const areaName = extractXmlTagText(areaBlock.body, 'Name');
+          if (areaCode || (areaName && !areaName.includes('濃霧') && !areaName.includes('霧'))) {
+            const center = resolveMarineAreaCenter(areaCode, areaName);
+            if (center) {
+              pushUniqueSeaAlert(seaAreaAlerts, seenSeaAlerts, {
+                kind: alertKind,
+                badge: alertBadge,
+                areaCode: center.code,
+                areaName: center.name,
+                lat: center.lat,
+                lon: center.lon,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    reportTime,
+    targetTime,
+    windWarnings,
+    fogPolygons,
+    seaAreaAlerts,
+    xmlUrl,
+  };
+}
+
+/**
+ * Finds the best matching `MarineWarningOverlay` (VPZU54 preferred over VPZU52)
+ * for a given surface chart timestamp within `toleranceMs`.
+ */
+export function matchMarineWarningForTimestamp(
+  targetMs: number,
+  overlays: ReadonlyArray<MarineWarningOverlay>,
+  toleranceMs: number = 2.5 * 3600 * 1000
+): MarineWarningOverlay | null {
+  if (!Number.isFinite(targetMs) || !overlays || overlays.length === 0) return null;
+  let best: MarineWarningOverlay | null = null;
+  let bestScore = Infinity;
+
+  for (const ov of overlays) {
+    if (!ov) continue;
+    const ovMs = Date.parse(ov.targetTime || ov.reportTime || '');
+    if (Number.isNaN(ovMs)) continue;
+    const diff = Math.abs(ovMs - targetMs);
+    if (diff > toleranceMs) continue;
+    const isVpzu54 = ov.xmlUrl?.includes('VPZU54') ? 0 : 1;
+    const score = diff + isVpzu54 * 10 * 60 * 1000;
+    if (score < bestScore) {
+      bestScore = score;
+      best = ov;
+    }
+  }
+  return best;
+}
+
+/**
+ * Builds chronologically ordered (oldest -> newest) past-24h Asia-Pacific surface analysis
+ * frames strictly prior to `latestChart`, each paired with its contemporaneous `VPZU54/52`.
+ */
+export function buildSurfaceChartHistoryFrames(
+  latestChart: SurfaceWeatherChartData | null | undefined,
+  pastCharts: ReadonlyArray<SurfaceWeatherChartData>,
+  overlays: ReadonlyArray<MarineWarningOverlay>
+): SurfaceChartHistoryFrame[] {
+  if (!latestChart) return [];
+  const latestMs = Date.parse(latestChart.targetTime || latestChart.reportTime || '');
+  if (Number.isNaN(latestMs)) return [];
+
+  const minMs = latestMs - 24 * 3600 * 1000 - 30 * 60 * 1000;
+  const maxMs = latestMs - 3 * 3600 * 1000;
+
+  // Deduplicate into 3-hour synoptic slots, retaining the fullest/latest chart per slot
+  const bySlot = new Map<number, { chart: SurfaceWeatherChartData; tMs: number }>();
+  for (const ch of pastCharts) {
+    if (!ch) continue;
+    const tMs = Date.parse(ch.targetTime || ch.reportTime || '');
+    if (Number.isNaN(tMs) || tMs < minMs || tMs > maxMs) continue;
+    const slot = Math.round(tMs / (3 * 3600 * 1000));
+    const prev = bySlot.get(slot);
+    if (
+      !prev ||
+      ch.isobars.length > prev.chart.isobars.length ||
+      Date.parse(ch.reportTime || '') > Date.parse(prev.chart.reportTime || '')
+    ) {
+      bySlot.set(slot, { chart: ch, tMs });
+    }
+  }
+
+  return Array.from(bySlot.values())
+    .sort((a, b) => a.tMs - b.tMs)
+    .slice(-4)
+    .map(({ chart, tMs }) => ({
+      chart,
+      marineWarning: matchMarineWarningForTimestamp(tMs, overlays),
+      offsetHours: Math.round((tMs - latestMs) / 3600000),
+    }));
+}
+
+/** Initial surface chart playback step when entering the scene or resetting pass 0. */
+export function getInitialSurfaceChartStep(historyCount: number = 0): {
+  pass: 0 | 1;
+  mode: SurfaceChartMode;
+  historyIndex: number | null;
+} {
+  return {
+    pass: 0,
+    mode: 'analysis',
+    historyIndex: historyCount > 0 ? 0 : null,
+  };
+}
+
+/**
+ * Advance Asia-Pacific surface chart playback across 2 passes:
+ * - Pass 0 (1周目): standard chart without severe-weather / marine-warning overlays
+ * - Pass 1 (2周目): chart with ASAS_COLOR severe-weather & marine-warning overlays
+ * Each pass steps: past history frames (`0..historyCount-1`) -> `analysis` -> `forecast24` -> `forecast48`
+ * (skipping missing history/forecast steps cleanly).
+ */
+export function getNextSurfaceChartStep(params: {
+  pass: 0 | 1;
+  mode: SurfaceChartMode;
+  hasForecast24: boolean;
+  hasForecast48: boolean;
+  historyCount?: number;
+  historyIndex?: number | null;
+}): {
+  pass: 0 | 1;
+  mode: SurfaceChartMode;
+  historyIndex: number | null;
+  sequenceDone: boolean;
+} {
+  const {
+    pass,
+    mode,
+    hasForecast24,
+    hasForecast48,
+    historyCount = 0,
+    historyIndex = null,
+  } = params;
+
+  if (historyIndex !== null && historyCount > 0) {
+    if (historyIndex + 1 < historyCount) {
+      return {
+        pass,
+        mode: 'analysis',
+        historyIndex: historyIndex + 1,
+        sequenceDone: false,
+      };
+    }
+    return {
+      pass,
+      mode: 'analysis',
+      historyIndex: null,
+      sequenceDone: false,
+    };
+  }
+
+  if (mode === 'analysis') {
+    if (hasForecast24) {
+      return { pass, mode: 'forecast24', historyIndex: null, sequenceDone: false };
+    }
+    if (hasForecast48) {
+      return { pass, mode: 'forecast48', historyIndex: null, sequenceDone: false };
+    }
+  } else if (mode === 'forecast24' && hasForecast48) {
+    return { pass, mode: 'forecast48', historyIndex: null, sequenceDone: false };
+  }
+
+  if (pass === 0) {
+    return {
+      pass: 1,
+      mode: 'analysis',
+      historyIndex: historyCount > 0 ? 0 : null,
+      sequenceDone: false,
+    };
+  }
+  return { pass: 1, mode, historyIndex: null, sequenceDone: true };
+}

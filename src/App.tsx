@@ -45,6 +45,10 @@ import {
   fetchRecentEarthquakes,
 } from './services/jmaClient';
 import {
+  ensureMunicipalityLookupLoaded,
+  isMunicipalityLookupLoaded,
+} from './utils/municipalityLookup';
+import {
   AmedasMetric,
   EarthquakeReport,
   EewDisplayMode,
@@ -56,6 +60,7 @@ import {
   MonitorDataBundle,
   RegionId,
   SceneId,
+  SurfaceChartMode,
   TsunamiForecastReport,
   TsunamiStationItem,
   TyphoonReport,
@@ -64,9 +69,11 @@ import {
 import {
   DEFAULT_NORMAL_LOOP_SCENES,
   getActiveSevereWarningDivisions,
+  getInitialSurfaceChartStep,
   getNextAmedasMetric,
   getNextPatrolStep,
   getNextSceneId,
+  getNextSurfaceChartStep,
   getSeismicScaleStyle,
   mergeProgressiveEarthquakeReports,
   REGION_CONFIGS,
@@ -108,10 +115,12 @@ import {
   EarthquakeTrackerState,
   evaluateEarthquakeLoopCompletion,
   evaluateIncomingEarthquakeUpdate,
+  findMatchingIntensityEarthquakeForEewForecast,
   isEarthquakeAwaitingDetail,
   resolveEffectiveEnabledScenes,
   resolveEffectiveScene,
   resolveInterruptKindOnEew,
+  resolveInterruptKindOnEewForecastCleared,
   resolveInterruptKindOnTsunami,
   resolveInterruptKindOnTsunamiChange,
   shouldBlockNormalPatrolAdvance,
@@ -132,6 +141,11 @@ const INITIAL_BUNDLE: MonitorDataBundle = {
   tsunamiStations: INITIAL_TSUNAMI_STATIONS,
   tsunamiForecast: INITIAL_TSUNAMI_FORECAST,
   forecasts: INITIAL_FORECASTS,
+  surfaceChartApac: null,
+  surfaceChartApac24h: null,
+  surfaceChartApac48h: null,
+  surfaceChartApacHistory: [],
+  marineWarning: null,
   earthquakes: INITIAL_EARTHQUAKES,
   lastXmlFetchTime: '',
   dataSourceStatus: {
@@ -990,6 +1004,14 @@ export default function App() {
   const [amedasMetric, setAmedasMetric] = useState<AmedasMetric>('temp');
   const [forecastViewMode, setForecastViewMode] =
     useState<ForecastViewMode>('today_3h');
+  const [surfaceChartMode, setSurfaceChartMode] =
+    useState<SurfaceChartMode>('analysis');
+  const [surfaceChartPass, setSurfaceChartPass] = useState<0 | 1>(0);
+  const [surfaceChartHistoryIndex, setSurfaceChartHistoryIndex] = useState<
+    number | null
+  >(null);
+  const [isSurfaceChartSequenceDone, setIsSurfaceChartSequenceDone] =
+    useState<boolean>(false);
   const [forecast3hIndex, setForecast3hIndex] = useState<number>(() => {
     const h = new Date().getHours();
     return Math.min(7, Math.max(0, Math.floor(h / 3)));
@@ -1118,31 +1140,105 @@ export default function App() {
   const prevTsunamiSeverityRef = useRef<'none' | 'forecast' | 'warning_or_above'>(
     'none'
   );
+  const suppressedForecastEewIdsRef = useRef<Map<string, number>>(new Map());
+  const eqHistoryListRef = useRef<EarthquakeReport[]>(INITIAL_EARTHQUAKES);
+  const apacHistoryCountRef = useRef<number>(0);
+  apacHistoryCountRef.current = data.surfaceChartApacHistory?.length ?? 0;
+
+  const suppressAndClearEewForecast = useCallback(
+    (
+      eew: EewReport,
+      matchedQuake: EarthquakeReport,
+      nowMs: number = Date.now(),
+      skipSelection: boolean = false
+    ) => {
+      for (const [id, ts] of suppressedForecastEewIdsRef.current.entries()) {
+        if (nowMs - ts > 15 * 60 * 1000) {
+          suppressedForecastEewIdsRef.current.delete(id);
+        }
+      }
+      if (eew.eventId) {
+        suppressedForecastEewIdsRef.current.set(eew.eventId, nowMs);
+      }
+      eewDemoTimerRef.current.forEach((t) => clearTimeout(t));
+      eewDemoTimerRef.current = [];
+      if (activeEewRef.current?.eventId === eew.eventId || !eew.eventId) {
+        activeEewRef.current = null;
+        setActiveEew(null);
+      }
+      if (!skipSelection) {
+        if (pinnedEarthquakeIdRef.current) {
+          setIsLoopPaused(false);
+        }
+        updatePinnedEarthquakeId(null);
+        setSelectedEarthquake(matchedQuake);
+        if (!isEarthquakeAwaitingDetail(matchedQuake)) {
+          eqLockUntilConfirmedRef.current = false;
+          if (eqConfirmedHoldTimerRef.current) {
+            clearTimeout(eqConfirmedHoldTimerRef.current);
+            eqConfirmedHoldTimerRef.current = null;
+          }
+        }
+        setInterruptKind((prev) =>
+          tsunamiSeverityRef.current === 'warning_or_above'
+            ? 'tsunami'
+            : resolveInterruptKindOnEewForecastCleared(prev, matchedQuake, nowMs)
+        );
+        setFlipSessionNonce((n) => n + 1);
+      }
+    },
+    [updatePinnedEarthquakeId]
+  );
 
   // Unified handler for incoming EEW (緊急地震速報 予報・警報・発表検出)
-  const handleIncomingEew = useCallback((eew: EewReport) => {
-    setActiveEew((prev) => {
-      if (shouldReplaceEew(prev, eew)) {
-        return eew;
+  const handleIncomingEew = useCallback(
+    (eew: EewReport) => {
+      const nowMs = Date.now();
+      for (const [id, ts] of suppressedForecastEewIdsRef.current.entries()) {
+        if (nowMs - ts > 15 * 60 * 1000) {
+          suppressedForecastEewIdsRef.current.delete(id);
+        }
       }
-      return prev;
-    });
-    if (!eew.isCancelled) {
-      eqLockUntilConfirmedRef.current = true;
-      eqUnconfirmedTimedOutRef.current = false;
-      if (eqConfirmedHoldTimerRef.current) {
-        clearTimeout(eqConfirmedHoldTimerRef.current);
-        eqConfirmedHoldTimerRef.current = null;
+      if (eew.eventId && suppressedForecastEewIdsRef.current.has(eew.eventId)) {
+        if (!isEewWarning(eew)) {
+          return;
+        }
+        suppressedForecastEewIdsRef.current.delete(eew.eventId);
       }
-      setEewDisplayMode('intensity');
-      if (tsunamiSeverityRef.current === 'warning_or_above') {
-        setActiveScene('tsunami');
+      const matchedIntensityQuake =
+        findMatchingIntensityEarthquakeForEewForecast(
+          eew,
+          eqHistoryListRef.current
+        );
+      if (matchedIntensityQuake) {
+        suppressAndClearEewForecast(eew, matchedIntensityQuake, nowMs, false);
+        return;
       }
-      setInterruptKind((prev) =>
-        resolveInterruptKindOnEew(prev, tsunamiSeverityRef.current)
-      );
-    }
-  }, []);
+
+      setActiveEew((prev) => {
+        if (shouldReplaceEew(prev, eew)) {
+          return eew;
+        }
+        return prev;
+      });
+      if (!eew.isCancelled) {
+        eqLockUntilConfirmedRef.current = true;
+        eqUnconfirmedTimedOutRef.current = false;
+        if (eqConfirmedHoldTimerRef.current) {
+          clearTimeout(eqConfirmedHoldTimerRef.current);
+          eqConfirmedHoldTimerRef.current = null;
+        }
+        setEewDisplayMode('intensity');
+        if (tsunamiSeverityRef.current === 'warning_or_above') {
+          setActiveScene('tsunami');
+        }
+        setInterruptKind((prev) =>
+          resolveInterruptKindOnEew(prev, tsunamiSeverityRef.current)
+        );
+      }
+    },
+    [suppressAndClearEewForecast]
+  );
 
   // Unified handler for earthquake list updates (JMA bosai + P2P 551):
   // Immediately interrupts onto 'earthquake' when a newly arrived quake (with or without EEW)
@@ -1156,6 +1252,12 @@ export default function App() {
       const merged = mergeProgressiveEarthquakeReports(rawList);
       if (merged.length === 0) return;
 
+      eqHistoryListRef.current = merged;
+      const nowMs = Date.now();
+      const currentActiveEew = activeEewRef.current;
+      const matchedForActiveForecast =
+        findMatchingIntensityEarthquakeForEewForecast(currentActiveEew, merged);
+
       const isLive = options?.isLive ?? true;
       const isRealtimePush = options?.isRealtimePush ?? false;
       const isTsunamiWarningActive =
@@ -1164,7 +1266,7 @@ export default function App() {
       const action = evaluateIncomingEarthquakeUpdate({
         mergedList: merged,
         tracker: eqTrackerRef.current,
-        nowMs: Date.now(),
+        nowMs,
         isLive,
         isRealtimePush,
         isTsunamiWarningActive,
@@ -1174,10 +1276,27 @@ export default function App() {
       eqTrackerRef.current = action.nextTracker;
 
       if (action.type === 'noop') {
+        if (matchedForActiveForecast && currentActiveEew) {
+          suppressAndClearEewForecast(
+            currentActiveEew,
+            matchedForActiveForecast,
+            nowMs,
+            false
+          );
+        }
         return;
       }
 
       if (action.type === 'silent_sync') {
+        if (matchedForActiveForecast && currentActiveEew) {
+          suppressAndClearEewForecast(
+            currentActiveEew,
+            matchedForActiveForecast,
+            nowMs,
+            false
+          );
+          return;
+        }
         setSelectedEarthquake((prev) => {
           if (prev.isTest) return prev;
           // ユーザーが手動で特定の地震を選択・固定している場合は勝手に最新に書き換えない
@@ -1196,6 +1315,15 @@ export default function App() {
           return action.selectedEarthquake;
         });
         return;
+      }
+
+      if (matchedForActiveForecast && currentActiveEew) {
+        suppressAndClearEewForecast(
+          currentActiveEew,
+          matchedForActiveForecast,
+          nowMs,
+          true
+        );
       }
 
       // If patrol was paused only because a historical quake was pinned, clear pin & resume
@@ -1251,8 +1379,20 @@ export default function App() {
         }
       }
     },
-    [updatePinnedEarthquakeId]
+    [suppressAndClearEewForecast, updatePinnedEarthquakeId]
   );
+
+  // Reactive safety net: clear an active EEW Forecast (予報) once observed seismic intensity appears
+  useEffect(() => {
+    eqHistoryListRef.current = data.earthquakes;
+    if (!activeEew) return;
+    const matched = findMatchingIntensityEarthquakeForEewForecast(
+      activeEew,
+      data.earthquakes
+    );
+    if (!matched) return;
+    suppressAndClearEewForecast(activeEew, matched, Date.now(), false);
+  }, [activeEew, data.earthquakes, suppressAndClearEewForecast]);
 
   // Automatically clear expired EEW state so non-EEW/confirmed earthquakes or normal loop can resume cleanly
   useEffect(() => {
@@ -1400,6 +1540,7 @@ export default function App() {
   }, [applyEarthquakeListUpdate, handleIncomingEew]);
 
   useEffect(() => {
+    void ensureMunicipalityLookupLoaded();
     refreshJmaData();
     const pollTimer = setInterval(refreshJmaData, 60000);
     const fastEqTimer = setInterval(pollFastEarthquakeAndEew, 10000);
@@ -1465,35 +1606,46 @@ export default function App() {
             }
             // 4. Earthquake report (震度速報 / 震源に関する情報 / 各地の震度に関する情報 code: 551)
             else if (payload.code === 551) {
-              const report = convertP2PQuakeItem(payload);
-              if (report) {
-                setData((prev) => {
-                  const basePrev = prev.dataSourceStatus.p2pQuakeLive
-                    ? prev.earthquakes
-                    : [];
-                  const nextList = mergeProgressiveEarthquakeReports([
-                    report,
-                    ...basePrev,
-                  ]).slice(0, 20);
-                  queueMicrotask(() =>
-                    applyEarthquakeListUpdate(nextList, {
-                      isLive: true,
-                      isRealtimePush: true,
-                    })
-                  );
-                  return {
-                    ...prev,
-                    earthquakes: nextList,
-                    dataSourceStatus: {
-                      ...prev.dataSourceStatus,
-                      p2pQuakeLive: true,
-                    },
-                  };
-                });
-                // Also fetch JMA bosai detail JSON shortly after for exact station lat/lon coordinates
-                setTimeout(() => {
-                  if (!unmounted) pollFastEarthquakeAndEew();
-                }, 1500);
+              const processP2pQuakePayload = () => {
+                if (unmounted) return;
+                const report = convertP2PQuakeItem(payload);
+                if (report) {
+                  setData((prev) => {
+                    const basePrev = prev.dataSourceStatus.p2pQuakeLive
+                      ? prev.earthquakes
+                      : [];
+                    const nextList = mergeProgressiveEarthquakeReports([
+                      report,
+                      ...basePrev,
+                    ]).slice(0, 20);
+                    queueMicrotask(() =>
+                      applyEarthquakeListUpdate(nextList, {
+                        isLive: true,
+                        isRealtimePush: true,
+                      })
+                    );
+                    return {
+                      ...prev,
+                      earthquakes: nextList,
+                      dataSourceStatus: {
+                        ...prev.dataSourceStatus,
+                        p2pQuakeLive: true,
+                      },
+                    };
+                  });
+                  // Also fetch JMA bosai detail JSON shortly after for exact station lat/lon coordinates
+                  setTimeout(() => {
+                    if (!unmounted) pollFastEarthquakeAndEew();
+                  }, 1500);
+                }
+              };
+              if (isMunicipalityLookupLoaded()) {
+                processP2pQuakePayload();
+              } else {
+                void ensureMunicipalityLookupLoaded().then(
+                  processP2pQuakePayload,
+                  processP2pQuakePayload
+                );
               }
             }
           } catch {
@@ -1753,6 +1905,15 @@ export default function App() {
         setForecastViewMode('today_3h');
         setForecast3hIndex(0);
       }
+      if (nextScene === 'apac_analysis') {
+        const initialStep = getInitialSurfaceChartStep(
+          apacHistoryCountRef.current
+        );
+        setSurfaceChartMode(initialStep.mode);
+        setSurfaceChartPass(initialStep.pass);
+        setSurfaceChartHistoryIndex(initialStep.historyIndex);
+        setIsSurfaceChartSequenceDone(false);
+      }
       if (nextScene === 'typhoon') {
         const totalTyphoons = data.typhoons.length;
         setTyphoonPatrolStep(totalTyphoons <= 1 ? 1 : 0);
@@ -1824,6 +1985,15 @@ export default function App() {
         setForecastViewMode('today_3h');
         setForecast3hIndex(0);
       }
+      if (sceneId === 'apac_analysis') {
+        const initialStep = getInitialSurfaceChartStep(
+          apacHistoryCountRef.current
+        );
+        setSurfaceChartMode(initialStep.mode);
+        setSurfaceChartPass(initialStep.pass);
+        setSurfaceChartHistoryIndex(initialStep.historyIndex);
+        setIsSurfaceChartSequenceDone(false);
+      }
       if (sceneId === 'typhoon') {
         setSelectedTyphoon(typhoonsRef.current[0] || null);
       }
@@ -1842,6 +2012,25 @@ export default function App() {
       setForecast3hIndex(0);
     }
   }, []);
+
+  const handleChangeSurfaceChartMode = useCallback((mode: SurfaceChartMode) => {
+    setSurfaceChartMode(mode);
+    setSurfaceChartHistoryIndex(null);
+    setIsSurfaceChartSequenceDone(false);
+  }, []);
+
+  const handleChangeSurfaceChartPass = useCallback((pass: 0 | 1) => {
+    setSurfaceChartPass(pass);
+    setIsSurfaceChartSequenceDone(false);
+  }, []);
+
+  const handleChangeSurfaceChartHistoryIndex = useCallback(
+    (idx: number | null) => {
+      setSurfaceChartHistoryIndex(idx);
+      setIsSurfaceChartSequenceDone(false);
+    },
+    []
+  );
 
   const clearDemoTsunamiIfActive = useCallback(() => {
     if (isTsunamiDemoRef.current) {
@@ -2247,7 +2436,9 @@ export default function App() {
   // The right detail panel is hidden for 'forecast' (全国天気予報) and 'radar' (雨雲レーダー) scenes,
   // sliding smoothly out to the right.
   const isRightPanelHidden =
-    effectiveScene === 'forecast' || effectiveScene === 'radar';
+    effectiveScene === 'forecast' ||
+    effectiveScene === 'radar' ||
+    effectiveScene === 'apac_analysis';
 
   // Automated sequential playback for the forecast scene:
   // 1. In 'today_3h': Step through 3-hourly slots from 03時 up to 24時 (index 7).
@@ -2287,6 +2478,76 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [effectiveScene, forecastViewMode, isLoopPaused]);
+
+  const apacHistoryCount = data.surfaceChartApacHistory?.length ?? 0;
+  const surfaceChartBasePhaseMs = Math.max(
+    4500,
+    Math.round((Math.max(12, loopIntervalSec) * 1000) / 3)
+  );
+  const surfaceChartPhaseMs =
+    surfaceChartMode === 'analysis' && surfaceChartHistoryIndex !== null
+      ? 2200
+      : surfaceChartBasePhaseMs;
+  const hasApac24hChart = Boolean(data.surfaceChartApac24h);
+  const hasApac48hChart = Boolean(data.surfaceChartApac48h);
+
+  // 2-Pass sequential playback inside apac_analysis (like Radar Pass 0 / Pass 1):
+  // Pass 0 (1周目): 過去24h(-24h..-6h) -> 最新実況 -> 24時間予想 -> 48時間予想 (標準天気図・悪天情報なし)
+  // Pass 1 (2周目): 過去24h(-24h..-6h) -> 最新実況 -> 24時間予想 -> 48時間予想 (悪天情報・全般海上警報重畳)
+  useEffect(() => {
+    if (effectiveScene !== 'apac_analysis') {
+      setSurfaceChartMode('analysis');
+      setSurfaceChartPass(0);
+      setSurfaceChartHistoryIndex(null);
+      setIsSurfaceChartSequenceDone(false);
+      return;
+    }
+    if (
+      surfaceChartHistoryIndex !== null &&
+      surfaceChartHistoryIndex >= apacHistoryCount
+    ) {
+      setSurfaceChartHistoryIndex(null);
+    }
+    if (isLoopPaused || interruptKind !== 'none') return;
+    if (isSurfaceChartSequenceDone) return;
+
+    const timer = setTimeout(() => {
+      const next = getNextSurfaceChartStep({
+        pass: surfaceChartPass,
+        mode: surfaceChartMode,
+        hasForecast24: hasApac24hChart,
+        hasForecast48: hasApac48hChart,
+        historyCount: apacHistoryCount,
+        historyIndex: surfaceChartHistoryIndex,
+      });
+      if (next.pass !== surfaceChartPass) {
+        setSurfaceChartPass(next.pass);
+      }
+      if (next.mode !== surfaceChartMode) {
+        setSurfaceChartMode(next.mode);
+      }
+      if (next.historyIndex !== surfaceChartHistoryIndex) {
+        setSurfaceChartHistoryIndex(next.historyIndex);
+      }
+      if (next.sequenceDone) {
+        setIsSurfaceChartSequenceDone(true);
+      }
+    }, surfaceChartPhaseMs);
+
+    return () => clearTimeout(timer);
+  }, [
+    effectiveScene,
+    isLoopPaused,
+    interruptKind,
+    surfaceChartMode,
+    surfaceChartPass,
+    surfaceChartHistoryIndex,
+    apacHistoryCount,
+    isSurfaceChartSequenceDone,
+    hasApac24hChart,
+    hasApac48hChart,
+    surfaceChartPhaseMs,
+  ]);
 
   // 長周期地震動の表示モード制御:
   // 長周期地震動が実際に予測されているときだけ切り替え・表示を許可し、それ以外は常に 'intensity' に保つ
@@ -2360,6 +2621,39 @@ export default function App() {
       }
       return `全国の天気　明後日 ${dayAfterLabel}`;
     }
+    if (effectiveScene === 'apac_analysis') {
+      const severeTag = surfaceChartPass === 1 ? '［悪天］' : '';
+      if (surfaceChartMode === 'forecast48') {
+        const chart48 =
+          data.surfaceChartApac48h ||
+          data.surfaceChartApac24h ||
+          data.surfaceChartApac;
+        return chart48?.validTimeLabel
+          ? `アジア太平洋48時間予想図${severeTag}（${chart48.validTimeLabel}）`
+          : `アジア太平洋48時間予想図${severeTag}`;
+      }
+      if (surfaceChartMode === 'forecast24') {
+        const chart24 = data.surfaceChartApac24h || data.surfaceChartApac;
+        return chart24?.validTimeLabel
+          ? `アジア太平洋24時間予想図${severeTag}（${chart24.validTimeLabel}）`
+          : `アジア太平洋24時間予想図${severeTag}`;
+      }
+      if (surfaceChartHistoryIndex !== null) {
+        const frame = data.surfaceChartApacHistory?.[surfaceChartHistoryIndex];
+        if (frame) {
+          const offsetTag =
+            typeof frame.offsetHours === 'number' && frame.offsetHours < 0
+              ? `（${frame.offsetHours}h）`
+              : '';
+          return frame.chart.validTimeLabel
+            ? `アジア太平洋過去実況図${offsetTag}${severeTag}（${frame.chart.validTimeLabel}）`
+            : `アジア太平洋過去実況図${offsetTag}${severeTag}`;
+        }
+      }
+      return data.surfaceChartApac?.validTimeLabel
+        ? `アジア太平洋実況図${severeTag}（${data.surfaceChartApac.validTimeLabel}）`
+        : `${sceneMeta.title}${severeTag}`;
+    }
     if (effectiveScene === 'typhoon') {
       if (data.typhoons.length === 0) {
         return sceneMeta.title;
@@ -2386,6 +2680,13 @@ export default function App() {
     typhoonPatrolStep,
     selectedTyphoon,
     data.typhoons.length,
+    surfaceChartMode,
+    surfaceChartPass,
+    surfaceChartHistoryIndex,
+    data.surfaceChartApac?.validTimeLabel,
+    data.surfaceChartApac24h?.validTimeLabel,
+    data.surfaceChartApac48h?.validTimeLabel,
+    data.surfaceChartApacHistory,
     sceneMeta.title,
     activeEew,
     eewDisplayMode,
@@ -2638,6 +2939,7 @@ export default function App() {
   const isTickerDriverScene =
     !(flipFeed && flipFeed.cards.length > 0) &&
     (effectiveScene === 'radar' ||
+      effectiveScene === 'apac_analysis' ||
       (effectiveScene === 'warnings' && !isFinalWarningNational));
 
   const [flipRoundsState, setFlipRoundsState] = useState<{
@@ -2707,6 +3009,13 @@ export default function App() {
       return;
     }
 
+    if (effectiveScene === 'apac_analysis') {
+      if (isTickerDone && isSurfaceChartSequenceDone) {
+        advanceSceneRef.current();
+      }
+      return;
+    }
+
     if (effectiveScene === 'amedas') {
       if (activeFlipCompletedRounds >= 1) {
         advanceSceneRef.current();
@@ -2736,8 +3045,10 @@ export default function App() {
     }
   }, [
     effectiveScene,
+    isSurfaceChartSequenceDone,
     amedasMetric,
     activeFlipCompletedRounds,
+    flipFeed?.cards.length,
     isLoopPaused,
     interruptKind,
     completedTickerSessionKey,
@@ -3011,6 +3322,14 @@ export default function App() {
               onChangeForecastViewMode={handleChangeForecastViewMode}
               forecast3hIndex={forecast3hIndex}
               onChangeForecast3hIndex={setForecast3hIndex}
+              surfaceChartMode={surfaceChartMode}
+              onChangeSurfaceChartMode={handleChangeSurfaceChartMode}
+              surfaceChartPass={surfaceChartPass}
+              onChangeSurfaceChartPass={handleChangeSurfaceChartPass}
+              surfaceChartHistoryIndex={surfaceChartHistoryIndex}
+              onChangeSurfaceChartHistoryIndex={
+                handleChangeSurfaceChartHistoryIndex
+              }
               onViewportChange={setMapViewport}
               interruptKind={interruptKind}
               isLoopPaused={isLoopPaused}
@@ -3303,6 +3622,14 @@ export default function App() {
                 onChangeForecastViewMode={handleChangeForecastViewMode}
                 forecast3hIndex={forecast3hIndex}
                 onChangeForecast3hIndex={setForecast3hIndex}
+                surfaceChartMode={surfaceChartMode}
+                onChangeSurfaceChartMode={handleChangeSurfaceChartMode}
+                surfaceChartPass={surfaceChartPass}
+                onChangeSurfaceChartPass={handleChangeSurfaceChartPass}
+                surfaceChartHistoryIndex={surfaceChartHistoryIndex}
+                onChangeSurfaceChartHistoryIndex={
+                  handleChangeSurfaceChartHistoryIndex
+                }
                 onViewportChange={setMapViewport}
                 interruptKind={interruptKind}
                 isLoopPaused={isLoopPaused}
